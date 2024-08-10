@@ -65,9 +65,43 @@ struct ChatGptChoice {
     message: ChatGptMessage,
 }
 
+
 #[derive(Deserialize, Clone)]
 struct AudioConfig {
     recording_duration: f32,
+    noise_gate_threshold: f32,
+    noise_gate_hold_time: f32,
+}
+
+struct NoiseGate {
+    threshold: f32,
+    hold_time: f32,
+    last_active: Instant,
+    is_active: bool,
+}
+
+impl NoiseGate {
+    fn new(threshold: f32, hold_time: f32) -> Self {
+        NoiseGate {
+            threshold,
+            hold_time,
+            last_active: Instant::now(),
+            is_active: false,
+        }
+    }
+
+    fn process(&mut self, samples: &[f32]) -> bool {
+        let max_amplitude = samples.iter().map(|&s| s.abs()).fold(0.0f32, f32::max);
+        
+        if max_amplitude > self.threshold {
+            self.last_active = Instant::now();
+            self.is_active = true;
+        } else if self.is_active && self.last_active.elapsed().as_secs_f32() > self.hold_time {
+            self.is_active = false;
+        }
+
+        self.is_active
+    }
 }
 
 async fn ask_chatgpt(prompt: &str, config: &OpenAiConfig) -> Result<String, Box<dyn Error>> {
@@ -242,11 +276,11 @@ async fn process_audio(
 fn start_audio_recording(config: &Config, tx: mpsc::Sender<Vec<u8>>) -> Result<(), Box<dyn Error>> {
     let host = cpal::default_host();
     let device = host.default_input_device().expect("No input device available");
-    let stream_config = device.default_input_config()?;
+    let device_config = device.default_input_config()?;
 
-    let sample_rate = stream_config.sample_rate().0 as f32;
-    let channels = stream_config.channels() as usize;
-    let sample_format = stream_config.sample_format();
+    let sample_rate = device_config.sample_rate().0 as f32;
+    let channels = device_config.channels() as usize;
+    let sample_format = device_config.sample_format();
 
     let err_fn = |err| eprintln!("An error occurred on the audio stream: {}", err);
 
@@ -256,35 +290,42 @@ fn start_audio_recording(config: &Config, tx: mpsc::Sender<Vec<u8>>) -> Result<(
             let audio_data_clone = Arc::clone(&audio_data);
 
             let tx_clone = tx.clone();
-            let recording_duration = config.audio.recording_duration;
+            let config_clone = config.clone();
+
+            let mut noise_gate = NoiseGate::new(
+                config.audio.noise_gate_threshold,
+                config.audio.noise_gate_hold_time,
+            );
 
             device.build_input_stream(
-                &stream_config.into(),
+                &device_config.into(),
                 move |data: &[f32], _: &cpal::InputCallbackInfo| {
-                    let mut buffer = audio_data_clone.lock().unwrap();
-                    buffer.extend_from_slice(data);
+                    if noise_gate.process(data) {
+                        let mut buffer = audio_data_clone.lock().unwrap();
+                        buffer.extend_from_slice(data);
 
-                    if buffer.len() as f32 / (sample_rate * channels as f32) >= recording_duration {
-                        let mut wav_buffer = Vec::new();
-                        {
-                            let mut writer = WavWriter::new(
-                                Cursor::new(&mut wav_buffer),
-                                hound::WavSpec {
-                                    channels: channels as u16,
-                                    sample_rate: sample_rate as u32,
-                                    bits_per_sample: 32,
-                                    sample_format: hound::SampleFormat::Float,
-                                },
-                            ).unwrap();
+                        if buffer.len() as f32 / (sample_rate * channels as f32) >= config_clone.audio.recording_duration {
+                            let mut wav_buffer = Vec::new();
+                            {
+                                let mut writer = WavWriter::new(
+                                    Cursor::new(&mut wav_buffer),
+                                    hound::WavSpec {
+                                        channels: channels as u16,
+                                        sample_rate: sample_rate as u32,
+                                        bits_per_sample: 32,
+                                        sample_format: hound::SampleFormat::Float,
+                                    },
+                                ).unwrap();
 
-                            for &sample in buffer.iter() {
-                                writer.write_sample(sample).unwrap();
+                                for &sample in buffer.iter() {
+                                    writer.write_sample(sample).unwrap();
+                                }
+                                writer.finalize().unwrap();
                             }
-                            writer.finalize().unwrap();
-                        }
 
-                        let _ = tx_clone.try_send(wav_buffer);
-                        buffer.clear();
+                            let _ = tx_clone.try_send(wav_buffer);
+                            buffer.clear();
+                        }
                     }
                 },
                 err_fn,
