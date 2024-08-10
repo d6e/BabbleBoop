@@ -2,9 +2,6 @@
 address = "127.0.0.1"
 input_port = 9001  # VRChat's output port
 output_port = 9000  # VRChat's input port for chatbox
-response_address = "/llm/translate"
-input_address = "/avatar/parameters/YourInputParameter"
-output_address = "/chatbox/input"
 display_time = 3000     # time to display messages in milliseconds
 max_message_chunks = 9  # large messages are split into chunks, this is the max it will split
 
@@ -19,6 +16,7 @@ target_language = "Japanese"
 silence_threshold = 50  # determines the time for the silence detection
 noise_gate_threshold = 0.10  # adjust based on your microphone and environment
 noise_gate_hold_time = 0.10  # adjust based on preference
+min_transcription_duration = 1.0  # Minimum duration in seconds for transcription
 
 [rate_limit]
 requests_per_minute = 50  # adjust based on your API limits, it should continue to record even while waiting

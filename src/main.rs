@@ -26,8 +26,6 @@ struct OscConfig {
     address: String,
     input_port: u16,
     output_port: u16,
-    input_address: String,
-    output_address: String,
     max_message_chunks: usize,
     display_time: u64,
 }
@@ -71,6 +69,7 @@ struct AudioConfig {
     silence_threshold: u32,
     noise_gate_threshold: f32,
     noise_gate_hold_time: f32,
+    min_transcription_duration: f32,
 }
 
 
@@ -348,7 +347,7 @@ fn start_audio_recording(
 
             let mut is_recording = false;
             let mut silent_frames = 0;
-            const SILENCE_THRESHOLD: usize = 50; // Adjust this value to change sensitivity
+            let silence_threshold = config.audio.silence_threshold;
 
             device.build_input_stream(
                 &device_config.into(),
@@ -367,7 +366,7 @@ fn start_audio_recording(
                     } else if is_recording {
                         silent_frames += 1;
                         
-                        if silent_frames >= SILENCE_THRESHOLD {
+                        if silent_frames >= silence_threshold {
                             is_recording = false;
                             silent_frames = 0;
                             
