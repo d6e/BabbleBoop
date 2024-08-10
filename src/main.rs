@@ -138,33 +138,6 @@ async fn send_to_chatbox(message: &str, config: &Config, socket: &UdpSocket) -> 
     Ok(())
 }
 
-async fn osc_message_handler(
-    packet: OscPacket,
-    config: &Config,
-    socket: &UdpSocket,
-) -> Result<(), Box<dyn Error>> {
-    if let OscPacket::Message(msg) = packet {
-        if msg.addr == config.osc.input_address {
-            if let Some(OscType::String(input)) = msg.args.get(0) {
-                println!("Received OSC message: {}", input);
-
-                let translation_prompt = format!(
-                    "Translate the following text to {}: \"{}\"",
-                    config.translation.target_language, input
-                );
-
-                let response = ask_chatgpt(&translation_prompt, &config.openai).await?;
-                println!("ChatGPT response: {}", response);
-
-                send_to_chatbox(&response, &config, socket).await?;
-            }
-        } else {
-            println!("Received OSC message: {}", msg.addr);
-        }
-    }
-    Ok(())
-}
-
 struct RateLimiter {
     last_request: Instant,
     request_count: usize,
