@@ -463,7 +463,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     std::panic::set_hook(Box::new(|panic_info| {
         eprintln!("Panic occurred: {}", panic_info);
 
-        // Ensure this is always executed after a panic
+        println!("");
         println!("Press Enter to exit...");
         io::stdout().flush().unwrap();
         let _ = io::stdin().read_line(&mut String::new());
@@ -471,7 +471,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let result = run_main().await;
 
-    // Ensure this is always executed
+    println!("");
     println!("Press Enter to exit...");
     io::stdout().flush().unwrap();
     let _ = io::stdin().read_line(&mut String::new());
@@ -480,7 +480,18 @@ async fn main() -> Result<(), Box<dyn Error>> {
 }
 
 async fn run_main() -> Result<(), Box<dyn Error>> {
-    let config_data = fs::read_to_string("config.toml")?;
+
+    let config_path = "config.toml";
+    let config_data = match fs::read_to_string(config_path) {
+        Ok(data) => data,
+        Err(e) => {
+            eprintln!("Error reading config file: {}", e);
+            eprintln!("Please ensure that the 'config.toml' file exists in the same directory as the executable.");
+            eprintln!("You can refer to 'config.toml.example' for an example configuration.");
+            return Err(Box::new(e));
+        }
+    };
+
     let config: Config = toml::from_str(&config_data)?;
     let config = Arc::new(config);
 
