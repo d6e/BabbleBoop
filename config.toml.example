@@ -1,0 +1,9 @@
+[osc]
+address = "127.0.0.1"
+port = 9000
+response_address = "/llm/translate"
+target_language = "jp"
+
+[openai]
+api_key = "YOUR API KEY"
+model = "gpt-4"
