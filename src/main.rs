@@ -94,14 +94,12 @@ async fn send_to_chatbox(message: &str, config: &Config, socket: &UdpSocket) -> 
 
     // Send each chunk as a separate message
     for (i, chunk) in chunks.iter().enumerate().take(9) {
-        let is_last_chunk = i == chunks.len() - 1 || i == 8; // Last chunk or 9th chunk
-
         let osc_message = OscMessage {
             addr: "/chatbox/input".to_string(),
             args: vec![
                 OscType::String(chunk.to_string()),
                 OscType::Bool(true), // Send immediately
-                OscType::Bool(is_last_chunk), // Only trigger notification on last chunk
+                OscType::Bool(i == 0),  // Trigger notification only for the first chunk
             ],
         };
 
