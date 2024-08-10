@@ -9,10 +9,11 @@ use std::fs;
 use std::io::Cursor;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+use tokio::sync::mpsc;
 use tokio::time::sleep;
 
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone)]
 struct Config {
     osc: OscConfig,
     openai: OpenAiConfig,
@@ -20,7 +21,7 @@ struct Config {
     audio: AudioConfig,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone)]
 struct OscConfig {
     address: String,
     input_port: u16,
@@ -31,13 +32,13 @@ struct OscConfig {
     display_time: u64,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone)]
 struct OpenAiConfig {
     api_key: String,
     model: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone)]
 struct TranslationConfig {
     target_language: String,
 }
@@ -48,23 +49,23 @@ struct ChatGptRequest {
     messages: Vec<ChatGptMessage>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 struct ChatGptMessage {
     role: String,
     content: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone)]
 struct ChatGptResponse {
     choices: Vec<ChatGptChoice>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone)]
 struct ChatGptChoice {
     message: ChatGptMessage,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone)]
 struct AudioConfig {
     recording_duration: f32,
 }
@@ -170,7 +171,6 @@ impl RateLimiter {
         self.request_count += 1;
     }
 }
-
 async fn transcribe_audio(audio_data: Vec<u8>, config: &OpenAiConfig, rate_limiter: &mut RateLimiter) -> Result<String, Box<dyn Error>> {
     println!("Starting audio transcription. Audio data size: {} bytes", audio_data.len());
     
@@ -239,59 +239,67 @@ async fn process_audio(
     Ok(())
 }
 
-fn record_audio(config: &Config) -> Result<Vec<u8>, Box<dyn Error>> {
+fn start_audio_recording(config: &Config, tx: mpsc::Sender<Vec<u8>>) -> Result<(), Box<dyn Error>> {
     let host = cpal::default_host();
     let device = host.default_input_device().expect("No input device available");
-    let device_config = device.default_input_config()?;
+    let stream_config = device.default_input_config()?;
 
-    let sample_rate = device_config.sample_rate().0 as f32;
-    let channels = device_config.channels() as usize;
-    let sample_format = device_config.sample_format();
-
-    let audio_data = Arc::new(Mutex::new(Vec::new()));
-    let audio_data_clone = Arc::clone(&audio_data);
+    let sample_rate = stream_config.sample_rate().0 as f32;
+    let channels = stream_config.channels() as usize;
+    let sample_format = stream_config.sample_format();
 
     let err_fn = |err| eprintln!("An error occurred on the audio stream: {}", err);
 
     let stream = match sample_format {
-        cpal::SampleFormat::F32 => device.build_input_stream(
-            &device_config.into(),
-            move |data: &[f32], _: &cpal::InputCallbackInfo| {
-                let mut buffer = audio_data_clone.lock().unwrap();
-                buffer.extend_from_slice(data);
-            },
-            err_fn,
-            None, // Add this line for the buffer size option
-        )?,
+        cpal::SampleFormat::F32 => {
+            let audio_data = Arc::new(Mutex::new(Vec::new()));
+            let audio_data_clone = Arc::clone(&audio_data);
+
+            let tx_clone = tx.clone();
+            let recording_duration = config.audio.recording_duration;
+
+            device.build_input_stream(
+                &stream_config.into(),
+                move |data: &[f32], _: &cpal::InputCallbackInfo| {
+                    let mut buffer = audio_data_clone.lock().unwrap();
+                    buffer.extend_from_slice(data);
+
+                    if buffer.len() as f32 / (sample_rate * channels as f32) >= recording_duration {
+                        let mut wav_buffer = Vec::new();
+                        {
+                            let mut writer = WavWriter::new(
+                                Cursor::new(&mut wav_buffer),
+                                hound::WavSpec {
+                                    channels: channels as u16,
+                                    sample_rate: sample_rate as u32,
+                                    bits_per_sample: 32,
+                                    sample_format: hound::SampleFormat::Float,
+                                },
+                            ).unwrap();
+
+                            for &sample in buffer.iter() {
+                                writer.write_sample(sample).unwrap();
+                            }
+                            writer.finalize().unwrap();
+                        }
+
+                        let _ = tx_clone.try_send(wav_buffer);
+                        buffer.clear();
+                    }
+                },
+                err_fn,
+                None,
+            )?
+        },
         _ => return Err("Unsupported sample format".into()),
     };
 
     stream.play()?;
-    std::thread::sleep(std::time::Duration::from_secs_f32(
-        config.audio.recording_duration,
-    ));
-    drop(stream);
 
-    let audio_data = audio_data.lock().unwrap();
-    let mut wav_buffer = Vec::new();
-    {
-        let mut writer = WavWriter::new(
-            Cursor::new(&mut wav_buffer),
-            hound::WavSpec {
-                channels: channels as u16,
-                sample_rate: sample_rate as u32,
-                bits_per_sample: 32,
-                sample_format: hound::SampleFormat::Float,
-            },
-        )?;
+    // Keep the stream alive
+    std::mem::forget(stream);
 
-        for &sample in audio_data.iter() {
-            writer.write_sample(sample)?;
-        }
-        writer.finalize()?;
-    }
-
-    Ok(wav_buffer)
+    Ok(())
 }
 
 
@@ -303,13 +311,27 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let socket_address = format!("{}:{}", config.osc.address, config.osc.input_port);
     let socket = UdpSocket::bind(socket_address).await?;
 
-    println!("Listening for audio input...");
+    println!("Starting continuous audio recording...");
     println!("Translating to: {}", config.translation.target_language);
+
+    let (tx, mut rx) = mpsc::channel::<Vec<u8>>(100);  // Buffer up to 100 audio chunks
+
+    // Start the audio recording in a separate thread
+    let config_clone = config.clone();
+    tokio::spawn(async move {
+        if let Err(e) = start_audio_recording(&config_clone, tx) {
+            eprintln!("Error starting audio recording: {}", e);
+        }
+    });
 
     let mut rate_limiter = RateLimiter::new();
 
-    loop {
-        let audio_data = record_audio(&config)?;
-        process_audio(audio_data, &config, &socket, &mut rate_limiter).await?;
+    while let Some(audio_data) = rx.recv().await {
+        match process_audio(audio_data, &config, &socket, &mut rate_limiter).await {
+            Ok(_) => {},
+            Err(e) => eprintln!("Error processing audio: {}", e),
+        }
     }
+
+    Ok(())
 }
