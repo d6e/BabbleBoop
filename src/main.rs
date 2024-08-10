@@ -19,6 +19,7 @@ struct Config {
     openai: OpenAiConfig,
     translation: TranslationConfig,
     audio: AudioConfig,
+    rate_limit: RateLimitConfig,
 }
 
 #[derive(Deserialize, Clone)]
@@ -71,6 +72,47 @@ struct AudioConfig {
     recording_duration: f32,
     noise_gate_threshold: f32,
     noise_gate_hold_time: f32,
+}
+
+
+#[derive(Deserialize, Clone)]
+struct RateLimitConfig {
+    requests_per_minute: usize,
+}
+
+struct RateLimiter {
+    last_request: Instant,
+    request_count: usize,
+    max_requests: usize,
+}
+
+impl RateLimiter {
+    fn new(max_requests: usize) -> Self {
+        RateLimiter {
+            last_request: Instant::now(),
+            request_count: 0,
+            max_requests,
+        }
+    }
+
+    async fn wait(&mut self) {
+        let now = Instant::now();
+        let elapsed = now.duration_since(self.last_request);
+
+        if elapsed < Duration::from_secs(60) {
+            if self.request_count >= self.max_requests {
+                let wait_time = Duration::from_secs(60) - elapsed;
+                sleep(wait_time).await;
+                self.request_count = 0;
+                self.last_request = Instant::now();
+            }
+        } else {
+            self.request_count = 0;
+            self.last_request = now;
+        }
+
+        self.request_count += 1;
+    }
 }
 
 struct NoiseGate {
@@ -173,38 +215,6 @@ async fn send_to_chatbox(message: &str, config: &Config, socket: &UdpSocket) -> 
     Ok(())
 }
 
-struct RateLimiter {
-    last_request: Instant,
-    request_count: usize,
-}
-
-impl RateLimiter {
-    fn new() -> Self {
-        RateLimiter {
-            last_request: Instant::now(),
-            request_count: 0,
-        }
-    }
-
-    async fn wait(&mut self) {
-        let now = Instant::now();
-        let elapsed = now.duration_since(self.last_request);
-
-        if elapsed < Duration::from_secs(60) {
-            if self.request_count >= 3 {
-                let wait_time = Duration::from_secs(60) - elapsed;
-                sleep(wait_time).await;
-                self.request_count = 0;
-                self.last_request = Instant::now();
-            }
-        } else {
-            self.request_count = 0;
-            self.last_request = now;
-        }
-
-        self.request_count += 1;
-    }
-}
 async fn transcribe_audio(audio_data: Vec<u8>, config: &OpenAiConfig, rate_limiter: &mut RateLimiter) -> Result<String, Box<dyn Error>> {
     println!("Starting audio transcription. Audio data size: {} bytes", audio_data.len());
     
@@ -344,6 +354,7 @@ fn start_audio_recording(config: &Config, tx: mpsc::Sender<Vec<u8>>) -> Result<(
 }
 
 
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     let config_data = fs::read_to_string("config.toml")?;
@@ -354,6 +365,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     println!("Starting continuous audio recording...");
     println!("Translating to: {}", config.translation.target_language);
+    println!("Rate limit: {} requests per minute", config.rate_limit.requests_per_minute);
 
     let (tx, mut rx) = mpsc::channel::<Vec<u8>>(100);  // Buffer up to 100 audio chunks
 
@@ -365,7 +377,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         }
     });
 
-    let mut rate_limiter = RateLimiter::new();
+    let mut rate_limiter = RateLimiter::new(config.rate_limit.requests_per_minute);
 
     while let Some(audio_data) = rx.recv().await {
         match process_audio(audio_data, &config, &socket, &mut rate_limiter).await {
