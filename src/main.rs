@@ -68,7 +68,7 @@ struct ChatGptChoice {
 
 #[derive(Deserialize, Clone)]
 struct AudioConfig {
-    recording_duration: f32,
+    silence_threshold: u32,
     noise_gate_threshold: f32,
     noise_gate_hold_time: f32,
 }
@@ -317,6 +317,7 @@ enum AudioEvent {
     AudioData(Vec<u8>),
 }
 
+
 fn start_audio_recording(
     config: &Config,
     tx: mpsc::Sender<AudioEvent>,
@@ -345,6 +346,8 @@ fn start_audio_recording(
             );
 
             let mut is_recording = false;
+            let mut silent_frames = 0;
+            const SILENCE_THRESHOLD: usize = 50; // Adjust this value to change sensitivity
 
             device.build_input_stream(
                 &device_config.into(),
@@ -358,32 +361,44 @@ fn start_audio_recording(
                         }
                         
                         buffer.extend_from_slice(data);
-
-                        if buffer.len() as f32 / (sample_rate * channels as f32) >= config_clone.audio.recording_duration {
-                            let mut wav_buffer = Vec::new();
-                            {
-                                let mut writer = WavWriter::new(
-                                    Cursor::new(&mut wav_buffer),
-                                    hound::WavSpec {
-                                        channels: channels as u16,
-                                        sample_rate: sample_rate as u32,
-                                        bits_per_sample: 32,
-                                        sample_format: hound::SampleFormat::Float,
-                                    },
-                                ).unwrap();
-
-                                for &sample in buffer.iter() {
-                                    writer.write_sample(sample).unwrap();
-                                }
-                                writer.finalize().unwrap();
-                            }
-
-                            let _ = tx_clone.try_send(AudioEvent::AudioData(wav_buffer));
-                            buffer.clear();
-                        }
+                        silent_frames = 0;
                     } else if is_recording {
-                        is_recording = false;
-                        let _ = tx_clone.try_send(AudioEvent::StopRecording);
+                        silent_frames += 1;
+                        
+                        if silent_frames >= SILENCE_THRESHOLD {
+                            is_recording = false;
+                            silent_frames = 0;
+                            
+                            let mut buffer = audio_data_clone.lock().unwrap();
+                            if !buffer.is_empty() {
+                                let mut wav_buffer = Vec::new();
+                                {
+                                    let mut writer = WavWriter::new(
+                                        Cursor::new(&mut wav_buffer),
+                                        hound::WavSpec {
+                                            channels: channels as u16,
+                                            sample_rate: sample_rate as u32,
+                                            bits_per_sample: 32,
+                                            sample_format: hound::SampleFormat::Float,
+                                        },
+                                    ).unwrap();
+
+                                    for &sample in buffer.iter() {
+                                        writer.write_sample(sample).unwrap();
+                                    }
+                                    writer.finalize().unwrap();
+                                }
+
+                                let _ = tx_clone.try_send(AudioEvent::AudioData(wav_buffer));
+                                buffer.clear();
+                            }
+                            
+                            let _ = tx_clone.try_send(AudioEvent::StopRecording);
+                        } else {
+                            // Keep recording during short pauses
+                            let mut buffer = audio_data_clone.lock().unwrap();
+                            buffer.extend_from_slice(data);
+                        }
                     }
                 },
                 err_fn,
@@ -408,7 +423,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let config = Arc::new(config);
 
     let socket_address = format!("{}:{}", config.osc.address, config.osc.input_port);
-    let socket = Arc::new(UdpSocket::bind(socket_address).await?);
+    let socket = Arc::new(UdpSocket::bind(&socket_address).await?);
 
     println!("Starting continuous audio recording...");
     println!("Translating to: {}", config.translation.target_language);
