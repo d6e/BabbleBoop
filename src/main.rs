@@ -303,6 +303,7 @@ async fn process_audio(
 
     let response = ask_chatgpt(&translation_prompt, &config.openai).await?;
     println!("Translation: {}", response);
+    println!("---");
 
     typing_indicator.set_typing(false).await;  // Stop typing indicator
 
