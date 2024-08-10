@@ -1,9 +1,24 @@
 [osc]
 address = "127.0.0.1"
-port = 9000
+input_port = 9001  # VRChat's output port
+output_port = 9000  # VRChat's input port for chatbox
 response_address = "/llm/translate"
-target_language = "jp"
+input_address = "/avatar/parameters/YourInputParameter"
+output_address = "/chatbox/input"
+display_time = 3000     # time to display messages in milliseconds
+max_message_chunks = 9  # large messages are split into chunks, this is the max it will split
 
 [openai]
 api_key = "YOUR API KEY"
-model = "gpt-4"
+model = "gpt-3.5-turbo"
+
+[translation]
+target_language = "Japanese"
+
+[audio]
+silence_threshold = 50  # determines the time for the silence detection
+noise_gate_threshold = 0.10  # adjust based on your microphone and environment
+noise_gate_hold_time = 0.10  # adjust based on preference
+
+[rate_limit]
+requests_per_minute = 50  # adjust based on your API limits, it should continue to record even while waiting
