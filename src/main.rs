@@ -8,6 +8,7 @@ use std::fs;
 struct Config {
     osc: OscConfig,
     openai: OpenAiConfig,
+    translation: TranslationConfig,
 }
 
 #[derive(Deserialize)]
@@ -21,6 +22,11 @@ struct OscConfig {
 struct OpenAiConfig {
     api_key: String,
     model: String,
+}
+
+#[derive(Deserialize)]
+struct TranslationConfig {
+    target_language: String,
 }
 
 #[derive(Serialize)]
@@ -73,11 +79,16 @@ async fn osc_message_handler(
     socket: &UdpSocket,
 ) -> Result<(), Box<dyn Error>> {
     if let OscPacket::Message(msg) = packet {
-        if msg.addr == "/chatgpt/translate" {
+        if msg.addr == config.osc.response_address {
             if let Some(OscType::String(input)) = msg.args.get(0) {
                 println!("Received OSC message: {}", input);
 
-                let response = ask_chatgpt(input, &config.openai).await?;
+                let translation_prompt = format!(
+                    "Translate the following text to {}: \"{}\"",
+                    config.translation.target_language, input
+                );
+
+                let response = ask_chatgpt(&translation_prompt, &config.openai).await?;
                 println!("ChatGPT response: {}", response);
 
                 let osc_response = OscMessage {
@@ -89,6 +100,8 @@ async fn osc_message_handler(
                 let osc_address = format!("{}:{}", config.osc.address, config.osc.port);
                 socket.send_to(&buf, osc_address).await?;
             }
+        } else {
+            println!("Received OSC message: {}", msg.addr);
         }
     }
     Ok(())
@@ -106,6 +119,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let mut buf = [0u8; 1024];
 
     println!("Listening for OSC messages on {}:{}", config.osc.address, config.osc.port);
+    println!("Translating to: {}", config.translation.target_language);
 
     loop {
         let (size, _addr) = socket.recv_from(&mut buf).await?;
