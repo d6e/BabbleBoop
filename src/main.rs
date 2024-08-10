@@ -18,6 +18,8 @@ struct OscConfig {
     output_port: u16,
     input_address: String,
     output_address: String,
+    max_message_chunks: usize,
+    display_time: u64,
 }
 
 #[derive(Deserialize)]
@@ -29,7 +31,6 @@ struct OpenAiConfig {
 #[derive(Deserialize)]
 struct TranslationConfig {
     target_language: String,
-    display_time: u64,
 }
 
 #[derive(Serialize)]
@@ -95,7 +96,7 @@ async fn send_to_chatbox(message: &str, config: &Config, socket: &UdpSocket) -> 
         .collect();
 
     // Send each chunk as a separate message
-    for (i, chunk) in chunks.iter().enumerate().take(9) {
+    for (i, chunk) in chunks.iter().enumerate().take(config.osc.max_message_chunks) {
         let osc_message = OscMessage {
             addr: "/chatbox/input".to_string(),
             args: vec![
@@ -109,7 +110,7 @@ async fn send_to_chatbox(message: &str, config: &Config, socket: &UdpSocket) -> 
         socket.send_to(&buf, osc_address.as_str()).await?;
 
         // Add a small delay between messages to ensure proper order
-        tokio::time::sleep(tokio::time::Duration::from_millis(config.translation.display_time)).await;
+        tokio::time::sleep(tokio::time::Duration::from_millis(config.osc.display_time)).await;
     }
 
     // Set typing indicator to false
