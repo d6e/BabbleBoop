@@ -357,6 +357,7 @@ fn start_audio_recording(
                         
                         if !is_recording {
                             is_recording = true;
+                            println!("Sound detected. Starting recording...");
                             let _ = tx_clone.try_send(AudioEvent::StartRecording);
                         }
                         
@@ -371,6 +372,7 @@ fn start_audio_recording(
                             
                             let mut buffer = audio_data_clone.lock().unwrap();
                             if !buffer.is_empty() {
+                                println!("Silence detected. Stopping recording and processing audio...");
                                 let mut wav_buffer = Vec::new();
                                 {
                                     let mut writer = WavWriter::new(
