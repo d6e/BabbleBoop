@@ -8,6 +8,8 @@ use std::error::Error;
 use std::fs;
 use std::io::Cursor;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+use tokio::time::sleep;
 
 
 #[derive(Deserialize)]
@@ -163,12 +165,47 @@ async fn osc_message_handler(
     Ok(())
 }
 
-async fn transcribe_audio(audio_data: Vec<u8>, config: &OpenAiConfig) -> Result<String, Box<dyn Error>> {
+struct RateLimiter {
+    last_request: Instant,
+    request_count: usize,
+}
+
+impl RateLimiter {
+    fn new() -> Self {
+        RateLimiter {
+            last_request: Instant::now(),
+            request_count: 0,
+        }
+    }
+
+    async fn wait(&mut self) {
+        let now = Instant::now();
+        let elapsed = now.duration_since(self.last_request);
+
+        if elapsed < Duration::from_secs(60) {
+            if self.request_count >= 3 {
+                let wait_time = Duration::from_secs(60) - elapsed;
+                sleep(wait_time).await;
+                self.request_count = 0;
+                self.last_request = Instant::now();
+            }
+        } else {
+            self.request_count = 0;
+            self.last_request = now;
+        }
+
+        self.request_count += 1;
+    }
+}
+
+async fn transcribe_audio(audio_data: Vec<u8>, config: &OpenAiConfig, rate_limiter: &mut RateLimiter) -> Result<String, Box<dyn Error>> {
     println!("Starting audio transcription. Audio data size: {} bytes", audio_data.len());
     
     if audio_data.is_empty() {
         return Err("Audio data is empty".into());
     }
+
+    rate_limiter.wait().await;
 
     let client = reqwest::Client::new();
     let part = reqwest::multipart::Part::bytes(audio_data)
@@ -211,8 +248,9 @@ async fn process_audio(
     audio_data: Vec<u8>,
     config: &Config,
     socket: &UdpSocket,
+    rate_limiter: &mut RateLimiter,
 ) -> Result<(), Box<dyn Error>> {
-    let transcription = transcribe_audio(audio_data, &config.openai).await?;
+    let transcription = transcribe_audio(audio_data, &config.openai, rate_limiter).await?;
     println!("Transcription: {}", transcription);
 
     let translation_prompt = format!(
@@ -295,8 +333,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
     println!("Listening for audio input...");
     println!("Translating to: {}", config.translation.target_language);
 
+    let mut rate_limiter = RateLimiter::new();
+
     loop {
         let audio_data = record_audio(&config)?;
-        process_audio(audio_data, &config, &socket).await?;
+        process_audio(audio_data, &config, &socket, &mut rate_limiter).await?;
     }
 }
