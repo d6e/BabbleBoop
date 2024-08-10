@@ -146,6 +146,31 @@ impl NoiseGate {
     }
 }
 
+#[derive(Clone)]
+struct TypingIndicator {
+    socket: Arc<UdpSocket>,
+    config: Arc<Config>,
+}
+
+impl TypingIndicator {
+    fn new(socket: Arc<UdpSocket>, config: Arc<Config>) -> Self {
+        TypingIndicator { socket, config }
+    }
+
+    async fn set_typing(&self, is_typing: bool) {
+        let typing_message = OscMessage {
+            addr: "/chatbox/typing".to_string(),
+            args: vec![OscType::Bool(is_typing)],
+        };
+        if let Ok(buf) = encode(&OscPacket::Message(typing_message)) {
+            let osc_address = format!("{}:{}", self.config.osc.address, self.config.osc.output_port);
+            if let Err(e) = self.socket.send_to(&buf, osc_address.as_str()).await {
+                eprintln!("Error sending typing indicator: {}", e);
+            }
+        }
+    }
+}
+
 async fn ask_chatgpt(prompt: &str, config: &OpenAiConfig) -> Result<String, Box<dyn Error>> {
     let client = reqwest::Client::new();
 
@@ -261,11 +286,13 @@ async fn transcribe_audio(audio_data: Vec<u8>, config: &OpenAiConfig, rate_limit
     Ok(transcription.text)
 }
 
+
 async fn process_audio(
     audio_data: Vec<u8>,
     config: &Config,
     socket: &UdpSocket,
     rate_limiter: &mut RateLimiter,
+    typing_indicator: &TypingIndicator,
 ) -> Result<(), Box<dyn Error>> {
     let transcription = transcribe_audio(audio_data, &config.openai, rate_limiter).await?;
     println!("Transcription: {}", transcription);
@@ -278,12 +305,23 @@ async fn process_audio(
     let response = ask_chatgpt(&translation_prompt, &config.openai).await?;
     println!("Translation: {}", response);
 
+    typing_indicator.set_typing(false).await;  // Stop typing indicator
+
     send_to_chatbox(&response, &config, socket).await?;
 
     Ok(())
 }
 
-fn start_audio_recording(config: &Config, tx: mpsc::Sender<Vec<u8>>) -> Result<(), Box<dyn Error>> {
+enum AudioEvent {
+    StartRecording,
+    StopRecording,
+    AudioData(Vec<u8>),
+}
+
+fn start_audio_recording(
+    config: &Config,
+    tx: mpsc::Sender<AudioEvent>,
+) -> Result<(), Box<dyn Error>> {
     let host = cpal::default_host();
     let device = host.default_input_device().expect("No input device available");
     let device_config = device.default_input_config()?;
@@ -307,11 +345,19 @@ fn start_audio_recording(config: &Config, tx: mpsc::Sender<Vec<u8>>) -> Result<(
                 config.audio.noise_gate_hold_time,
             );
 
+            let mut is_recording = false;
+
             device.build_input_stream(
                 &device_config.into(),
                 move |data: &[f32], _: &cpal::InputCallbackInfo| {
                     if noise_gate.process(data) {
                         let mut buffer = audio_data_clone.lock().unwrap();
+                        
+                        if !is_recording {
+                            is_recording = true;
+                            let _ = tx_clone.try_send(AudioEvent::StartRecording);
+                        }
+                        
                         buffer.extend_from_slice(data);
 
                         if buffer.len() as f32 / (sample_rate * channels as f32) >= config_clone.audio.recording_duration {
@@ -333,9 +379,12 @@ fn start_audio_recording(config: &Config, tx: mpsc::Sender<Vec<u8>>) -> Result<(
                                 writer.finalize().unwrap();
                             }
 
-                            let _ = tx_clone.try_send(wav_buffer);
+                            let _ = tx_clone.try_send(AudioEvent::AudioData(wav_buffer));
                             buffer.clear();
                         }
+                    } else if is_recording {
+                        is_recording = false;
+                        let _ = tx_clone.try_send(AudioEvent::StopRecording);
                     }
                 },
                 err_fn,
@@ -353,25 +402,26 @@ fn start_audio_recording(config: &Config, tx: mpsc::Sender<Vec<u8>>) -> Result<(
     Ok(())
 }
 
-
-
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     let config_data = fs::read_to_string("config.toml")?;
     let config: Config = toml::from_str(&config_data)?;
+    let config = Arc::new(config);
 
     let socket_address = format!("{}:{}", config.osc.address, config.osc.input_port);
-    let socket = UdpSocket::bind(socket_address).await?;
+    let socket = Arc::new(UdpSocket::bind(socket_address).await?);
 
     println!("Starting continuous audio recording...");
     println!("Translating to: {}", config.translation.target_language);
     println!("Rate limit: {} requests per minute", config.rate_limit.requests_per_minute);
 
-    let (tx, mut rx) = mpsc::channel::<Vec<u8>>(100);  // Buffer up to 100 audio chunks
+    let (tx, mut rx) = mpsc::channel::<AudioEvent>(100);
+
+    let typing_indicator = TypingIndicator::new(Arc::clone(&socket), Arc::clone(&config));
 
     // Start the audio recording in a separate thread
-    let config_clone = config.clone();
-    tokio::spawn(async move {
+    let config_clone = Arc::clone(&config);
+    std::thread::spawn(move || {
         if let Err(e) = start_audio_recording(&config_clone, tx) {
             eprintln!("Error starting audio recording: {}", e);
         }
@@ -379,10 +429,20 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let mut rate_limiter = RateLimiter::new(config.rate_limit.requests_per_minute);
 
-    while let Some(audio_data) = rx.recv().await {
-        match process_audio(audio_data, &config, &socket, &mut rate_limiter).await {
-            Ok(_) => {},
-            Err(e) => eprintln!("Error processing audio: {}", e),
+    while let Some(event) = rx.recv().await {
+        match event {
+            AudioEvent::StartRecording => {
+                typing_indicator.set_typing(true).await;
+            },
+            AudioEvent::StopRecording => {
+                typing_indicator.set_typing(false).await;
+            },
+            AudioEvent::AudioData(audio_data) => {
+                match process_audio(audio_data, &config, &socket, &mut rate_limiter, &typing_indicator).await {
+                    Ok(_) => {},
+                    Err(e) => eprintln!("Error processing audio: {}", e),
+                }
+            },
         }
     }
 
