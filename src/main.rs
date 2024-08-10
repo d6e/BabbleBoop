@@ -1,14 +1,21 @@
 use async_std::net::UdpSocket;
+use bytes::BytesMut;
+use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use hound::WavWriter;
 use rosc::{encoder::encode, OscMessage, OscPacket, OscType};
 use serde::{Deserialize, Serialize};
 use std::error::Error;
 use std::fs;
+use std::io::Cursor;
+use std::sync::{Arc, Mutex};
+
 
 #[derive(Deserialize)]
 struct Config {
     osc: OscConfig,
     openai: OpenAiConfig,
     translation: TranslationConfig,
+    audio: AudioConfig,
 }
 
 #[derive(Deserialize)]
@@ -53,6 +60,11 @@ struct ChatGptResponse {
 #[derive(Deserialize)]
 struct ChatGptChoice {
     message: ChatGptMessage,
+}
+
+#[derive(Deserialize)]
+struct AudioConfig {
+    recording_duration: f32,
 }
 
 async fn ask_chatgpt(prompt: &str, config: &OpenAiConfig) -> Result<String, Box<dyn Error>> {
@@ -151,26 +163,122 @@ async fn osc_message_handler(
     Ok(())
 }
 
+async fn transcribe_audio(audio_data: Vec<u8>, config: &OpenAiConfig) -> Result<String, Box<dyn Error>> {
+    let client = reqwest::Client::new();
+    let part = reqwest::multipart::Part::bytes(audio_data)
+        .file_name("audio.wav")
+        .mime_str("audio/wav")?;
+
+    let form = reqwest::multipart::Form::new()
+        .part("file", part)
+        .text("model", "whisper-1");
+
+    let res = client
+        .post("https://api.openai.com/v1/audio/transcriptions")
+        .header("Authorization", format!("Bearer {}", &config.api_key))
+        .multipart(form)
+        .send()
+        .await?;
+
+    #[derive(Deserialize)]
+    struct TranscriptionResponse {
+        text: String,
+    }
+
+    let transcription: TranscriptionResponse = res.json().await?;
+    Ok(transcription.text)
+}
+
+async fn process_audio(
+    audio_data: Vec<u8>,
+    config: &Config,
+    socket: &UdpSocket,
+) -> Result<(), Box<dyn Error>> {
+    let transcription = transcribe_audio(audio_data, &config.openai).await?;
+    println!("Transcription: {}", transcription);
+
+    let translation_prompt = format!(
+        "Translate the following text to {}: \"{}\"",
+        config.translation.target_language, transcription
+    );
+
+    let response = ask_chatgpt(&translation_prompt, &config.openai).await?;
+    println!("Translation: {}", response);
+
+    send_to_chatbox(&response, &config, socket).await?;
+
+    Ok(())
+}
+
+fn record_audio(config: &Config) -> Result<Vec<u8>, Box<dyn Error>> {
+    let host = cpal::default_host();
+    let device = host.default_input_device().expect("No input device available");
+    let device_config = device.default_input_config()?;
+
+    let sample_rate = device_config.sample_rate().0 as f32;
+    let channels = device_config.channels() as usize;
+    let sample_format = device_config.sample_format();
+
+    let audio_data = Arc::new(Mutex::new(Vec::new()));
+    let audio_data_clone = Arc::clone(&audio_data);
+
+    let err_fn = |err| eprintln!("An error occurred on the audio stream: {}", err);
+
+    let stream = match sample_format {
+        cpal::SampleFormat::F32 => device.build_input_stream(
+            &device_config.into(),
+            move |data: &[f32], _: &cpal::InputCallbackInfo| {
+                let mut buffer = audio_data_clone.lock().unwrap();
+                buffer.extend_from_slice(data);
+            },
+            err_fn,
+            None, // Add this line for the buffer size option
+        )?,
+        _ => return Err("Unsupported sample format".into()),
+    };
+
+    stream.play()?;
+    std::thread::sleep(std::time::Duration::from_secs_f32(
+        config.audio.recording_duration,
+    ));
+    drop(stream);
+
+    let audio_data = audio_data.lock().unwrap();
+    let mut wav_buffer = Vec::new();
+    {
+        let mut writer = WavWriter::new(
+            Cursor::new(&mut wav_buffer),
+            hound::WavSpec {
+                channels: channels as u16,
+                sample_rate: sample_rate as u32,
+                bits_per_sample: 32,
+                sample_format: hound::SampleFormat::Float,
+            },
+        )?;
+
+        for &sample in audio_data.iter() {
+            writer.write_sample(sample)?;
+        }
+        writer.finalize()?;
+    }
+
+    Ok(wav_buffer)
+}
+
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    // Load configuration from config.toml
     let config_data = fs::read_to_string("config.toml")?;
     let config: Config = toml::from_str(&config_data)?;
 
-    // Bind the socket to the configured address and input port
     let socket_address = format!("{}:{}", config.osc.address, config.osc.input_port);
     let socket = UdpSocket::bind(socket_address).await?;
-    let mut buf = [0u8; 1024];
 
-    println!("Listening for OSC messages on {}:{}", config.osc.address, config.osc.input_port);
-    println!("Sending responses to port {}", config.osc.output_port);
+    println!("Listening for audio input...");
     println!("Translating to: {}", config.translation.target_language);
-   
 
     loop {
-        let (size, _addr) = socket.recv_from(&mut buf).await?;
-        if let Ok((_, packet)) = rosc::decoder::decode_udp(&buf[..size]) {
-            osc_message_handler(packet, &config, &socket).await?;
-        }
+        let audio_data = record_audio(&config)?;
+        process_audio(audio_data, &config, &socket).await?;
     }
 }
