@@ -284,7 +284,6 @@ async fn transcribe_audio(audio_data: Vec<u8>, config: &OpenAiConfig, rate_limit
     Ok(transcription.text)
 }
 
-
 async fn process_audio(
     audio_data: Vec<u8>,
     config: &Config,
@@ -292,6 +291,18 @@ async fn process_audio(
     rate_limiter: &mut RateLimiter,
     typing_indicator: &TypingIndicator,
 ) -> Result<(), Box<dyn Error>> {
+    // Calculate audio duration
+    let audio_duration = calculate_audio_duration(&audio_data)?;
+    
+    // Check if audio is shorter than the minimum transcription duration
+    let min_duration = Duration::from_secs_f32(config.audio.min_transcription_duration);
+    if audio_duration < min_duration {
+        println!("Audio too short ({:.2}s). Minimum duration is {:.2}s. Skipping transcription.", 
+                 audio_duration.as_secs_f32(), min_duration.as_secs_f32());
+        typing_indicator.set_typing(false).await;
+        return Ok(());
+    }
+
     let transcription = transcribe_audio(audio_data, &config.openai, rate_limiter).await?;
     println!("Transcription: {}", transcription);
 
@@ -309,6 +320,13 @@ async fn process_audio(
     send_to_chatbox(&response, &config, socket).await?;
 
     Ok(())
+}
+
+fn calculate_audio_duration(audio_data: &[u8]) -> Result<Duration, Box<dyn Error>> {
+    let reader = hound::WavReader::new(Cursor::new(audio_data))?;
+    let spec = reader.spec();
+    let duration = Duration::from_secs_f32(reader.duration() as f32 / spec.sample_rate as f32);
+    Ok(duration)
 }
 
 enum AudioEvent {
@@ -338,7 +356,6 @@ fn start_audio_recording(
             let audio_data_clone = Arc::clone(&audio_data);
 
             let tx_clone = tx.clone();
-            let config_clone = config.clone();
 
             let mut noise_gate = NoiseGate::new(
                 config.audio.noise_gate_threshold,
