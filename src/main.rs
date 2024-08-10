@@ -1,4 +1,3 @@
-use tokio::net::UdpSocket;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use hound::WavWriter;
 use rosc::{encoder::encode, OscMessage, OscPacket, OscType};
@@ -8,6 +7,7 @@ use std::fs;
 use std::io::{self, Cursor, Write};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 use tokio::time::sleep;
 
@@ -158,7 +158,10 @@ impl TypingIndicator {
             args: vec![OscType::Bool(is_typing)],
         };
         if let Ok(buf) = encode(&OscPacket::Message(typing_message)) {
-            let osc_address = format!("{}:{}", self.config.osc.address, self.config.osc.output_port);
+            let osc_address = format!(
+                "{}:{}",
+                self.config.osc.address, self.config.osc.output_port
+            );
             if let Err(e) = self.socket.send_to(&buf, osc_address.as_str()).await {
                 eprintln!("Error sending typing indicator: {}", e);
             }
@@ -188,7 +191,11 @@ async fn ask_chatgpt(prompt: &str, config: &OpenAiConfig) -> Result<String, Box<
     Ok(res_body.choices[0].message.content.clone())
 }
 
-async fn send_to_chatbox(message: &str, config: &Config, socket: &UdpSocket) -> Result<(), Box<dyn Error>> {
+async fn send_to_chatbox(
+    message: &str,
+    config: &Config,
+    socket: &UdpSocket,
+) -> Result<(), Box<dyn Error>> {
     // Set typing indicator to true
     let typing_on = OscMessage {
         addr: "/chatbox/typing".to_string(),
@@ -207,13 +214,17 @@ async fn send_to_chatbox(message: &str, config: &Config, socket: &UdpSocket) -> 
         .collect();
 
     // Send each chunk as a separate message
-    for (i, chunk) in chunks.iter().enumerate().take(config.osc.max_message_chunks) {
+    for (i, chunk) in chunks
+        .iter()
+        .enumerate()
+        .take(config.osc.max_message_chunks)
+    {
         let osc_message = OscMessage {
             addr: "/chatbox/input".to_string(),
             args: vec![
                 OscType::String(chunk.to_string()),
-                OscType::Bool(true), // Send immediately
-                OscType::Bool(i == 0),  // Trigger notification only for the first chunk
+                OscType::Bool(true),   // Send immediately
+                OscType::Bool(i == 0), // Trigger notification only for the first chunk
             ],
         };
 
@@ -235,8 +246,15 @@ async fn send_to_chatbox(message: &str, config: &Config, socket: &UdpSocket) -> 
     Ok(())
 }
 
-async fn transcribe_audio(audio_data: Vec<u8>, config: &OpenAiConfig, rate_limiter: &mut RateLimiter) -> Result<String, Box<dyn Error>> {
-    println!("Starting audio transcription. Audio data size: {} bytes", audio_data.len());
+async fn transcribe_audio(
+    audio_data: Vec<u8>,
+    config: &OpenAiConfig,
+    rate_limiter: &mut RateLimiter,
+) -> Result<String, Box<dyn Error>> {
+    println!(
+        "Starting audio transcription. Audio data size: {} bytes",
+        audio_data.len()
+    );
 
     if audio_data.is_empty() {
         return Err("Audio data is empty".into());
@@ -294,8 +312,11 @@ async fn process_audio(
     // Check if audio is shorter than the minimum transcription duration
     let min_duration = Duration::from_secs_f32(config.audio.min_transcription_duration);
     if audio_duration < min_duration {
-        println!("Audio too short ({:.2}s). Minimum duration is {:.2}s. Skipping transcription.",
-                 audio_duration.as_secs_f32(), min_duration.as_secs_f32());
+        println!(
+            "Audio too short ({:.2}s). Minimum duration is {:.2}s. Skipping transcription.",
+            audio_duration.as_secs_f32(),
+            min_duration.as_secs_f32()
+        );
         typing_indicator.set_typing(false).await;
         return Ok(());
     }
@@ -312,7 +333,7 @@ async fn process_audio(
     println!("Translation: {}", response);
     println!("---");
 
-    typing_indicator.set_typing(false).await;  // Stop typing indicator
+    typing_indicator.set_typing(false).await; // Stop typing indicator
 
     send_to_chatbox(&response, &config, socket).await?;
 
@@ -337,7 +358,9 @@ fn start_audio_recording(
     tx: mpsc::Sender<AudioEvent>,
 ) -> Result<(), Box<dyn Error>> {
     let host = cpal::default_host();
-    let device = host.default_input_device().expect("No input device available");
+    let device = host
+        .default_input_device()
+        .expect("No input device available");
     let device_config = device.default_input_config()?;
 
     let sample_rate = device_config.sample_rate().0 as f32;
@@ -385,7 +408,9 @@ fn start_audio_recording(
 
                             let mut buffer = audio_data_clone.lock().unwrap();
                             if !buffer.is_empty() {
-                                println!("Silence detected. Stopping recording and processing audio...");
+                                println!(
+                                    "Silence detected. Stopping recording and processing audio..."
+                                );
                                 let mut wav_buffer = Vec::new();
                                 {
                                     let mut writer = WavWriter::new(
@@ -396,7 +421,8 @@ fn start_audio_recording(
                                             bits_per_sample: 32,
                                             sample_format: hound::SampleFormat::Float,
                                         },
-                                    ).unwrap();
+                                    )
+                                    .unwrap();
 
                                     for &sample in buffer.iter() {
                                         writer.write_sample(sample).unwrap();
@@ -419,7 +445,7 @@ fn start_audio_recording(
                 err_fn,
                 None,
             )?
-        },
+        }
         _ => return Err("Unsupported sample format".into()),
     };
 
@@ -463,7 +489,10 @@ async fn run_main() -> Result<(), Box<dyn Error>> {
 
     println!("Starting continuous audio recording...");
     println!("Translating to: {}", config.translation.target_language);
-    println!("Rate limit: {} requests per minute", config.rate_limit.requests_per_minute);
+    println!(
+        "Rate limit: {} requests per minute",
+        config.rate_limit.requests_per_minute
+    );
 
     let (tx, mut rx) = mpsc::channel::<AudioEvent>(100);
 
@@ -483,16 +512,24 @@ async fn run_main() -> Result<(), Box<dyn Error>> {
         match event {
             AudioEvent::StartRecording => {
                 typing_indicator.set_typing(true).await;
-            },
+            }
             AudioEvent::StopRecording => {
                 typing_indicator.set_typing(false).await;
-            },
+            }
             AudioEvent::AudioData(audio_data) => {
-                match process_audio(audio_data, &config, &socket, &mut rate_limiter, &typing_indicator).await {
-                    Ok(_) => {},
+                match process_audio(
+                    audio_data,
+                    &config,
+                    &socket,
+                    &mut rate_limiter,
+                    &typing_indicator,
+                )
+                .await
+                {
+                    Ok(_) => {}
                     Err(e) => eprintln!("Error processing audio: {}", e),
                 }
-            },
+            }
         }
     }
 
