@@ -86,10 +86,12 @@ async fn send_to_chatbox(message: &str, config: &Config, socket: &UdpSocket) -> 
     let osc_address = format!("{}:{}", config.osc.address, config.osc.output_port);
     socket.send_to(&buf, osc_address.as_str()).await?;
 
-    // Split message into chunks of 144 characters or less
-    let chunks: Vec<&str> = message.as_bytes()
+    // Split message into chunks of 144 characters or less, respecting Unicode character boundaries
+    let chunks: Vec<String> = message
+        .chars()
+        .collect::<Vec<char>>()
         .chunks(144)
-        .map(|chunk| std::str::from_utf8(chunk).unwrap_or(""))
+        .map(|chunk| chunk.iter().collect::<String>())
         .collect();
 
     // Send each chunk as a separate message
