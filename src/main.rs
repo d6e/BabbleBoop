@@ -1,5 +1,5 @@
 use async_std::net::UdpSocket;
-use rosc::{decoder, encoder::encode, OscMessage, OscPacket, OscType};
+use rosc::{encoder::encode, OscMessage, OscPacket, OscType};
 use serde::{Deserialize, Serialize};
 use std::error::Error;
 use std::fs;
@@ -14,8 +14,10 @@ struct Config {
 #[derive(Deserialize)]
 struct OscConfig {
     address: String,
-    port: u16,
-    response_address: String,
+    input_port: u16,
+    output_port: u16,
+    input_address: String,
+    output_address: String,
 }
 
 #[derive(Deserialize)]
@@ -27,6 +29,7 @@ struct OpenAiConfig {
 #[derive(Deserialize)]
 struct TranslationConfig {
     target_language: String,
+    display_time: u64,
 }
 
 #[derive(Serialize)]
@@ -73,13 +76,60 @@ async fn ask_chatgpt(prompt: &str, config: &OpenAiConfig) -> Result<String, Box<
     Ok(res_body.choices[0].message.content.clone())
 }
 
+async fn send_to_chatbox(message: &str, config: &Config, socket: &UdpSocket) -> Result<(), Box<dyn Error>> {
+    // Set typing indicator to true
+    let typing_on = OscMessage {
+        addr: "/chatbox/typing".to_string(),
+        args: vec![OscType::Bool(true)],
+    };
+    let buf = encode(&OscPacket::Message(typing_on))?;
+    let osc_address = format!("{}:{}", config.osc.address, config.osc.output_port);
+    socket.send_to(&buf, osc_address.as_str()).await?;
+
+    // Split message into chunks of 144 characters or less
+    let chunks: Vec<&str> = message.as_bytes()
+        .chunks(144)
+        .map(|chunk| std::str::from_utf8(chunk).unwrap_or(""))
+        .collect();
+
+    // Send each chunk as a separate message
+    for (i, chunk) in chunks.iter().enumerate().take(9) {
+        let is_last_chunk = i == chunks.len() - 1 || i == 8; // Last chunk or 9th chunk
+
+        let osc_message = OscMessage {
+            addr: "/chatbox/input".to_string(),
+            args: vec![
+                OscType::String(chunk.to_string()),
+                OscType::Bool(true), // Send immediately
+                OscType::Bool(is_last_chunk), // Only trigger notification on last chunk
+            ],
+        };
+
+        let buf = encode(&OscPacket::Message(osc_message))?;
+        socket.send_to(&buf, osc_address.as_str()).await?;
+
+        // Add a small delay between messages to ensure proper order
+        tokio::time::sleep(tokio::time::Duration::from_millis(config.translation.display_time)).await;
+    }
+
+    // Set typing indicator to false
+    let typing_off = OscMessage {
+        addr: "/chatbox/typing".to_string(),
+        args: vec![OscType::Bool(false)],
+    };
+    let buf = encode(&OscPacket::Message(typing_off))?;
+    socket.send_to(&buf, osc_address.as_str()).await?;
+
+    Ok(())
+}
+
 async fn osc_message_handler(
     packet: OscPacket,
     config: &Config,
     socket: &UdpSocket,
 ) -> Result<(), Box<dyn Error>> {
     if let OscPacket::Message(msg) = packet {
-        if msg.addr == config.osc.response_address {
+        if msg.addr == config.osc.input_address {
             if let Some(OscType::String(input)) = msg.args.get(0) {
                 println!("Received OSC message: {}", input);
 
@@ -91,14 +141,7 @@ async fn osc_message_handler(
                 let response = ask_chatgpt(&translation_prompt, &config.openai).await?;
                 println!("ChatGPT response: {}", response);
 
-                let osc_response = OscMessage {
-                    addr: config.osc.response_address.clone(),
-                    args: vec![OscType::String(response)],
-                };
-
-                let buf = encode(&OscPacket::Message(osc_response))?;
-                let osc_address = format!("{}:{}", config.osc.address, config.osc.port);
-                socket.send_to(&buf, osc_address).await?;
+                send_to_chatbox(&response, &config, socket).await?;
             }
         } else {
             println!("Received OSC message: {}", msg.addr);
@@ -113,17 +156,19 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let config_data = fs::read_to_string("config.toml")?;
     let config: Config = toml::from_str(&config_data)?;
 
-    // Bind the socket to the configured address and port
-    let socket_address = format!("{}:{}", config.osc.address, config.osc.port);
+    // Bind the socket to the configured address and input port
+    let socket_address = format!("{}:{}", config.osc.address, config.osc.input_port);
     let socket = UdpSocket::bind(socket_address).await?;
     let mut buf = [0u8; 1024];
 
-    println!("Listening for OSC messages on {}:{}", config.osc.address, config.osc.port);
+    println!("Listening for OSC messages on {}:{}", config.osc.address, config.osc.input_port);
+    println!("Sending responses to port {}", config.osc.output_port);
     println!("Translating to: {}", config.translation.target_language);
+   
 
     loop {
         let (size, _addr) = socket.recv_from(&mut buf).await?;
-        if let Ok((_, packet)) = decoder::decode_udp(&buf[..size]) {
+        if let Ok((_, packet)) = rosc::decoder::decode_udp(&buf[..size]) {
             osc_message_handler(packet, &config, &socket).await?;
         }
     }
