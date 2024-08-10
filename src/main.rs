@@ -5,12 +5,11 @@ use rosc::{encoder::encode, OscMessage, OscPacket, OscType};
 use serde::{Deserialize, Serialize};
 use std::error::Error;
 use std::fs;
-use std::io::Cursor;
+use std::io::{self, Cursor, Write};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tokio::time::sleep;
-
 
 #[derive(Deserialize, Clone)]
 struct Config {
@@ -63,7 +62,6 @@ struct ChatGptChoice {
     message: ChatGptMessage,
 }
 
-
 #[derive(Deserialize, Clone)]
 struct AudioConfig {
     silence_threshold: u32,
@@ -71,7 +69,6 @@ struct AudioConfig {
     noise_gate_hold_time: f32,
     min_transcription_duration: f32,
 }
-
 
 #[derive(Deserialize, Clone)]
 struct RateLimitConfig {
@@ -132,7 +129,7 @@ impl NoiseGate {
 
     fn process(&mut self, samples: &[f32]) -> bool {
         let max_amplitude = samples.iter().map(|&s| s.abs()).fold(0.0f32, f32::max);
-        
+
         if max_amplitude > self.threshold {
             self.last_active = Instant::now();
             self.is_active = true;
@@ -240,7 +237,7 @@ async fn send_to_chatbox(message: &str, config: &Config, socket: &UdpSocket) -> 
 
 async fn transcribe_audio(audio_data: Vec<u8>, config: &OpenAiConfig, rate_limiter: &mut RateLimiter) -> Result<String, Box<dyn Error>> {
     println!("Starting audio transcription. Audio data size: {} bytes", audio_data.len());
-    
+
     if audio_data.is_empty() {
         return Err("Audio data is empty".into());
     }
@@ -293,11 +290,11 @@ async fn process_audio(
 ) -> Result<(), Box<dyn Error>> {
     // Calculate audio duration
     let audio_duration = calculate_audio_duration(&audio_data)?;
-    
+
     // Check if audio is shorter than the minimum transcription duration
     let min_duration = Duration::from_secs_f32(config.audio.min_transcription_duration);
     if audio_duration < min_duration {
-        println!("Audio too short ({:.2}s). Minimum duration is {:.2}s. Skipping transcription.", 
+        println!("Audio too short ({:.2}s). Minimum duration is {:.2}s. Skipping transcription.",
                  audio_duration.as_secs_f32(), min_duration.as_secs_f32());
         typing_indicator.set_typing(false).await;
         return Ok(());
@@ -335,7 +332,6 @@ enum AudioEvent {
     AudioData(Vec<u8>),
 }
 
-
 fn start_audio_recording(
     config: &Config,
     tx: mpsc::Sender<AudioEvent>,
@@ -371,22 +367,22 @@ fn start_audio_recording(
                 move |data: &[f32], _: &cpal::InputCallbackInfo| {
                     if noise_gate.process(data) {
                         let mut buffer = audio_data_clone.lock().unwrap();
-                        
+
                         if !is_recording {
                             is_recording = true;
                             println!("Sound detected. Starting recording...");
                             let _ = tx_clone.try_send(AudioEvent::StartRecording);
                         }
-                        
+
                         buffer.extend_from_slice(data);
                         silent_frames = 0;
                     } else if is_recording {
                         silent_frames += 1;
-                        
+
                         if silent_frames >= silence_threshold {
                             is_recording = false;
                             silent_frames = 0;
-                            
+
                             let mut buffer = audio_data_clone.lock().unwrap();
                             if !buffer.is_empty() {
                                 println!("Silence detected. Stopping recording and processing audio...");
@@ -411,7 +407,7 @@ fn start_audio_recording(
                                 let _ = tx_clone.try_send(AudioEvent::AudioData(wav_buffer));
                                 buffer.clear();
                             }
-                            
+
                             let _ = tx_clone.try_send(AudioEvent::StopRecording);
                         } else {
                             // Keep recording during short pauses
@@ -437,6 +433,27 @@ fn start_audio_recording(
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
+    // Set a panic hook to handle panics and prevent the program from closing immediately
+    std::panic::set_hook(Box::new(|panic_info| {
+        eprintln!("Panic occurred: {}", panic_info);
+
+        // Ensure this is always executed after a panic
+        println!("Press Enter to exit...");
+        io::stdout().flush().unwrap();
+        let _ = io::stdin().read_line(&mut String::new());
+    }));
+
+    let result = run_main().await;
+
+    // Ensure this is always executed
+    println!("Press Enter to exit...");
+    io::stdout().flush().unwrap();
+    let _ = io::stdin().read_line(&mut String::new());
+
+    result
+}
+
+async fn run_main() -> Result<(), Box<dyn Error>> {
     let config_data = fs::read_to_string("config.toml")?;
     let config: Config = toml::from_str(&config_data)?;
     let config = Arc::new(config);
