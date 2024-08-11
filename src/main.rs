@@ -318,7 +318,7 @@ async fn process_audio(
     println!("Transcription: {}", transcription);
 
     let translation_prompt = format!(
-        "Translate the following text to {}: \"{}\"",
+        "You are a language translation app for VRChat. Answer only in the target language. Do not quote the translation. target_language={} Text:\n\n{}",
         config.translation.target_language, transcription
     );
 
