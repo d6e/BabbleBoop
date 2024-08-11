@@ -167,6 +167,14 @@ impl TypingIndicator {
             }
         }
     }
+
+    async fn start_typing(&self) {
+        self.set_typing(true).await;
+    }
+
+    async fn stop_typing(&self) {
+        self.set_typing(false).await;
+    }
 }
 
 async fn ask_chatgpt(prompt: &str, config: &OpenAiConfig) -> Result<String, Box<dyn Error>> {
@@ -196,14 +204,7 @@ async fn send_to_chatbox(
     config: &Config,
     socket: &UdpSocket,
 ) -> Result<(), Box<dyn Error>> {
-    // Set typing indicator to true
-    let typing_on = OscMessage {
-        addr: "/chatbox/typing".to_string(),
-        args: vec![OscType::Bool(true)],
-    };
-    let buf = encode(&OscPacket::Message(typing_on))?;
     let osc_address = format!("{}:{}", config.osc.address, config.osc.output_port);
-    socket.send_to(&buf, osc_address.as_str()).await?;
 
     // Split message into chunks of 144 characters or less, respecting Unicode character boundaries
     let chunks: Vec<String> = message
@@ -234,14 +235,6 @@ async fn send_to_chatbox(
         // Add a small delay between messages to ensure proper order
         tokio::time::sleep(tokio::time::Duration::from_millis(config.osc.display_time)).await;
     }
-
-    // Set typing indicator to false
-    let typing_off = OscMessage {
-        addr: "/chatbox/typing".to_string(),
-        args: vec![OscType::Bool(false)],
-    };
-    let buf = encode(&OscPacket::Message(typing_off))?;
-    socket.send_to(&buf, osc_address.as_str()).await?;
 
     Ok(())
 }
@@ -317,7 +310,7 @@ async fn process_audio(
             audio_duration.as_secs_f32(),
             min_duration.as_secs_f32()
         );
-        typing_indicator.set_typing(false).await;
+        typing_indicator.stop_typing().await;
         return Ok(());
     }
 
@@ -333,9 +326,9 @@ async fn process_audio(
     println!("Translation: {}", response);
     println!("---");
 
-    typing_indicator.set_typing(false).await; // Stop typing indicator
-
     send_to_chatbox(&response, &config, socket).await?;
+
+    typing_indicator.stop_typing().await;
 
     Ok(())
 }
@@ -522,10 +515,10 @@ async fn run_main() -> Result<(), Box<dyn Error>> {
     while let Some(event) = rx.recv().await {
         match event {
             AudioEvent::StartRecording => {
-                typing_indicator.set_typing(true).await;
+                typing_indicator.start_typing().await;
             }
             AudioEvent::StopRecording => {
-                typing_indicator.set_typing(false).await;
+                typing_indicator.stop_typing().await;
             }
             AudioEvent::AudioData(audio_data) => {
                 match process_audio(
