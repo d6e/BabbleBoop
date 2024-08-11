@@ -38,6 +38,7 @@ struct OpenAiConfig {
 #[derive(Deserialize, Clone)]
 struct TranslationConfig {
     target_language: String,
+    include_original_message: bool,
 }
 
 #[derive(Serialize)]
@@ -322,10 +323,13 @@ async fn process_audio(
         config.translation.target_language, transcription
     );
 
-    let response = ask_chatgpt(&translation_prompt, &config.openai).await?;
+    let mut response = ask_chatgpt(&translation_prompt, &config.openai).await?;
     println!("Translation: {}", response);
     println!("---");
 
+    if config.translation.include_original_message {
+        response = response + "\n" + &transcription;
+    }
     send_to_chatbox(&response, &config, socket).await?;
 
     typing_indicator.stop_typing().await;
