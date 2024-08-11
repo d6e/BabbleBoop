@@ -7,7 +7,7 @@ max_message_chunks = 9  # large messages are split into chunks, this is the max 
 
 [openai]
 api_key = "YOUR API KEY"
-model = "gpt-3.5-turbo"
+model = "gpt-4o-mini"
 
 [translation]
 target_language = "Japanese"
