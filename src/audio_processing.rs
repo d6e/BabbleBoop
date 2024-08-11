@@ -1,11 +1,11 @@
+use crate::chatbox::send_to_chatbox;
 use crate::config::Config;
-use crate::rate_limiter::RateLimiter;
 use crate::price_estimator::PriceEstimator;
-use crate::typing_indicator::TypingIndicator;
+use crate::rate_limiter::RateLimiter;
+use crate::recording_manager::RecordingManager;
 use crate::transcription::transcribe_audio;
 use crate::translation::ask_chatgpt;
-use crate::chatbox::send_to_chatbox;
-use crate::recording_manager::RecordingManager;
+use crate::typing_indicator::TypingIndicator;
 
 use std::error::Error;
 use std::time::Duration;

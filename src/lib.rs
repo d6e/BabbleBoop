@@ -1,11 +1,11 @@
-pub mod config;
-pub mod audio_recording;
 pub mod audio_processing;
+pub mod audio_recording;
+pub mod chatbox;
+pub mod config;
+pub mod price_estimator;
+pub mod rate_limiter;
 pub mod recording_manager;
 pub mod transcription;
 pub mod translation;
-pub mod chatbox;
-pub mod rate_limiter;
-pub mod price_estimator;
-pub mod typing_indicator;
 pub mod types;
+pub mod typing_indicator;

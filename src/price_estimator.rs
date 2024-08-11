@@ -35,8 +35,10 @@ impl PriceEstimator {
     }
 
     pub fn estimate_translation_cost(&self, input_tokens: usize, output_tokens: usize) -> f64 {
-        let input_cost = (input_tokens as f64 / 1_000_000.0) * self.gpt_input_price_per_million_tokens;
-        let output_cost = (output_tokens as f64 / 1_000_000.0) * self.gpt_output_price_per_million_tokens;
+        let input_cost =
+            (input_tokens as f64 / 1_000_000.0) * self.gpt_input_price_per_million_tokens;
+        let output_cost =
+            (output_tokens as f64 / 1_000_000.0) * self.gpt_output_price_per_million_tokens;
         input_cost + output_cost
     }
 

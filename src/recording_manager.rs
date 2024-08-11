@@ -18,11 +18,16 @@ impl RecordingManager {
         }
     }
 
-    pub async fn save_recording(&self, audio_data: Vec<u8>, transcription: &str) -> Result<(), Box<dyn Error>> {
+    pub async fn save_recording(
+        &self,
+        audio_data: Vec<u8>,
+        transcription: &str,
+    ) -> Result<(), Box<dyn Error>> {
         fs::create_dir_all(&self.recordings_dir)?;
 
         let timestamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
-        let slugified_transcription = self.slugify(&transcription[..std::cmp::min(50, transcription.len())]);
+        let slugified_transcription =
+            self.slugify(&transcription[..std::cmp::min(50, transcription.len())]);
         let filename = format!("{}_{}.wav", timestamp, slugified_transcription);
         let file_path = self.recordings_dir.join(filename);
 
