@@ -35,6 +35,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     result
 }
 
+
 async fn run_main() -> Result<(), Box<dyn Error>> {
 
     let config_path = "config.toml";
@@ -77,6 +78,9 @@ async fn run_main() -> Result<(), Box<dyn Error>> {
     let mut price_estimator = PriceEstimator::new(&config.openai.model);
     println!("Loaded total cost: ${:.4}", price_estimator.total_cost);
 
+    let recordings_dir = PathBuf::from("recordings");
+    let recording_manager = RecordingManager::new(recordings_dir, 10);
+
     while let Some(event) = rx.recv().await {
         match event {
             AudioEvent::StartRecording => {
@@ -93,6 +97,7 @@ async fn run_main() -> Result<(), Box<dyn Error>> {
                     &mut rate_limiter,
                     &typing_indicator,
                     &mut price_estimator,
+                    &recording_manager,
                 )
                 .await
                 {

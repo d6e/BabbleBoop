@@ -1,6 +1,7 @@
 pub mod config;
 pub mod audio_recording;
 pub mod audio_processing;
+pub mod recording_manager;
 pub mod transcription;
 pub mod translation;
 pub mod chatbox;
