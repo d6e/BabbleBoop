@@ -5,6 +5,7 @@ use crate::typing_indicator::TypingIndicator;
 use crate::transcription::transcribe_audio;
 use crate::translation::ask_chatgpt;
 use crate::chatbox::send_to_chatbox;
+use crate::recording_manager::RecordingManager;
 
 use std::error::Error;
 use std::time::Duration;
@@ -17,6 +18,7 @@ pub async fn process_audio(
     rate_limiter: &mut RateLimiter,
     typing_indicator: &TypingIndicator,
     price_estimator: &mut PriceEstimator,
+    recording_manager: &RecordingManager,
 ) -> Result<(), Box<dyn Error>> {
     let audio_duration = calculate_audio_duration(&audio_data)?;
 
@@ -31,8 +33,11 @@ pub async fn process_audio(
         return Ok(());
     }
 
-    let transcription = transcribe_audio(audio_data, &config.openai, rate_limiter).await?;
+    let transcription = transcribe_audio(audio_data.clone(), &config.openai, rate_limiter).await?;
     println!("Transcription: {}", transcription);
+
+    // Save the audio recording
+    recording_manager.save_recording(audio_data, &transcription).await?;
 
     let translation_prompt = format!(
         "You are a language translation app for VRChat. Answer only in the target language. Do not quote the translation. target_language={} Text:\n\n{}",
