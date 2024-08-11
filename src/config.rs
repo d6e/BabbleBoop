@@ -7,6 +7,7 @@ pub struct Config {
     pub translation: TranslationConfig,
     pub audio: AudioConfig,
     pub rate_limit: RateLimitConfig,
+    pub debug: bool,
 }
 
 #[derive(Deserialize, Clone)]

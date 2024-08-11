@@ -5,13 +5,16 @@ use vrchat_osc_llm::rate_limiter::RateLimiter;
 use vrchat_osc_llm::price_estimator::PriceEstimator;
 use vrchat_osc_llm::typing_indicator::TypingIndicator;
 use vrchat_osc_llm::types::AudioEvent;
+use vrchat_osc_llm::recording_manager::RecordingManager;
 
 use std::error::Error;
 use std::fs;
 use std::io::{self, Write};
 use std::sync::Arc;
+use std::path::PathBuf;
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
+
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
@@ -34,7 +37,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     result
 }
-
 
 async fn run_main() -> Result<(), Box<dyn Error>> {
 
@@ -61,6 +63,7 @@ async fn run_main() -> Result<(), Box<dyn Error>> {
         "Rate limit: {} requests per minute",
         config.rate_limit.requests_per_minute
     );
+    println!("Debug mode: {}", config.debug);
 
     let (tx, mut rx) = mpsc::channel::<AudioEvent>(100);
 
@@ -78,8 +81,11 @@ async fn run_main() -> Result<(), Box<dyn Error>> {
     let mut price_estimator = PriceEstimator::new(&config.openai.model);
     println!("Loaded total cost: ${:.4}", price_estimator.total_cost);
 
-    let recordings_dir = PathBuf::from("recordings");
-    let recording_manager = RecordingManager::new(recordings_dir, 10);
+    let recording_manager = if config.debug {
+        Some(RecordingManager::new(PathBuf::from("recordings"), 10))
+    } else {
+        None
+    };
 
     while let Some(event) = rx.recv().await {
         match event {
@@ -97,7 +103,7 @@ async fn run_main() -> Result<(), Box<dyn Error>> {
                     &mut rate_limiter,
                     &typing_indicator,
                     &mut price_estimator,
-                    &recording_manager,
+                    recording_manager.as_ref(),
                 )
                 .await
                 {

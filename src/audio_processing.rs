@@ -18,7 +18,7 @@ pub async fn process_audio(
     rate_limiter: &mut RateLimiter,
     typing_indicator: &TypingIndicator,
     price_estimator: &mut PriceEstimator,
-    recording_manager: &RecordingManager,
+    recording_manager: Option<&RecordingManager>,
 ) -> Result<(), Box<dyn Error>> {
     let audio_duration = calculate_audio_duration(&audio_data)?;
 
@@ -36,8 +36,10 @@ pub async fn process_audio(
     let transcription = transcribe_audio(audio_data.clone(), &config.openai, rate_limiter).await?;
     println!("Transcription: {}", transcription);
 
-    // Save the audio recording
-    recording_manager.save_recording(audio_data, &transcription).await?;
+    // Save the audio recording if debug mode is enabled
+    if let Some(manager) = recording_manager {
+        manager.save_recording(audio_data, &transcription).await?;
+    }
 
     let translation_prompt = format!(
         "You are a language translation app for VRChat. Answer only in the target language. Do not quote the translation. target_language={} Text:\n\n{}",
