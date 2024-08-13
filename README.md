@@ -2,6 +2,8 @@
 
 This is a fun little project I put together to experiment with real-time translation in VRChat using Large Language Models (LLMs). It's not perfect, but it's been interesting to play around with!
 
+The fun thing about LLMs is that they can translate to anything! English -> Japanese, English -> Emoji, English -> Sophisticated British Butler!
+
 ## What It Does
 
 - Listens to your speech in VRChat
