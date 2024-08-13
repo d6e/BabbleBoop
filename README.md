@@ -1,4 +1,4 @@
-# VRChat OSC LLM Translator
+# BabbleBoop
 
 This is a fun little project I put together to experiment with real-time translation in VRChat using Large Language Models (LLMs). It's not perfect, but it's been interesting to play around with!
 
