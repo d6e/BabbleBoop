@@ -202,6 +202,22 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0c4b4d0bd25bd0b74681c0ad21497610ce1b7c91b1022cd21c80c6fbdd9476b0"
 
 [[package]]
+name = "babble_boop"
+version = "0.3.0"
+dependencies = [
+ "async-std",
+ "bytes",
+ "cpal",
+ "hound",
+ "reqwest",
+ "rosc",
+ "serde",
+ "serde_json",
+ "tokio",
+ "toml",
+]
+
+[[package]]
 name = "backtrace"
 version = "0.3.73"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1996,22 +2012,6 @@ name = "version_check"
 version = "0.9.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "49874b5167b65d7193b8aba1567f5c7d93d001cafc34600cee003eda787e483f"
-
-[[package]]
-name = "vrchat_osc_llm"
-version = "0.1.0"
-dependencies = [
- "async-std",
- "bytes",
- "cpal",
- "hound",
- "reqwest",
- "rosc",
- "serde",
- "serde_json",
- "tokio",
- "toml",
-]
 
 [[package]]
 name = "waker-fn"

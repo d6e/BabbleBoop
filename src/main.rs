@@ -1,11 +1,11 @@
-use vrchat_osc_llm::audio_processing::process_audio;
-use vrchat_osc_llm::audio_recording::start_audio_recording;
-use vrchat_osc_llm::config::Config;
-use vrchat_osc_llm::price_estimator::PriceEstimator;
-use vrchat_osc_llm::rate_limiter::RateLimiter;
-use vrchat_osc_llm::recording_manager::RecordingManager;
-use vrchat_osc_llm::types::AudioEvent;
-use vrchat_osc_llm::typing_indicator::TypingIndicator;
+use babble_boop::audio_processing::process_audio;
+use babble_boop::audio_recording::start_audio_recording;
+use babble_boop::config::Config;
+use babble_boop::price_estimator::PriceEstimator;
+use babble_boop::rate_limiter::RateLimiter;
+use babble_boop::recording_manager::RecordingManager;
+use babble_boop::types::AudioEvent;
+use babble_boop::typing_indicator::TypingIndicator;
 
 use std::error::Error;
 use std::fs;
