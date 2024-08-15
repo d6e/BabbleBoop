@@ -42,7 +42,7 @@ pub async fn process_audio(
     }
 
     let translation_prompt = format!(
-        "You are a language translation app for VRChat. Answer only in the target language. Do not quote the translation. target_language={} Text:\n\n{}",
+        "You are a language translation app for VRChat. Do not answer the user. Only translate the words the user said. Answer only in the target language. Do not quote the translation. target_language={} Text:\n\n{}",
         config.translation.target_language, transcription
     );
 
