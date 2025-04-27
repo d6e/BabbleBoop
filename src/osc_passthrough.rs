@@ -18,16 +18,22 @@ impl OscPassthrough {
             return Ok(());
         }
 
-        let mut buf = [0u8; 65536]; // OSC packet max size
-        let passthrough_address = format!("{}:{}", self.config.osc.address, self.config.osc.passthrough_port);
+        // Create a new socket for the passthrough port
+        let passthrough_in_address = format!("{}:{}", self.config.osc.address, self.config.osc.passthrough_port);
+        let passthrough_socket = UdpSocket::bind(&passthrough_in_address).await?;
+        
+        // Output address uses the regular output_port
+        let output_address = format!("{}:{}", self.config.osc.address, self.config.osc.output_port);
 
         println!("OSC passthrough enabled: Forwarding messages from port {} to port {}", 
-            self.config.osc.input_port, self.config.osc.passthrough_port);
+            self.config.osc.passthrough_port, self.config.osc.output_port);
 
+        let mut buf = [0u8; 65536]; // OSC packet max size
+        
         loop {
-            match self.socket.recv_from(&mut buf).await {
+            match passthrough_socket.recv_from(&mut buf).await {
                 Ok((size, _src_addr)) => {
-                    // Received an OSC packet, forward to the passthrough port
+                    // Received an OSC packet, forward to the output port
                     if size > 0 {
                         // Debug log if debug mode enabled
                         if self.config.debug {
@@ -43,8 +49,9 @@ impl OscPassthrough {
                             }
                         }
 
-                        // Forward the raw packet, no need to decode/encode
-                        if let Err(e) = self.socket.send_to(&buf[..size], &passthrough_address).await {
+                        // Forward the raw packet using the shared socket
+                        // This ensures OSC messages share the same socket as chatbox messages
+                        if let Err(e) = self.socket.send_to(&buf[..size], &output_address).await {
                             eprintln!("Error forwarding OSC packet: {}", e);
                         }
                     }

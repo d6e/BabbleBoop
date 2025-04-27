@@ -67,8 +67,8 @@ async fn run_main() -> Result<(), Box<dyn Error>> {
     
     if config.osc.passthrough_enabled {
         println!("OSC passthrough enabled: {} -> {}", 
-            config.osc.input_port, 
-            config.osc.passthrough_port);
+            config.osc.passthrough_port, 
+            config.osc.output_port);
     }
 
     let (tx, mut rx) = mpsc::channel::<AudioEvent>(100);
