@@ -17,6 +17,8 @@ pub struct OscConfig {
     pub output_port: u16,
     pub max_message_chunks: usize,
     pub display_time: u64,
+    pub passthrough_enabled: bool,
+    pub passthrough_port: u16,
 }
 
 #[derive(Deserialize, Clone)]

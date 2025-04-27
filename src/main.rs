@@ -1,6 +1,7 @@
 use babble_boop::audio_processing::process_audio;
 use babble_boop::audio_recording::start_audio_recording;
 use babble_boop::config::Config;
+use babble_boop::osc_passthrough::OscPassthrough;
 use babble_boop::price_estimator::PriceEstimator;
 use babble_boop::rate_limiter::RateLimiter;
 use babble_boop::recording_manager::RecordingManager;
@@ -21,7 +22,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     std::panic::set_hook(Box::new(|panic_info| {
         eprintln!("Panic occurred: {}", panic_info);
 
-        println!("");
+        println!();
         println!("Press Enter to exit...");
         io::stdout().flush().unwrap();
         let _ = io::stdin().read_line(&mut String::new());
@@ -29,7 +30,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let result = run_main().await;
 
-    println!("");
+    println!();
     println!("Press Enter to exit...");
     io::stdout().flush().unwrap();
     let _ = io::stdin().read_line(&mut String::new());
@@ -63,10 +64,26 @@ async fn run_main() -> Result<(), Box<dyn Error>> {
         config.rate_limit.requests_per_minute
     );
     println!("Debug mode: {}", config.debug);
+    
+    if config.osc.passthrough_enabled {
+        println!("OSC passthrough enabled: {} -> {}", 
+            config.osc.input_port, 
+            config.osc.passthrough_port);
+    }
 
     let (tx, mut rx) = mpsc::channel::<AudioEvent>(100);
 
     let typing_indicator = TypingIndicator::new(Arc::clone(&socket), Arc::clone(&config));
+    
+    // Start OSC passthrough if enabled
+    if config.osc.passthrough_enabled {
+        let passthrough = OscPassthrough::new(Arc::clone(&socket), Arc::clone(&config));
+        let _passthrough_handle = tokio::spawn(async move {
+            if let Err(e) = passthrough.start_passthrough().await {
+                eprintln!("OSC passthrough error: {}", e);
+            }
+        });
+    }
 
     // Start the audio recording in a separate thread
     let config_clone = Arc::clone(&config);
