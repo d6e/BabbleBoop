@@ -63,7 +63,7 @@ pub async fn process_audio(
     if config.translation.include_original_message {
         response = response + "\n" + &transcription;
     }
-    send_to_chatbox(&response, &config, socket).await?;
+    send_to_chatbox(&response, config, socket).await?;
 
     typing_indicator.stop_typing().await;
 
