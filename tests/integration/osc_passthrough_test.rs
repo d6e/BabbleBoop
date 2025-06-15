@@ -138,8 +138,6 @@ async fn test_basic_osc_forwarding() {
 
 #[tokio::test]
 async fn test_facetracking_parameters() {
-    let config = TestConfig::default();
-
     // Similar setup as above
     let test_config = Arc::new(babble_boop::config::Config {
         osc: babble_boop::config::OscConfig {
@@ -239,7 +237,6 @@ async fn test_facetracking_parameters() {
 
 #[tokio::test]
 async fn test_invalid_packet_dropping() {
-    let config = TestConfig::default();
 
     let test_config = Arc::new(babble_boop::config::Config {
         osc: babble_boop::config::OscConfig {
@@ -344,7 +341,6 @@ async fn test_invalid_packet_dropping() {
 
 #[tokio::test]
 async fn test_concurrent_operations() {
-    let config = TestConfig::default();
 
     let test_config = Arc::new(babble_boop::config::Config {
         osc: babble_boop::config::OscConfig {
@@ -480,7 +476,6 @@ async fn test_concurrent_operations() {
 
 #[tokio::test]
 async fn test_graceful_shutdown() {
-    let config = TestConfig::default();
 
     let test_config = Arc::new(babble_boop::config::Config {
         osc: babble_boop::config::OscConfig {
