@@ -21,7 +21,14 @@ impl OscPassthrough {
 
         // Create a new socket for the passthrough port
         let passthrough_in_address = format!("{}:{}", self.config.osc.address, self.config.osc.passthrough_port);
-        let passthrough_socket = UdpSocket::bind(&passthrough_in_address).await?;
+        let passthrough_socket = match UdpSocket::bind(&passthrough_in_address).await {
+            Ok(socket) => socket,
+            Err(e) => {
+                eprintln!("Failed to bind OSC passthrough socket to {}: {}", passthrough_in_address, e);
+                eprintln!("Please ensure port {} is not in use by another application", self.config.osc.passthrough_port);
+                return Err(Box::new(e));
+            }
+        };
         
         // Output address uses the regular output_port
         let output_address = format!("{}:{}", self.config.osc.address, self.config.osc.output_port);
@@ -67,6 +74,12 @@ impl OscPassthrough {
                         }
                         Err(e) => {
                             eprintln!("Error receiving OSC packet: {}", e);
+                            // If it's a critical error (socket closed), break the loop
+                            if e.kind() == std::io::ErrorKind::ConnectionAborted || 
+                               e.kind() == std::io::ErrorKind::UnexpectedEof {
+                                eprintln!("Critical error in OSC passthrough, shutting down");
+                                break;
+                            }
                         }
                     }
                 }
