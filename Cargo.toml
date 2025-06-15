@@ -21,3 +21,7 @@ tokio-test = "0.4"
 [[test]]
 name = "osc_passthrough_test"
 path = "tests/integration/osc_passthrough_test.rs"
+
+[[test]]
+name = "osc_passthrough_test_extra"
+path = "tests/integration/osc_passthrough_test_extra.rs"

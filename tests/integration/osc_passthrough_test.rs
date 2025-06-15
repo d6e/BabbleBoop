@@ -199,6 +199,7 @@ async fn test_facetracking_parameters() {
                     // Find matching parameter
                     for (addr, expected_value) in &params {
                         if msg.addr == *addr {
+                            assert!(!msg.args.is_empty(), "Message should have arguments");
                             if let OscType::Float(value) = msg.args[0] {
                                 assert_eq!(value, *expected_value);
                                 received += 1;
@@ -268,7 +269,7 @@ async fn test_invalid_packet_dropping() {
     
     sleep(Duration::from_millis(100)).await;
     
-    // Send invalid packets
+    // Send invalid packets with small delays to ensure ordering
     let invalid_packets = vec![
         b"Not an OSC packet".to_vec(),
         b"Random garbage \x00\x01\x02".to_vec(),
@@ -278,7 +279,11 @@ async fn test_invalid_packet_dropping() {
     
     for packet in &invalid_packets {
         sender_socket.send_to(packet, format!("127.0.0.1:{}", 19017)).await.unwrap();
+        sleep(Duration::from_millis(10)).await; // Small delay to ensure processing
     }
+    
+    // Wait a bit before sending valid packet to ensure all invalid ones are processed
+    sleep(Duration::from_millis(50)).await;
     
     // Send one valid packet
     let valid_msg = create_test_message("/test/valid", vec![OscType::Int(42)]);
@@ -289,6 +294,7 @@ async fn test_invalid_packet_dropping() {
         Ok((packet, _)) => {
             if let OscPacket::Message(msg) = packet {
                 assert_eq!(msg.addr, "/test/valid");
+                assert!(!msg.args.is_empty(), "Message should have arguments");
                 if let OscType::Int(value) = msg.args[0] {
                     assert_eq!(value, 42);
                 }
@@ -748,6 +754,7 @@ async fn test_osc_bundle_forwarding() {
                 // Verify first message
                 if let OscPacket::Message(msg) = &received_bundle.content[0] {
                     assert_eq!(msg.addr, "/bundle/msg1");
+                    assert!(!msg.args.is_empty(), "Bundle message 1 should have arguments");
                     if let OscType::Int(val) = msg.args[0] {
                         assert_eq!(val, 1);
                     }
@@ -756,6 +763,7 @@ async fn test_osc_bundle_forwarding() {
                 // Verify second message
                 if let OscPacket::Message(msg) = &received_bundle.content[1] {
                     assert_eq!(msg.addr, "/bundle/msg2");
+                    assert!(!msg.args.is_empty(), "Bundle message 2 should have arguments");
                     if let OscType::Float(val) = msg.args[0] {
                         assert_eq!(val, 2.5);
                     }
