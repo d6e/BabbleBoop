@@ -37,38 +37,53 @@ impl OscPassthrough {
             self.config.osc.passthrough_port, self.config.osc.output_port);
 
         let mut buf = [0u8; 65536]; // OSC packet max size
+        let mut invalid_packet_count = 0u64;
         
         loop {
             tokio::select! {
                 _ = shutdown_rx.changed() => {
                     if *shutdown_rx.borrow() {
                         println!("OSC passthrough shutting down gracefully");
+                        if invalid_packet_count > 0 {
+                            println!("Total invalid packets dropped: {}", invalid_packet_count);
+                        }
                         break;
                     }
                 }
                 result = passthrough_socket.recv_from(&mut buf) => {
                     match result {
-                        Ok((size, _src_addr)) => {
-                            // Received an OSC packet, forward to the output port
+                        Ok((size, src_addr)) => {
+                            // Received a packet, validate it's OSC before forwarding
                             if size > 0 {
-                                // Debug log if debug mode enabled
-                                if self.config.debug {
-                                    if let Ok((_, packet)) = decoder::decode_udp(&buf[..size]) {
-                                        match packet {
-                                            OscPacket::Message(msg) => {
-                                                println!("OSC passthrough: Forwarding message: {}", msg.addr);
-                                            },
-                                            OscPacket::Bundle(bundle) => {
-                                                println!("OSC passthrough: Forwarding bundle with {} messages", bundle.content.len());
+                                // Validate OSC packet
+                                match decoder::decode_udp(&buf[..size]) {
+                                    Ok((_, packet)) => {
+                                        // Valid OSC packet
+                                        if self.config.debug {
+                                            match &packet {
+                                                OscPacket::Message(msg) => {
+                                                    println!("OSC passthrough: Forwarding message '{}' from {}", msg.addr, src_addr);
+                                                },
+                                                OscPacket::Bundle(bundle) => {
+                                                    println!("OSC passthrough: Forwarding bundle with {} messages from {}", bundle.content.len(), src_addr);
+                                                }
                                             }
                                         }
-                                    }
-                                }
 
-                                // Forward the raw packet using the shared socket
-                                // This ensures OSC messages share the same socket as chatbox messages
-                                if let Err(e) = self.socket.send_to(&buf[..size], &output_address).await {
-                                    eprintln!("Error forwarding OSC packet: {}", e);
+                                        // Forward the raw packet using the shared socket
+                                        // This ensures OSC messages share the same socket as chatbox messages
+                                        if let Err(e) = self.socket.send_to(&buf[..size], &output_address).await {
+                                            eprintln!("Error forwarding OSC packet: {}", e);
+                                        }
+                                    }
+                                    Err(e) => {
+                                        invalid_packet_count += 1;
+                                        if self.config.debug {
+                                            eprintln!("Received invalid OSC packet from {}: {}", src_addr, e);
+                                            eprintln!("Packet size: {} bytes, total invalid packets: {}", size, invalid_packet_count);
+                                        }
+                                        // Don't forward invalid packets
+                                    }
                                 }
                             }
                         }
