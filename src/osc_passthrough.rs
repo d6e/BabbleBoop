@@ -1,5 +1,5 @@
 use crate::config::Config;
-use rosc::{OscPacket, decoder};
+use rosc::{decoder, OscPacket};
 use std::{error::Error, sync::Arc};
 use tokio::net::UdpSocket;
 use tokio::sync::watch;
@@ -14,31 +14,48 @@ impl OscPassthrough {
         OscPassthrough { socket, config }
     }
 
-    pub async fn start_passthrough(&self, mut shutdown_rx: watch::Receiver<bool>) -> Result<(), Box<dyn Error>> {
+    pub async fn start_passthrough(
+        &self,
+        mut shutdown_rx: watch::Receiver<bool>,
+    ) -> Result<(), Box<dyn Error>> {
         if !self.config.osc.passthrough_enabled {
             return Ok(());
         }
 
         // Create a new socket for the passthrough port
-        let passthrough_in_address = format!("{}:{}", self.config.osc.address, self.config.osc.passthrough_port);
+        let passthrough_in_address = format!(
+            "{}:{}",
+            self.config.osc.address, self.config.osc.passthrough_port
+        );
         let passthrough_socket = match UdpSocket::bind(&passthrough_in_address).await {
             Ok(socket) => socket,
             Err(e) => {
-                eprintln!("Failed to bind OSC passthrough socket to {}: {}", passthrough_in_address, e);
-                eprintln!("Please ensure port {} is not in use by another application", self.config.osc.passthrough_port);
+                eprintln!(
+                    "Failed to bind OSC passthrough socket to {}: {}",
+                    passthrough_in_address, e
+                );
+                eprintln!(
+                    "Please ensure port {} is not in use by another application",
+                    self.config.osc.passthrough_port
+                );
                 return Err(Box::new(e));
             }
         };
-        
-        // Output address uses the regular output_port
-        let output_address = format!("{}:{}", self.config.osc.address, self.config.osc.output_port);
 
-        println!("OSC passthrough enabled: Forwarding messages from port {} to port {}", 
-            self.config.osc.passthrough_port, self.config.osc.output_port);
+        // Output address uses the regular output_port
+        let output_address = format!(
+            "{}:{}",
+            self.config.osc.address, self.config.osc.output_port
+        );
+
+        println!(
+            "OSC passthrough enabled: Forwarding messages from port {} to port {}",
+            self.config.osc.passthrough_port, self.config.osc.output_port
+        );
 
         let mut buf = [0u8; 65536]; // OSC packet max size
         let mut invalid_packet_count = 0u64;
-        
+
         loop {
             tokio::select! {
                 _ = shutdown_rx.changed() => {
@@ -90,7 +107,7 @@ impl OscPassthrough {
                         Err(e) => {
                             eprintln!("Error receiving OSC packet: {}", e);
                             // If it's a critical error (socket closed), break the loop
-                            if e.kind() == std::io::ErrorKind::ConnectionAborted || 
+                            if e.kind() == std::io::ErrorKind::ConnectionAborted ||
                                e.kind() == std::io::ErrorKind::UnexpectedEof {
                                 eprintln!("Critical error in OSC passthrough, shutting down");
                                 break;

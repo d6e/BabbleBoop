@@ -39,7 +39,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
 }
 
 async fn run_main() -> Result<(), Box<dyn Error>> {
-
     let config_path = "config.toml";
     let config_data = match fs::read_to_string(config_path) {
         Ok(data) => data,
@@ -64,18 +63,19 @@ async fn run_main() -> Result<(), Box<dyn Error>> {
         config.rate_limit.requests_per_minute
     );
     println!("Debug mode: {}", config.debug);
-    
+
     if config.osc.passthrough_enabled {
-        println!("OSC passthrough enabled: {} -> {}", 
-            config.osc.passthrough_port, 
-            config.osc.output_port);
+        println!(
+            "OSC passthrough enabled: {} -> {}",
+            config.osc.passthrough_port, config.osc.output_port
+        );
     }
 
     let (tx, mut rx) = mpsc::channel::<AudioEvent>(100);
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
     let typing_indicator = TypingIndicator::new(Arc::clone(&socket), Arc::clone(&config));
-    
+
     // Start OSC passthrough if enabled
     let passthrough_handle = if config.osc.passthrough_enabled {
         let passthrough = OscPassthrough::new(Arc::clone(&socket), Arc::clone(&config));
@@ -135,7 +135,7 @@ async fn run_main() -> Result<(), Box<dyn Error>> {
 
     // Send shutdown signal
     let _ = shutdown_tx.send(true);
-    
+
     // Wait for passthrough task to complete if it was started
     if let Some(handle) = passthrough_handle {
         if let Err(e) = handle.await {

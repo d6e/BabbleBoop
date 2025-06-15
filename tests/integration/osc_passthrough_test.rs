@@ -1,9 +1,9 @@
+use rosc::{decoder, encoder::encode, OscBundle, OscMessage, OscPacket, OscTime, OscType};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::UdpSocket;
 use tokio::sync::{mpsc, watch};
 use tokio::time::{sleep, timeout};
-use rosc::{OscPacket, OscMessage, OscType, OscBundle, OscTime, encoder::encode, decoder};
 
 /// Test configuration for OSC passthrough tests
 struct TestConfig {
@@ -22,21 +22,25 @@ impl Default for TestConfig {
 
 /// Helper to create a test OSC message
 fn create_test_message(addr: &str, args: Vec<OscType>) -> Vec<u8> {
-    let msg = OscMessage { addr: addr.to_string(), args };
+    let msg = OscMessage {
+        addr: addr.to_string(),
+        args,
+    };
     let packet = OscPacket::Message(msg);
     encode(&packet).unwrap()
 }
 
 /// Helper to receive and decode OSC messages
-async fn receive_osc_message(socket: &UdpSocket, timeout_duration: Duration) -> Result<(OscPacket, std::net::SocketAddr), String> {
+async fn receive_osc_message(
+    socket: &UdpSocket,
+    timeout_duration: Duration,
+) -> Result<(OscPacket, std::net::SocketAddr), String> {
     let mut buf = [0u8; 65536];
     match timeout(timeout_duration, socket.recv_from(&mut buf)).await {
-        Ok(Ok((size, addr))) => {
-            match decoder::decode_udp(&buf[..size]) {
-                Ok((_, packet)) => Ok((packet, addr)),
-                Err(e) => Err(format!("Failed to decode OSC packet: {}", e)),
-            }
-        }
+        Ok(Ok((size, addr))) => match decoder::decode_udp(&buf[..size]) {
+            Ok((_, packet)) => Ok((packet, addr)),
+            Err(e) => Err(format!("Failed to decode OSC packet: {}", e)),
+        },
         Ok(Err(e)) => Err(format!("Socket receive error: {}", e)),
         Err(_) => Err("Timeout waiting for message".to_string()),
     }
@@ -45,7 +49,7 @@ async fn receive_osc_message(socket: &UdpSocket, timeout_duration: Duration) -> 
 #[tokio::test]
 async fn test_basic_osc_forwarding() {
     let config = TestConfig::default();
-    
+
     // Create temporary config for the test
     let test_config = Arc::new(babble_boop::config::Config {
         osc: babble_boop::config::OscConfig {
@@ -76,34 +80,39 @@ async fn test_basic_osc_forwarding() {
         },
         debug: true,
     });
-    
+
     // Create main socket
     let main_socket = Arc::new(UdpSocket::bind("127.0.0.1:19001").await.unwrap());
-    
+
     // Create listener socket on output port
-    let listener_socket = UdpSocket::bind(format!("127.0.0.1:{}", config.output_port)).await.unwrap();
-    
+    let listener_socket = UdpSocket::bind(format!("127.0.0.1:{}", config.output_port))
+        .await
+        .unwrap();
+
     // Create sender socket
     let sender_socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-    
+
     // Start passthrough
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let passthrough = babble_boop::osc_passthrough::OscPassthrough::new(
         Arc::clone(&main_socket),
         Arc::clone(&test_config),
     );
-    
+
     let passthrough_handle = tokio::spawn(async move {
         let _ = passthrough.start_passthrough(shutdown_rx).await;
     });
-    
+
     // Give passthrough time to start
     sleep(Duration::from_millis(100)).await;
-    
+
     // Test 1: Send a simple message
     let test_msg = create_test_message("/test/simple", vec![OscType::String("Hello".to_string())]);
-    sender_socket.send_to(&test_msg, format!("127.0.0.1:{}", config.passthrough_port)).await.unwrap();
-    
+    sender_socket
+        .send_to(&test_msg, format!("127.0.0.1:{}", config.passthrough_port))
+        .await
+        .unwrap();
+
     // Receive and verify
     match receive_osc_message(&listener_socket, Duration::from_secs(1)).await {
         Ok((packet, _)) => {
@@ -121,7 +130,7 @@ async fn test_basic_osc_forwarding() {
         }
         Err(e) => panic!("Failed to receive forwarded message: {}", e),
     }
-    
+
     // Cleanup
     let _ = shutdown_tx.send(true);
     let _ = timeout(Duration::from_secs(1), passthrough_handle).await;
@@ -130,7 +139,7 @@ async fn test_basic_osc_forwarding() {
 #[tokio::test]
 async fn test_facetracking_parameters() {
     let config = TestConfig::default();
-    
+
     // Similar setup as above
     let test_config = Arc::new(babble_boop::config::Config {
         osc: babble_boop::config::OscConfig {
@@ -161,35 +170,40 @@ async fn test_facetracking_parameters() {
         },
         debug: true,
     });
-    
+
     let main_socket = Arc::new(UdpSocket::bind("127.0.0.1:19002").await.unwrap());
-    let listener_socket = UdpSocket::bind(format!("127.0.0.1:{}", 19010)).await.unwrap();
+    let listener_socket = UdpSocket::bind(format!("127.0.0.1:{}", 19010))
+        .await
+        .unwrap();
     let sender_socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-    
+
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let passthrough = babble_boop::osc_passthrough::OscPassthrough::new(
         Arc::clone(&main_socket),
         Arc::clone(&test_config),
     );
-    
+
     let passthrough_handle = tokio::spawn(async move {
         let _ = passthrough.start_passthrough(shutdown_rx).await;
     });
-    
+
     sleep(Duration::from_millis(100)).await;
-    
+
     // Send facetracking parameters
     let params = vec![
         ("/avatar/parameters/EyeLeftX", 0.5f32),
         ("/avatar/parameters/EyeRightX", 0.5f32),
         ("/avatar/parameters/MouthOpen", 0.3f32),
     ];
-    
+
     for (addr, value) in &params {
         let msg = create_test_message(addr, vec![OscType::Float(*value)]);
-        sender_socket.send_to(&msg, format!("127.0.0.1:{}", 19016)).await.unwrap();
+        sender_socket
+            .send_to(&msg, format!("127.0.0.1:{}", 19016))
+            .await
+            .unwrap();
     }
-    
+
     // Verify all messages were forwarded
     let mut received = 0;
     for _ in 0..params.len() {
@@ -212,9 +226,13 @@ async fn test_facetracking_parameters() {
             Err(e) => panic!("Failed to receive facetracking parameter: {}", e),
         }
     }
-    
-    assert_eq!(received, params.len(), "Not all facetracking parameters were forwarded");
-    
+
+    assert_eq!(
+        received,
+        params.len(),
+        "Not all facetracking parameters were forwarded"
+    );
+
     let _ = shutdown_tx.send(true);
     let _ = timeout(Duration::from_secs(1), passthrough_handle).await;
 }
@@ -222,7 +240,7 @@ async fn test_facetracking_parameters() {
 #[tokio::test]
 async fn test_invalid_packet_dropping() {
     let config = TestConfig::default();
-    
+
     let test_config = Arc::new(babble_boop::config::Config {
         osc: babble_boop::config::OscConfig {
             address: "127.0.0.1".to_string(),
@@ -252,43 +270,51 @@ async fn test_invalid_packet_dropping() {
         },
         debug: true,
     });
-    
+
     let main_socket = Arc::new(UdpSocket::bind("127.0.0.1:19003").await.unwrap());
-    let listener_socket = UdpSocket::bind(format!("127.0.0.1:{}", 19020)).await.unwrap();
+    let listener_socket = UdpSocket::bind(format!("127.0.0.1:{}", 19020))
+        .await
+        .unwrap();
     let sender_socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-    
+
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let passthrough = babble_boop::osc_passthrough::OscPassthrough::new(
         Arc::clone(&main_socket),
         Arc::clone(&test_config),
     );
-    
+
     let passthrough_handle = tokio::spawn(async move {
         let _ = passthrough.start_passthrough(shutdown_rx).await;
     });
-    
+
     sleep(Duration::from_millis(100)).await;
-    
+
     // Send invalid packets with small delays to ensure ordering
     let invalid_packets = vec![
         b"Not an OSC packet".to_vec(),
         b"Random garbage \x00\x01\x02".to_vec(),
-        b"".to_vec(), // Empty packet
+        b"".to_vec(),    // Empty packet
         vec![0xFF; 100], // Random bytes
     ];
-    
+
     for packet in &invalid_packets {
-        sender_socket.send_to(packet, format!("127.0.0.1:{}", 19017)).await.unwrap();
+        sender_socket
+            .send_to(packet, format!("127.0.0.1:{}", 19017))
+            .await
+            .unwrap();
         sleep(Duration::from_millis(10)).await; // Small delay to ensure processing
     }
-    
+
     // Wait a bit before sending valid packet to ensure all invalid ones are processed
     sleep(Duration::from_millis(50)).await;
-    
+
     // Send one valid packet
     let valid_msg = create_test_message("/test/valid", vec![OscType::Int(42)]);
-    sender_socket.send_to(&valid_msg, format!("127.0.0.1:{}", 19017)).await.unwrap();
-    
+    sender_socket
+        .send_to(&valid_msg, format!("127.0.0.1:{}", 19017))
+        .await
+        .unwrap();
+
     // Should only receive the valid packet
     match receive_osc_message(&listener_socket, Duration::from_secs(1)).await {
         Ok((packet, _)) => {
@@ -302,7 +328,7 @@ async fn test_invalid_packet_dropping() {
         }
         Err(e) => panic!("Failed to receive valid message: {}", e),
     }
-    
+
     // Verify no invalid packets were forwarded (should timeout)
     match receive_osc_message(&listener_socket, Duration::from_millis(500)).await {
         Err(e) if e.contains("Timeout") => {
@@ -311,7 +337,7 @@ async fn test_invalid_packet_dropping() {
         Ok(_) => panic!("Received unexpected packet - invalid packet was forwarded"),
         Err(e) => panic!("Unexpected error: {}", e),
     }
-    
+
     let _ = shutdown_tx.send(true);
     let _ = timeout(Duration::from_secs(1), passthrough_handle).await;
 }
@@ -319,7 +345,7 @@ async fn test_invalid_packet_dropping() {
 #[tokio::test]
 async fn test_concurrent_operations() {
     let config = TestConfig::default();
-    
+
     let test_config = Arc::new(babble_boop::config::Config {
         osc: babble_boop::config::OscConfig {
             address: "127.0.0.1".to_string(),
@@ -349,55 +375,67 @@ async fn test_concurrent_operations() {
         },
         debug: false, // Disable debug for performance test
     });
-    
+
     let main_socket = Arc::new(UdpSocket::bind("127.0.0.1:19004").await.unwrap());
-    let listener_socket = UdpSocket::bind(format!("127.0.0.1:{}", 19030)).await.unwrap();
-    
+    let listener_socket = UdpSocket::bind(format!("127.0.0.1:{}", 19030))
+        .await
+        .unwrap();
+
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let passthrough = babble_boop::osc_passthrough::OscPassthrough::new(
         Arc::clone(&main_socket),
         Arc::clone(&test_config),
     );
-    
+
     let passthrough_handle = tokio::spawn(async move {
         let _ = passthrough.start_passthrough(shutdown_rx).await;
     });
-    
+
     sleep(Duration::from_millis(100)).await;
-    
+
     // Spawn multiple senders
     let (tx, mut rx) = mpsc::channel(100);
     let mut sender_handles = vec![];
-    
+
     // Sender 1: Rapid facetracking data
     let tx1 = tx.clone();
     let handle1 = tokio::spawn(async move {
         let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         for i in 0..50 {
             let value = (i as f32) / 100.0;
-            let msg = create_test_message("/avatar/parameters/TestParam", vec![OscType::Float(value)]);
-            socket.send_to(&msg, format!("127.0.0.1:{}", 19018)).await.unwrap();
+            let msg =
+                create_test_message("/avatar/parameters/TestParam", vec![OscType::Float(value)]);
+            socket
+                .send_to(&msg, format!("127.0.0.1:{}", 19018))
+                .await
+                .unwrap();
             let _ = tx1.send(1).await;
             sleep(Duration::from_millis(10)).await;
         }
     });
     sender_handles.push(handle1);
-    
+
     // Sender 2: Chatbox messages
     let tx2 = tx.clone();
     let handle2 = tokio::spawn(async move {
         let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         for i in 0..10 {
-            let msg = create_test_message("/chatbox/test", vec![OscType::String(format!("Message {}", i))]);
-            socket.send_to(&msg, format!("127.0.0.1:{}", 19018)).await.unwrap();
+            let msg = create_test_message(
+                "/chatbox/test",
+                vec![OscType::String(format!("Message {}", i))],
+            );
+            socket
+                .send_to(&msg, format!("127.0.0.1:{}", 19018))
+                .await
+                .unwrap();
             let _ = tx2.send(1).await;
             sleep(Duration::from_millis(50)).await;
         }
     });
     sender_handles.push(handle2);
-    
+
     drop(tx); // Close original sender
-    
+
     // Count received messages
     let receiver_handle = tokio::spawn(async move {
         let mut count = 0;
@@ -410,28 +448,32 @@ async fn test_concurrent_operations() {
         }
         count
     });
-    
+
     // Wait for all senders to complete
     for handle in sender_handles {
         handle.await.unwrap();
     }
-    
+
     // Count sent messages
     let mut sent_count = 0;
     while let Ok(_) = rx.try_recv() {
         sent_count += 1;
     }
-    
+
     // Wait a bit more for messages to be forwarded
     sleep(Duration::from_millis(200)).await;
-    
+
     // Get received count
     let received_count = receiver_handle.await.unwrap();
-    
+
     // Verify most messages were forwarded (allow for some UDP loss)
-    assert!(received_count >= (sent_count * 95) / 100, 
-            "Too many messages lost: sent {}, received {}", sent_count, received_count);
-    
+    assert!(
+        received_count >= (sent_count * 95) / 100,
+        "Too many messages lost: sent {}, received {}",
+        sent_count,
+        received_count
+    );
+
     let _ = shutdown_tx.send(true);
     let _ = timeout(Duration::from_secs(1), passthrough_handle).await;
 }
@@ -439,7 +481,7 @@ async fn test_concurrent_operations() {
 #[tokio::test]
 async fn test_graceful_shutdown() {
     let config = TestConfig::default();
-    
+
     let test_config = Arc::new(babble_boop::config::Config {
         osc: babble_boop::config::OscConfig {
             address: "127.0.0.1".to_string(),
@@ -469,25 +511,25 @@ async fn test_graceful_shutdown() {
         },
         debug: true,
     });
-    
+
     let main_socket = Arc::new(UdpSocket::bind("127.0.0.1:19005").await.unwrap());
-    
+
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let passthrough = babble_boop::osc_passthrough::OscPassthrough::new(
         Arc::clone(&main_socket),
         Arc::clone(&test_config),
     );
-    
+
     let passthrough_handle = tokio::spawn(async move {
         let _ = passthrough.start_passthrough(shutdown_rx).await;
     });
-    
+
     // Give it time to start
     sleep(Duration::from_millis(100)).await;
-    
+
     // Send shutdown signal
     let _ = shutdown_tx.send(true);
-    
+
     // Verify it shuts down quickly
     match timeout(Duration::from_secs(2), passthrough_handle).await {
         Ok(Ok(_)) => {
@@ -530,19 +572,19 @@ async fn test_passthrough_disabled() {
         },
         debug: true,
     });
-    
+
     let main_socket = Arc::new(UdpSocket::bind("127.0.0.1:19006").await.unwrap());
-    
+
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let passthrough = babble_boop::osc_passthrough::OscPassthrough::new(
         Arc::clone(&main_socket),
         Arc::clone(&test_config),
     );
-    
+
     // This should return immediately without binding any socket
     let result = passthrough.start_passthrough(shutdown_rx).await;
     assert!(result.is_ok(), "Passthrough should return Ok when disabled");
-    
+
     // Verify port 19025 is not bound by trying to bind to it
     match UdpSocket::bind("127.0.0.1:19025").await {
         Ok(_) => {
@@ -552,7 +594,7 @@ async fn test_passthrough_disabled() {
             panic!("Port 19025 is in use - passthrough shouldn't bind when disabled");
         }
     }
-    
+
     let _ = shutdown_tx.send(true);
 }
 
@@ -588,40 +630,50 @@ async fn test_shared_socket_source_port() {
         },
         debug: true,
     });
-    
+
     let main_socket = Arc::new(UdpSocket::bind("127.0.0.1:19007").await.unwrap());
     let listener_socket = UdpSocket::bind("127.0.0.1:19051").await.unwrap();
     let sender_socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-    
+
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let passthrough = babble_boop::osc_passthrough::OscPassthrough::new(
         Arc::clone(&main_socket),
         Arc::clone(&test_config),
     );
-    
+
     let passthrough_handle = tokio::spawn(async move {
         let _ = passthrough.start_passthrough(shutdown_rx).await;
     });
-    
+
     sleep(Duration::from_millis(100)).await;
-    
+
     // Send a message
-    let test_msg = create_test_message("/test/source", vec![OscType::String("check source".to_string())]);
-    sender_socket.send_to(&test_msg, "127.0.0.1:19026").await.unwrap();
-    
+    let test_msg = create_test_message(
+        "/test/source",
+        vec![OscType::String("check source".to_string())],
+    );
+    sender_socket
+        .send_to(&test_msg, "127.0.0.1:19026")
+        .await
+        .unwrap();
+
     // Receive and verify source port
     match receive_osc_message(&listener_socket, Duration::from_secs(1)).await {
         Ok((packet, src_addr)) => {
             // Messages should come from port 19007 (main socket port)
-            assert_eq!(src_addr.port(), 19007, "Message should come from main socket port");
-            
+            assert_eq!(
+                src_addr.port(),
+                19007,
+                "Message should come from main socket port"
+            );
+
             if let OscPacket::Message(msg) = packet {
                 assert_eq!(msg.addr, "/test/source");
             }
         }
         Err(e) => panic!("Failed to receive message: {}", e),
     }
-    
+
     let _ = shutdown_tx.send(true);
     let _ = timeout(Duration::from_secs(1), passthrough_handle).await;
 }
@@ -629,10 +681,10 @@ async fn test_shared_socket_source_port() {
 #[tokio::test]
 async fn test_socket_bind_failure() {
     // Test error handling when passthrough port is already in use
-    
+
     // First, bind the port that passthrough will try to use
     let _blocking_socket = UdpSocket::bind("127.0.0.1:19027").await.unwrap();
-    
+
     let test_config = Arc::new(babble_boop::config::Config {
         osc: babble_boop::config::OscConfig {
             address: "127.0.0.1".to_string(),
@@ -662,18 +714,21 @@ async fn test_socket_bind_failure() {
         },
         debug: true,
     });
-    
+
     let main_socket = Arc::new(UdpSocket::bind("127.0.0.1:19008").await.unwrap());
-    
+
     let (_shutdown_tx, shutdown_rx) = watch::channel(false);
     let passthrough = babble_boop::osc_passthrough::OscPassthrough::new(
         Arc::clone(&main_socket),
         Arc::clone(&test_config),
     );
-    
+
     // This should fail because port is already in use
     let result = passthrough.start_passthrough(shutdown_rx).await;
-    assert!(result.is_err(), "Passthrough should fail when port is in use");
+    assert!(
+        result.is_err(),
+        "Passthrough should fail when port is in use"
+    );
 }
 
 #[tokio::test]
@@ -708,23 +763,23 @@ async fn test_osc_bundle_forwarding() {
         },
         debug: true,
     });
-    
+
     let main_socket = Arc::new(UdpSocket::bind("127.0.0.1:19009").await.unwrap());
     let listener_socket = UdpSocket::bind("127.0.0.1:19053").await.unwrap();
     let sender_socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-    
+
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let passthrough = babble_boop::osc_passthrough::OscPassthrough::new(
         Arc::clone(&main_socket),
         Arc::clone(&test_config),
     );
-    
+
     let passthrough_handle = tokio::spawn(async move {
         let _ = passthrough.start_passthrough(shutdown_rx).await;
     });
-    
+
     sleep(Duration::from_millis(100)).await;
-    
+
     // Create and send an OSC bundle
     let msg1 = OscPacket::Message(OscMessage {
         addr: "/bundle/msg1".to_string(),
@@ -734,36 +789,52 @@ async fn test_osc_bundle_forwarding() {
         addr: "/bundle/msg2".to_string(),
         args: vec![OscType::Float(2.5)],
     });
-    
+
     let bundle = OscBundle {
-        timetag: OscTime { seconds: 0, fractional: 1 },
+        timetag: OscTime {
+            seconds: 0,
+            fractional: 1,
+        },
         content: vec![msg1, msg2],
     };
-    
+
     let bundle_packet = OscPacket::Bundle(bundle);
     let bundle_bytes = encode(&bundle_packet).unwrap();
-    
-    sender_socket.send_to(&bundle_bytes, "127.0.0.1:19028").await.unwrap();
-    
+
+    sender_socket
+        .send_to(&bundle_bytes, "127.0.0.1:19028")
+        .await
+        .unwrap();
+
     // Receive and verify bundle
     match receive_osc_message(&listener_socket, Duration::from_secs(1)).await {
         Ok((packet, _)) => {
             if let OscPacket::Bundle(received_bundle) = packet {
-                assert_eq!(received_bundle.content.len(), 2, "Bundle should contain 2 messages");
-                
+                assert_eq!(
+                    received_bundle.content.len(),
+                    2,
+                    "Bundle should contain 2 messages"
+                );
+
                 // Verify first message
                 if let OscPacket::Message(msg) = &received_bundle.content[0] {
                     assert_eq!(msg.addr, "/bundle/msg1");
-                    assert!(!msg.args.is_empty(), "Bundle message 1 should have arguments");
+                    assert!(
+                        !msg.args.is_empty(),
+                        "Bundle message 1 should have arguments"
+                    );
                     if let OscType::Int(val) = msg.args[0] {
                         assert_eq!(val, 1);
                     }
                 }
-                
+
                 // Verify second message
                 if let OscPacket::Message(msg) = &received_bundle.content[1] {
                     assert_eq!(msg.addr, "/bundle/msg2");
-                    assert!(!msg.args.is_empty(), "Bundle message 2 should have arguments");
+                    assert!(
+                        !msg.args.is_empty(),
+                        "Bundle message 2 should have arguments"
+                    );
                     if let OscType::Float(val) = msg.args[0] {
                         assert_eq!(val, 2.5);
                     }
@@ -774,7 +845,7 @@ async fn test_osc_bundle_forwarding() {
         }
         Err(e) => panic!("Failed to receive bundle: {}", e),
     }
-    
+
     let _ = shutdown_tx.send(true);
     let _ = timeout(Duration::from_secs(1), passthrough_handle).await;
 }
