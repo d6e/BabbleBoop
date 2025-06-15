@@ -14,7 +14,7 @@ use std::io::{self, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::net::UdpSocket;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
@@ -72,18 +72,22 @@ async fn run_main() -> Result<(), Box<dyn Error>> {
     }
 
     let (tx, mut rx) = mpsc::channel::<AudioEvent>(100);
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
     let typing_indicator = TypingIndicator::new(Arc::clone(&socket), Arc::clone(&config));
     
     // Start OSC passthrough if enabled
-    if config.osc.passthrough_enabled {
+    let passthrough_handle = if config.osc.passthrough_enabled {
         let passthrough = OscPassthrough::new(Arc::clone(&socket), Arc::clone(&config));
-        let _passthrough_handle = tokio::spawn(async move {
-            if let Err(e) = passthrough.start_passthrough().await {
+        let shutdown_rx_clone = shutdown_rx.clone();
+        Some(tokio::spawn(async move {
+            if let Err(e) = passthrough.start_passthrough(shutdown_rx_clone).await {
                 eprintln!("OSC passthrough error: {}", e);
             }
-        });
-    }
+        }))
+    } else {
+        None
+    };
 
     // Start the audio recording in a separate thread
     let config_clone = Arc::clone(&config);
@@ -126,6 +130,16 @@ async fn run_main() -> Result<(), Box<dyn Error>> {
                     eprintln!("Error processing audio: {}", e);
                 }
             }
+        }
+    }
+
+    // Send shutdown signal
+    let _ = shutdown_tx.send(true);
+    
+    // Wait for passthrough task to complete if it was started
+    if let Some(handle) = passthrough_handle {
+        if let Err(e) = handle.await {
+            eprintln!("Error waiting for passthrough task: {}", e);
         }
     }
 
