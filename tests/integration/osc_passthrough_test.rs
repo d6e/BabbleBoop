@@ -3,7 +3,7 @@ use std::time::Duration;
 use tokio::net::UdpSocket;
 use tokio::sync::{mpsc, watch};
 use tokio::time::{sleep, timeout};
-use rosc::{OscPacket, OscMessage, OscType, encoder::encode, decoder};
+use rosc::{OscPacket, OscMessage, OscType, OscBundle, OscTime, encoder::encode, decoder};
 
 /// Test configuration for OSC passthrough tests
 struct TestConfig {
@@ -490,4 +490,283 @@ async fn test_graceful_shutdown() {
         Ok(Err(e)) => panic!("Passthrough task panicked: {:?}", e),
         Err(_) => panic!("Passthrough did not shut down within timeout"),
     }
+}
+
+#[tokio::test]
+async fn test_passthrough_disabled() {
+    // Test that passthrough doesn't start when disabled
+    let test_config = Arc::new(babble_boop::config::Config {
+        osc: babble_boop::config::OscConfig {
+            address: "127.0.0.1".to_string(),
+            input_port: 19006,
+            output_port: 19050,
+            max_message_chunks: 9,
+            display_time: 3000,
+            passthrough_enabled: false, // DISABLED
+            passthrough_port: 19025,
+        },
+        openai: babble_boop::config::OpenAiConfig {
+            api_key: "test".to_string(),
+            model: "gpt-4o-mini".to_string(),
+        },
+        translation: babble_boop::config::TranslationConfig {
+            target_language: "Japanese".to_string(),
+            include_original_message: false,
+        },
+        audio: babble_boop::config::AudioConfig {
+            silence_threshold: 100,
+            noise_gate_threshold: 0.3,
+            noise_gate_hold_time: 0.20,
+            min_transcription_duration: 1.0,
+        },
+        rate_limit: babble_boop::config::RateLimitConfig {
+            requests_per_minute: 50,
+        },
+        debug: true,
+    });
+    
+    let main_socket = Arc::new(UdpSocket::bind("127.0.0.1:19006").await.unwrap());
+    
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let passthrough = babble_boop::osc_passthrough::OscPassthrough::new(
+        Arc::clone(&main_socket),
+        Arc::clone(&test_config),
+    );
+    
+    // This should return immediately without binding any socket
+    let result = passthrough.start_passthrough(shutdown_rx).await;
+    assert!(result.is_ok(), "Passthrough should return Ok when disabled");
+    
+    // Verify port 19025 is not bound by trying to bind to it
+    match UdpSocket::bind("127.0.0.1:19025").await {
+        Ok(_) => {
+            // Good, we could bind, meaning passthrough didn't bind
+        }
+        Err(_) => {
+            panic!("Port 19025 is in use - passthrough shouldn't bind when disabled");
+        }
+    }
+    
+    let _ = shutdown_tx.send(true);
+}
+
+#[tokio::test]
+async fn test_shared_socket_source_port() {
+    // Test that forwarded messages come from the main socket's port
+    let test_config = Arc::new(babble_boop::config::Config {
+        osc: babble_boop::config::OscConfig {
+            address: "127.0.0.1".to_string(),
+            input_port: 19007, // Main socket binds here
+            output_port: 19051,
+            max_message_chunks: 9,
+            display_time: 3000,
+            passthrough_enabled: true,
+            passthrough_port: 19026,
+        },
+        openai: babble_boop::config::OpenAiConfig {
+            api_key: "test".to_string(),
+            model: "gpt-4o-mini".to_string(),
+        },
+        translation: babble_boop::config::TranslationConfig {
+            target_language: "Japanese".to_string(),
+            include_original_message: false,
+        },
+        audio: babble_boop::config::AudioConfig {
+            silence_threshold: 100,
+            noise_gate_threshold: 0.3,
+            noise_gate_hold_time: 0.20,
+            min_transcription_duration: 1.0,
+        },
+        rate_limit: babble_boop::config::RateLimitConfig {
+            requests_per_minute: 50,
+        },
+        debug: true,
+    });
+    
+    let main_socket = Arc::new(UdpSocket::bind("127.0.0.1:19007").await.unwrap());
+    let listener_socket = UdpSocket::bind("127.0.0.1:19051").await.unwrap();
+    let sender_socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let passthrough = babble_boop::osc_passthrough::OscPassthrough::new(
+        Arc::clone(&main_socket),
+        Arc::clone(&test_config),
+    );
+    
+    let passthrough_handle = tokio::spawn(async move {
+        let _ = passthrough.start_passthrough(shutdown_rx).await;
+    });
+    
+    sleep(Duration::from_millis(100)).await;
+    
+    // Send a message
+    let test_msg = create_test_message("/test/source", vec![OscType::String("check source".to_string())]);
+    sender_socket.send_to(&test_msg, "127.0.0.1:19026").await.unwrap();
+    
+    // Receive and verify source port
+    match receive_osc_message(&listener_socket, Duration::from_secs(1)).await {
+        Ok((packet, src_addr)) => {
+            // Messages should come from port 19007 (main socket port)
+            assert_eq!(src_addr.port(), 19007, "Message should come from main socket port");
+            
+            if let OscPacket::Message(msg) = packet {
+                assert_eq!(msg.addr, "/test/source");
+            }
+        }
+        Err(e) => panic!("Failed to receive message: {}", e),
+    }
+    
+    let _ = shutdown_tx.send(true);
+    let _ = timeout(Duration::from_secs(1), passthrough_handle).await;
+}
+
+#[tokio::test]
+async fn test_socket_bind_failure() {
+    // Test error handling when passthrough port is already in use
+    
+    // First, bind the port that passthrough will try to use
+    let _blocking_socket = UdpSocket::bind("127.0.0.1:19027").await.unwrap();
+    
+    let test_config = Arc::new(babble_boop::config::Config {
+        osc: babble_boop::config::OscConfig {
+            address: "127.0.0.1".to_string(),
+            input_port: 19008,
+            output_port: 19052,
+            max_message_chunks: 9,
+            display_time: 3000,
+            passthrough_enabled: true,
+            passthrough_port: 19027, // Already in use!
+        },
+        openai: babble_boop::config::OpenAiConfig {
+            api_key: "test".to_string(),
+            model: "gpt-4o-mini".to_string(),
+        },
+        translation: babble_boop::config::TranslationConfig {
+            target_language: "Japanese".to_string(),
+            include_original_message: false,
+        },
+        audio: babble_boop::config::AudioConfig {
+            silence_threshold: 100,
+            noise_gate_threshold: 0.3,
+            noise_gate_hold_time: 0.20,
+            min_transcription_duration: 1.0,
+        },
+        rate_limit: babble_boop::config::RateLimitConfig {
+            requests_per_minute: 50,
+        },
+        debug: true,
+    });
+    
+    let main_socket = Arc::new(UdpSocket::bind("127.0.0.1:19008").await.unwrap());
+    
+    let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+    let passthrough = babble_boop::osc_passthrough::OscPassthrough::new(
+        Arc::clone(&main_socket),
+        Arc::clone(&test_config),
+    );
+    
+    // This should fail because port is already in use
+    let result = passthrough.start_passthrough(shutdown_rx).await;
+    assert!(result.is_err(), "Passthrough should fail when port is in use");
+}
+
+#[tokio::test]
+async fn test_osc_bundle_forwarding() {
+    // Test that OSC bundles are properly forwarded
+    let test_config = Arc::new(babble_boop::config::Config {
+        osc: babble_boop::config::OscConfig {
+            address: "127.0.0.1".to_string(),
+            input_port: 19009,
+            output_port: 19053,
+            max_message_chunks: 9,
+            display_time: 3000,
+            passthrough_enabled: true,
+            passthrough_port: 19028,
+        },
+        openai: babble_boop::config::OpenAiConfig {
+            api_key: "test".to_string(),
+            model: "gpt-4o-mini".to_string(),
+        },
+        translation: babble_boop::config::TranslationConfig {
+            target_language: "Japanese".to_string(),
+            include_original_message: false,
+        },
+        audio: babble_boop::config::AudioConfig {
+            silence_threshold: 100,
+            noise_gate_threshold: 0.3,
+            noise_gate_hold_time: 0.20,
+            min_transcription_duration: 1.0,
+        },
+        rate_limit: babble_boop::config::RateLimitConfig {
+            requests_per_minute: 50,
+        },
+        debug: true,
+    });
+    
+    let main_socket = Arc::new(UdpSocket::bind("127.0.0.1:19009").await.unwrap());
+    let listener_socket = UdpSocket::bind("127.0.0.1:19053").await.unwrap();
+    let sender_socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let passthrough = babble_boop::osc_passthrough::OscPassthrough::new(
+        Arc::clone(&main_socket),
+        Arc::clone(&test_config),
+    );
+    
+    let passthrough_handle = tokio::spawn(async move {
+        let _ = passthrough.start_passthrough(shutdown_rx).await;
+    });
+    
+    sleep(Duration::from_millis(100)).await;
+    
+    // Create and send an OSC bundle
+    let msg1 = OscPacket::Message(OscMessage {
+        addr: "/bundle/msg1".to_string(),
+        args: vec![OscType::Int(1)],
+    });
+    let msg2 = OscPacket::Message(OscMessage {
+        addr: "/bundle/msg2".to_string(),
+        args: vec![OscType::Float(2.5)],
+    });
+    
+    let bundle = OscBundle {
+        timetag: OscTime { seconds: 0, fractional: 1 },
+        content: vec![msg1, msg2],
+    };
+    
+    let bundle_packet = OscPacket::Bundle(bundle);
+    let bundle_bytes = encode(&bundle_packet).unwrap();
+    
+    sender_socket.send_to(&bundle_bytes, "127.0.0.1:19028").await.unwrap();
+    
+    // Receive and verify bundle
+    match receive_osc_message(&listener_socket, Duration::from_secs(1)).await {
+        Ok((packet, _)) => {
+            if let OscPacket::Bundle(received_bundle) = packet {
+                assert_eq!(received_bundle.content.len(), 2, "Bundle should contain 2 messages");
+                
+                // Verify first message
+                if let OscPacket::Message(msg) = &received_bundle.content[0] {
+                    assert_eq!(msg.addr, "/bundle/msg1");
+                    if let OscType::Int(val) = msg.args[0] {
+                        assert_eq!(val, 1);
+                    }
+                }
+                
+                // Verify second message
+                if let OscPacket::Message(msg) = &received_bundle.content[1] {
+                    assert_eq!(msg.addr, "/bundle/msg2");
+                    if let OscType::Float(val) = msg.args[0] {
+                        assert_eq!(val, 2.5);
+                    }
+                }
+            } else {
+                panic!("Expected OSC bundle, got message");
+            }
+        }
+        Err(e) => panic!("Failed to receive bundle: {}", e),
+    }
+    
+    let _ = shutdown_tx.send(true);
+    let _ = timeout(Duration::from_secs(1), passthrough_handle).await;
 }
