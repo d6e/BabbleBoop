@@ -6,7 +6,7 @@ output_port = 9000      # VRChat's input port for chatbox
 display_time = 3000     # time to display messages in milliseconds
 max_message_chunks = 9  # large messages are split into chunks, this is the max it will split
 passthrough_enabled = false # enable OSC passthrough (for face tracking etc.)
-passthrough_port = 9015  # VRChat's face tracking output port (default: 9015)
+passthrough_port = 9015  # alternate input port for facetracking (default: 9015)
 
 [openai]
 api_key = "YOUR API KEY"
