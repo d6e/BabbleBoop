@@ -69,12 +69,32 @@ async fn run_main() -> Result<(), Box<dyn Error>> {
     let typing_indicator = TypingIndicator::new(Arc::clone(&socket), Arc::clone(&config));
 
     // Start the audio recording in a separate thread
+    // The stream handle is kept alive by the thread's infinite loop
     let config_clone = Arc::clone(&config);
+    let (init_tx, init_rx) = std::sync::mpsc::channel::<Result<(), String>>();
     std::thread::spawn(move || {
-        if let Err(e) = start_audio_recording(&config_clone, tx) {
-            eprintln!("Error starting audio recording: {}", e);
+        match start_audio_recording(&config_clone, tx) {
+            Ok(stream) => {
+                // Signal successful initialization
+                let _ = init_tx.send(Ok(()));
+                // Keep the stream alive by holding it in scope
+                // The stream will be dropped when the program exits
+                let _stream = stream;
+                loop {
+                    std::thread::park();
+                }
+            }
+            Err(e) => {
+                let _ = init_tx.send(Err(e.to_string()));
+            }
         }
     });
+
+    // Wait for stream initialization and check for errors
+    init_rx
+        .recv()
+        .map_err(|_| "Audio recording thread failed to start")?
+        .map_err(|e| -> Box<dyn Error> { e.into() })?;
 
     let mut rate_limiter = RateLimiter::new(config.rate_limit.requests_per_minute);
     let mut price_estimator = PriceEstimator::new(&config.openai.model);

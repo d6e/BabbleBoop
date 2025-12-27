@@ -210,7 +210,7 @@ fn process_audio_data(
 pub fn start_audio_recording(
     config: &Config,
     tx: mpsc::Sender<AudioEvent>,
-) -> Result<(), Box<dyn Error>> {
+) -> Result<Stream, Box<dyn Error>> {
     let host = cpal::default_host();
     let device = host
         .default_input_device()
@@ -233,8 +233,5 @@ pub fn start_audio_recording(
 
     stream.play()?;
 
-    // Keep the stream alive
-    std::mem::forget(stream);
-
-    Ok(())
+    Ok(stream)
 }
