@@ -1,7 +1,7 @@
 use babble_boop::app_state::{AppCommand, AppState};
 use babble_boop::audio_processing::process_audio;
 use babble_boop::audio_recording::start_audio_recording;
-use babble_boop::config::Config;
+use babble_boop::config::{Config, CONFIG_PATH};
 use babble_boop::gui::run_gui;
 use babble_boop::price_estimator::PriceEstimator;
 use babble_boop::rate_limiter::RateLimiter;
@@ -14,8 +14,6 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
-
-const CONFIG_PATH: &str = "config.toml";
 
 fn main() {
     // Load config

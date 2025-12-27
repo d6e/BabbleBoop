@@ -1,10 +1,8 @@
 use crate::app_state::{AppCommand, AppState};
-use crate::config::Config;
+use crate::config::{Config, CONFIG_PATH};
 use eframe::egui;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-
-const CONFIG_PATH: &str = "config.toml";
 
 pub struct BabbleBoopApp {
     app_state: Arc<AppState>,

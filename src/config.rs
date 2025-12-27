@@ -3,6 +3,9 @@ use std::error::Error;
 use std::fs;
 use std::path::Path;
 
+/// Default path to the configuration file
+pub const CONFIG_PATH: &str = "config.toml";
+
 #[derive(Deserialize, Serialize, Clone, Debug)]
 pub struct Config {
     pub osc: OscConfig,
