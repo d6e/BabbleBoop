@@ -14,7 +14,7 @@ pub struct BabbleBoopApp {
 
 impl BabbleBoopApp {
     pub fn new(app_state: Arc<AppState>) -> Self {
-        let config_draft = app_state.config.read().unwrap().clone();
+        let config_draft = app_state.config.read().expect("Config lock poisoned").clone();
         Self {
             app_state,
             config_draft,

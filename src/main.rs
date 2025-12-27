@@ -60,7 +60,7 @@ async fn run_processing_loop(
     mut cmd_rx: mpsc::Receiver<AppCommand>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Read initial config
-    let config = app_state.config.read().unwrap().clone();
+    let config = app_state.config.read().expect("Config lock poisoned").clone();
 
     let socket_address = format!("{}:{}", config.osc.address, config.osc.input_port);
     let socket = Arc::new(UdpSocket::bind(&socket_address).await?);
@@ -76,7 +76,7 @@ async fn run_processing_loop(
     let (tx, mut rx) = mpsc::channel::<AudioEvent>(100);
 
     // Start the audio recording in a separate thread
-    let config_for_audio = app_state.config.read().unwrap().clone();
+    let config_for_audio = app_state.config.read().expect("Config lock poisoned").clone();
     let shutdown_signal = Arc::clone(&app_state.shutdown);
     let (init_tx, init_rx) = std::sync::mpsc::channel::<Result<(), String>>();
     std::thread::spawn(move || {
@@ -168,7 +168,7 @@ async fn run_processing_loop(
                     }
                     AudioEvent::AudioData(audio_data) => {
                         // Read current config for processing
-                        let current_config = app_state.config.read().unwrap().clone();
+                        let current_config = app_state.config.read().expect("Config lock poisoned").clone();
                         if let Err(e) = process_audio(
                             audio_data,
                             &current_config,
