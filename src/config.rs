@@ -14,6 +14,7 @@ pub struct Config {
     pub audio: AudioConfig,
     pub rate_limit: RateLimitConfig,
     pub keep_audio_files: bool,
+    pub max_audio_files: usize,
 }
 
 impl Config {

@@ -1,4 +1,5 @@
 keep_audio_files = false  # if true, saves audio recordings to disk for troubleshooting
+max_audio_files = 10      # maximum number of audio files to keep (oldest are deleted)
 [osc]
 address = "127.0.0.1"
 input_port = 9001       # VRChat's output port

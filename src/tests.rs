@@ -199,6 +199,7 @@ mod regression_tests {
                 requests_per_minute: 50,
             },
             keep_audio_files: false,
+            max_audio_files: 10,
         };
 
         // Create a temp file path
@@ -231,6 +232,7 @@ mod regression_tests {
             config.rate_limit.requests_per_minute
         );
         assert_eq!(loaded.keep_audio_files, config.keep_audio_files);
+        assert_eq!(loaded.max_audio_files, config.max_audio_files);
 
         // Clean up
         fs::remove_file(&temp_path).ok();

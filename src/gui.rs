@@ -225,6 +225,13 @@ impl eframe::App for BabbleBoopApp {
                     ui.checkbox(&mut self.config_draft.keep_audio_files, "");
                 });
 
+                ui.horizontal(|ui| {
+                    ui.add_enabled_ui(self.config_draft.keep_audio_files, |ui| {
+                        ui.label("Max Audio Files:");
+                        ui.add(egui::DragValue::new(&mut self.config_draft.max_audio_files).range(1..=100));
+                    });
+                });
+
                 ui.add_space(20.0);
 
                 // Save button

@@ -106,7 +106,7 @@ async fn run_processing_loop(
     println!("Loaded total cost: ${:.4}", price_estimator.total_cost);
 
     let mut recording_manager = if config.keep_audio_files {
-        Some(RecordingManager::new(PathBuf::from("recordings"), 10))
+        Some(RecordingManager::new(PathBuf::from("recordings"), config.max_audio_files))
     } else {
         None
     };
@@ -129,7 +129,7 @@ async fn run_processing_loop(
                         rate_limiter = RateLimiter::new(new_config.rate_limit.requests_per_minute);
                         // Update recording manager if keep_audio_files changed
                         recording_manager = if new_config.keep_audio_files {
-                            Some(RecordingManager::new(PathBuf::from("recordings"), 10))
+                            Some(RecordingManager::new(PathBuf::from("recordings"), new_config.max_audio_files))
                         } else {
                             None
                         };
