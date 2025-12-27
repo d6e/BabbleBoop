@@ -198,7 +198,7 @@ mod regression_tests {
             rate_limit: RateLimitConfig {
                 requests_per_minute: 50,
             },
-            debug: false,
+            keep_audio_files: false,
         };
 
         // Create a temp file path
@@ -230,7 +230,7 @@ mod regression_tests {
             loaded.rate_limit.requests_per_minute,
             config.rate_limit.requests_per_minute
         );
-        assert_eq!(loaded.debug, config.debug);
+        assert_eq!(loaded.keep_audio_files, config.keep_audio_files);
 
         // Clean up
         fs::remove_file(&temp_path).ok();

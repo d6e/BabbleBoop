@@ -13,7 +13,7 @@ pub struct Config {
     pub translation: TranslationConfig,
     pub audio: AudioConfig,
     pub rate_limit: RateLimitConfig,
-    pub debug: bool,
+    pub keep_audio_files: bool,
 }
 
 impl Config {

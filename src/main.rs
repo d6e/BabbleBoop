@@ -69,7 +69,7 @@ async fn run_processing_loop(
         "Rate limit: {} requests per minute",
         config.rate_limit.requests_per_minute
     );
-    println!("Debug mode: {}", config.debug);
+    println!("Keep audio files: {}", config.keep_audio_files);
 
     let (tx, mut rx) = mpsc::channel::<AudioEvent>(100);
 
@@ -105,7 +105,7 @@ async fn run_processing_loop(
     let mut price_estimator = PriceEstimator::new(&config.openai.model);
     println!("Loaded total cost: ${:.4}", price_estimator.total_cost);
 
-    let mut recording_manager = if config.debug {
+    let mut recording_manager = if config.keep_audio_files {
         Some(RecordingManager::new(PathBuf::from("recordings"), 10))
     } else {
         None
@@ -127,8 +127,8 @@ async fn run_processing_loop(
                         println!("Config updated");
                         // Update rate limiter if needed
                         rate_limiter = RateLimiter::new(new_config.rate_limit.requests_per_minute);
-                        // Update recording manager if debug changed
-                        recording_manager = if new_config.debug {
+                        // Update recording manager if keep_audio_files changed
+                        recording_manager = if new_config.keep_audio_files {
                             Some(RecordingManager::new(PathBuf::from("recordings"), 10))
                         } else {
                             None

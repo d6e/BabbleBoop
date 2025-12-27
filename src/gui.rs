@@ -219,10 +219,10 @@ impl eframe::App for BabbleBoopApp {
 
                 ui.add_space(5.0);
 
-                // Debug
+                // Keep Audio Files
                 ui.horizontal(|ui| {
-                    ui.label("Debug Mode:");
-                    ui.checkbox(&mut self.config_draft.debug, "");
+                    ui.label("Keep Audio Files:");
+                    ui.checkbox(&mut self.config_draft.keep_audio_files, "");
                 });
 
                 ui.add_space(20.0);
