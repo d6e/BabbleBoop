@@ -1,57 +1,66 @@
+use babble_boop::app_state::{AppCommand, AppState};
 use babble_boop::audio_processing::process_audio;
 use babble_boop::audio_recording::start_audio_recording;
 use babble_boop::config::Config;
+use babble_boop::gui::run_gui;
 use babble_boop::price_estimator::PriceEstimator;
 use babble_boop::rate_limiter::RateLimiter;
 use babble_boop::recording_manager::RecordingManager;
 use babble_boop::types::AudioEvent;
 use babble_boop::typing_indicator::TypingIndicator;
 
-use std::error::Error;
-use std::fs;
-use std::io::{self, Write};
 use std::path::PathBuf;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn Error>> {
-    // Set a panic hook to handle panics and prevent the program from closing immediately
-    std::panic::set_hook(Box::new(|panic_info| {
-        eprintln!("Panic occurred: {}", panic_info);
+const CONFIG_PATH: &str = "config.toml";
 
-        println!("");
-        println!("Press Enter to exit...");
-        io::stdout().flush().unwrap();
-        let _ = io::stdin().read_line(&mut String::new());
-    }));
-
-    let result = run_main().await;
-
-    println!("");
-    println!("Press Enter to exit...");
-    io::stdout().flush().unwrap();
-    let _ = io::stdin().read_line(&mut String::new());
-
-    result
-}
-
-async fn run_main() -> Result<(), Box<dyn Error>> {
-
-    let config_path = "config.toml";
-    let config_data = match fs::read_to_string(config_path) {
-        Ok(data) => data,
+fn main() {
+    // Load config
+    let config = match Config::load(CONFIG_PATH) {
+        Ok(c) => c,
         Err(e) => {
             eprintln!("Error reading config file: {}", e);
             eprintln!("Please ensure that the 'config.toml' file exists in the same directory as the executable.");
             eprintln!("You can refer to 'config.toml.example' for an example configuration.");
-            return Err(Box::new(e));
+            std::process::exit(1);
         }
     };
 
-    let config: Config = toml::from_str(&config_data)?;
-    let config = Arc::new(config);
+    // Create command channel for GUI -> processing communication
+    let (cmd_tx, cmd_rx) = mpsc::channel::<AppCommand>(32);
+
+    // Create shared app state
+    let app_state = Arc::new(AppState::new(config, cmd_tx));
+    let app_state_clone = Arc::clone(&app_state);
+
+    // Spawn background thread with tokio runtime for audio processing
+    let processing_handle = std::thread::spawn(move || {
+        let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
+        rt.block_on(async {
+            if let Err(e) = run_processing_loop(app_state_clone, cmd_rx).await {
+                eprintln!("Processing error: {}", e);
+            }
+        });
+    });
+
+    // Run GUI on main thread
+    if let Err(e) = run_gui(app_state) {
+        eprintln!("GUI error: {}", e);
+    }
+
+    // Wait for processing thread to finish
+    let _ = processing_handle.join();
+}
+
+async fn run_processing_loop(
+    app_state: Arc<AppState>,
+    mut cmd_rx: mpsc::Receiver<AppCommand>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    // Read initial config
+    let config = app_state.config.read().unwrap().clone();
 
     let socket_address = format!("{}:{}", config.osc.address, config.osc.input_port);
     let socket = Arc::new(UdpSocket::bind(&socket_address).await?);
@@ -66,19 +75,13 @@ async fn run_main() -> Result<(), Box<dyn Error>> {
 
     let (tx, mut rx) = mpsc::channel::<AudioEvent>(100);
 
-    let typing_indicator = TypingIndicator::new(Arc::clone(&socket), Arc::clone(&config));
-
     // Start the audio recording in a separate thread
-    // The stream handle is kept alive by the thread's infinite loop
-    let config_clone = Arc::clone(&config);
+    let config_for_audio = app_state.config.read().unwrap().clone();
     let (init_tx, init_rx) = std::sync::mpsc::channel::<Result<(), String>>();
     std::thread::spawn(move || {
-        match start_audio_recording(&config_clone, tx) {
+        match start_audio_recording(&config_for_audio, tx) {
             Ok(stream) => {
-                // Signal successful initialization
                 let _ = init_tx.send(Ok(()));
-                // Keep the stream alive by holding it in scope
-                // The stream will be dropped when the program exits
                 let _stream = stream;
                 loop {
                     std::thread::park();
@@ -90,44 +93,93 @@ async fn run_main() -> Result<(), Box<dyn Error>> {
         }
     });
 
-    // Wait for stream initialization and check for errors
+    // Wait for stream initialization
     init_rx
         .recv()
         .map_err(|_| "Audio recording thread failed to start")?
-        .map_err(|e| -> Box<dyn Error> { e.into() })?;
+        .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.into() })?;
 
     let mut rate_limiter = RateLimiter::new(config.rate_limit.requests_per_minute);
     let mut price_estimator = PriceEstimator::new(&config.openai.model);
     println!("Loaded total cost: ${:.4}", price_estimator.total_cost);
 
-    let recording_manager = if config.debug {
+    let mut recording_manager = if config.debug {
         Some(RecordingManager::new(PathBuf::from("recordings"), 10))
     } else {
         None
     };
 
-    while let Some(event) = rx.recv().await {
-        match event {
-            AudioEvent::StartRecording => {
-                typing_indicator.start_typing().await;
-            }
-            AudioEvent::StopRecording => {
-                typing_indicator.stop_typing().await;
-            }
-            AudioEvent::AudioData(audio_data) => {
-                if let Err(e) = process_audio(
-                    audio_data,
-                    &config,
-                    &socket,
-                    &mut rate_limiter,
-                    &typing_indicator,
-                    &mut price_estimator,
-                    recording_manager.as_ref(),
-                )
-                .await
-                {
-                    eprintln!("Error processing audio: {}", e);
+    let typing_indicator = TypingIndicator::new(Arc::clone(&socket), Arc::new(config.clone()));
+
+    loop {
+        tokio::select! {
+            Some(event) = rx.recv() => {
+                // Check if enabled
+                if !app_state.enabled.load(Ordering::Relaxed) {
+                    // Still handle typing indicator but skip processing
+                    match &event {
+                        AudioEvent::StartRecording | AudioEvent::StopRecording => {
+                            // Skip typing indicator when disabled
+                        }
+                        AudioEvent::AudioData(_) => {
+                            // Skip processing when disabled
+                            continue;
+                        }
+                    }
+                    continue;
                 }
+
+                match event {
+                    AudioEvent::StartRecording => {
+                        typing_indicator.start_typing().await;
+                    }
+                    AudioEvent::StopRecording => {
+                        typing_indicator.stop_typing().await;
+                    }
+                    AudioEvent::AudioData(audio_data) => {
+                        // Read current config for processing
+                        let current_config = app_state.config.read().unwrap().clone();
+                        if let Err(e) = process_audio(
+                            audio_data,
+                            &current_config,
+                            &socket,
+                            &mut rate_limiter,
+                            &typing_indicator,
+                            &mut price_estimator,
+                            recording_manager.as_ref(),
+                        )
+                        .await
+                        {
+                            eprintln!("Error processing audio: {}", e);
+                        }
+                    }
+                }
+            }
+            Some(cmd) = cmd_rx.recv() => {
+                match cmd {
+                    AppCommand::SetEnabled(enabled) => {
+                        println!("Translation {}", if enabled { "enabled" } else { "disabled" });
+                    }
+                    AppCommand::UpdateConfig(new_config) => {
+                        println!("Config updated");
+                        // Update rate limiter if needed
+                        rate_limiter = RateLimiter::new(new_config.rate_limit.requests_per_minute);
+                        // Update recording manager if debug changed
+                        recording_manager = if new_config.debug {
+                            Some(RecordingManager::new(PathBuf::from("recordings"), 10))
+                        } else {
+                            None
+                        };
+                    }
+                    AppCommand::Quit => {
+                        println!("Shutting down...");
+                        break;
+                    }
+                }
+            }
+            else => {
+                // Both channels closed, exit
+                break;
             }
         }
     }

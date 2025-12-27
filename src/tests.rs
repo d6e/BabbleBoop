@@ -4,6 +4,9 @@
 
 #[cfg(test)]
 mod regression_tests {
+    use crate::config::{
+        AudioConfig, Config, OpenAiConfig, OscConfig, RateLimitConfig, TranslationConfig,
+    };
     use crate::price_estimator::PriceEstimator;
     use crate::rate_limiter::RateLimiter;
 
@@ -159,5 +162,77 @@ mod regression_tests {
         // Test mid-range value
         let mid = i16::MAX / 2;
         assert!((i16_to_f32(mid) - 0.5).abs() < 0.01);
+    }
+
+    // ===========================================================================
+    // Test: Config load/save round-trip
+    // ===========================================================================
+
+    #[test]
+    fn test_config_round_trip() {
+        use std::fs;
+        use std::path::PathBuf;
+
+        let config = Config {
+            osc: OscConfig {
+                address: "127.0.0.1".to_string(),
+                input_port: 9001,
+                output_port: 9000,
+                max_message_chunks: 9,
+                display_time: 3000,
+            },
+            openai: OpenAiConfig {
+                api_key: "test-api-key".to_string(),
+                model: "gpt-4o-mini".to_string(),
+            },
+            translation: TranslationConfig {
+                target_language: "Japanese".to_string(),
+                include_original_message: false,
+            },
+            audio: AudioConfig {
+                silence_threshold: 100,
+                noise_gate_threshold: 0.3,
+                noise_gate_hold_time: 0.20,
+                min_transcription_duration: 1.0,
+            },
+            rate_limit: RateLimitConfig {
+                requests_per_minute: 50,
+            },
+            debug: false,
+        };
+
+        // Create a temp file path
+        let temp_path = PathBuf::from("test_config_roundtrip.toml");
+
+        // Save config
+        config.save(&temp_path).expect("Failed to save config");
+
+        // Load it back
+        let loaded = Config::load(&temp_path).expect("Failed to load config");
+
+        // Verify all fields match
+        assert_eq!(loaded.osc.address, config.osc.address);
+        assert_eq!(loaded.osc.input_port, config.osc.input_port);
+        assert_eq!(loaded.osc.output_port, config.osc.output_port);
+        assert_eq!(loaded.openai.api_key, config.openai.api_key);
+        assert_eq!(loaded.openai.model, config.openai.model);
+        assert_eq!(
+            loaded.translation.target_language,
+            config.translation.target_language
+        );
+        assert_eq!(
+            loaded.translation.include_original_message,
+            config.translation.include_original_message
+        );
+        assert_eq!(loaded.audio.silence_threshold, config.audio.silence_threshold);
+        assert!((loaded.audio.noise_gate_threshold - config.audio.noise_gate_threshold).abs() < 0.001);
+        assert_eq!(
+            loaded.rate_limit.requests_per_minute,
+            config.rate_limit.requests_per_minute
+        );
+        assert_eq!(loaded.debug, config.debug);
+
+        // Clean up
+        fs::remove_file(&temp_path).ok();
     }
 }
