@@ -46,7 +46,7 @@ pub async fn process_audio(
         config.translation.target_language, transcription
     );
 
-    let mut response = ask_chatgpt(&translation_prompt, &config.openai).await?;
+    let mut response = ask_chatgpt(&translation_prompt, &config.openai, rate_limiter).await?;
     println!("Translation: {}", response);
 
     let transcription_cost = price_estimator.estimate_transcription_cost(audio_duration);

@@ -1,4 +1,5 @@
 use crate::config::OpenAiConfig;
+use crate::rate_limiter::RateLimiter;
 use serde::{Deserialize, Serialize};
 use std::error::Error;
 
@@ -24,7 +25,13 @@ struct ChatGptChoice {
     message: ChatGptMessage,
 }
 
-pub async fn ask_chatgpt(prompt: &str, config: &OpenAiConfig) -> Result<String, Box<dyn Error>> {
+pub async fn ask_chatgpt(
+    prompt: &str,
+    config: &OpenAiConfig,
+    rate_limiter: &mut RateLimiter,
+) -> Result<String, Box<dyn Error>> {
+    rate_limiter.wait().await;
+
     let client = reqwest::Client::new();
 
     let request_body = ChatGptRequest {
