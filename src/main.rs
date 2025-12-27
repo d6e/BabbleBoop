@@ -77,15 +77,19 @@ async fn run_processing_loop(
 
     // Start the audio recording in a separate thread
     let config_for_audio = app_state.config.read().unwrap().clone();
+    let shutdown_signal = Arc::clone(&app_state.shutdown);
     let (init_tx, init_rx) = std::sync::mpsc::channel::<Result<(), String>>();
     std::thread::spawn(move || {
         match start_audio_recording(&config_for_audio, tx) {
             Ok(stream) => {
                 let _ = init_tx.send(Ok(()));
                 let _stream = stream;
-                loop {
-                    std::thread::park();
+                // Check shutdown signal periodically instead of parking forever
+                while !shutdown_signal.load(Ordering::SeqCst) {
+                    std::thread::sleep(std::time::Duration::from_millis(100));
                 }
+                println!("Audio recording thread shutting down...");
+                // Stream is dropped here, stopping audio capture
             }
             Err(e) => {
                 let _ = init_tx.send(Err(e.to_string()));
@@ -113,6 +117,32 @@ async fn run_processing_loop(
 
     loop {
         tokio::select! {
+            // Prioritize command channel to handle Quit promptly
+            biased;
+
+            cmd = cmd_rx.recv() => {
+                match cmd {
+                    Some(AppCommand::SetEnabled(enabled)) => {
+                        println!("Translation {}", if enabled { "enabled" } else { "disabled" });
+                    }
+                    Some(AppCommand::UpdateConfig(new_config)) => {
+                        println!("Config updated");
+                        // Update rate limiter if needed
+                        rate_limiter = RateLimiter::new(new_config.rate_limit.requests_per_minute);
+                        // Update recording manager if debug changed
+                        recording_manager = if new_config.debug {
+                            Some(RecordingManager::new(PathBuf::from("recordings"), 10))
+                        } else {
+                            None
+                        };
+                    }
+                    Some(AppCommand::Quit) | None => {
+                        // Quit command received or channel closed
+                        println!("Shutting down...");
+                        break;
+                    }
+                }
+            }
             Some(event) = rx.recv() => {
                 // Check if enabled
                 if !app_state.enabled.load(Ordering::Relaxed) {
@@ -154,32 +184,6 @@ async fn run_processing_loop(
                         }
                     }
                 }
-            }
-            Some(cmd) = cmd_rx.recv() => {
-                match cmd {
-                    AppCommand::SetEnabled(enabled) => {
-                        println!("Translation {}", if enabled { "enabled" } else { "disabled" });
-                    }
-                    AppCommand::UpdateConfig(new_config) => {
-                        println!("Config updated");
-                        // Update rate limiter if needed
-                        rate_limiter = RateLimiter::new(new_config.rate_limit.requests_per_minute);
-                        // Update recording manager if debug changed
-                        recording_manager = if new_config.debug {
-                            Some(RecordingManager::new(PathBuf::from("recordings"), 10))
-                        } else {
-                            None
-                        };
-                    }
-                    AppCommand::Quit => {
-                        println!("Shutting down...");
-                        break;
-                    }
-                }
-            }
-            else => {
-                // Both channels closed, exit
-                break;
             }
         }
     }

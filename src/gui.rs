@@ -40,6 +40,13 @@ impl BabbleBoopApp {
 }
 
 impl eframe::App for BabbleBoopApp {
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        // Signal shutdown to all threads
+        self.app_state.request_shutdown();
+        // Send Quit command to processing loop
+        let _ = self.app_state.command_tx.blocking_send(AppCommand::Quit);
+    }
+
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.show_status(ctx);
 
