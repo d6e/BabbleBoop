@@ -42,6 +42,16 @@ pub async fn ask_chatgpt(prompt: &str, config: &OpenAiConfig) -> Result<String, 
         .send()
         .await?;
 
+    if !res.status().is_success() {
+        let error_text = res.text().await?;
+        return Err(format!("ChatGPT API request failed: {}", error_text).into());
+    }
+
     let res_body: ChatGptResponse = res.json().await?;
-    Ok(res_body.choices[0].message.content.clone())
+    let choice = res_body
+        .choices
+        .into_iter()
+        .next()
+        .ok_or("ChatGPT API returned empty choices array")?;
+    Ok(choice.message.content)
 }
