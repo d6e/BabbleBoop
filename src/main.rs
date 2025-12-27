@@ -113,7 +113,7 @@ async fn run_processing_loop(
         None
     };
 
-    let typing_indicator = TypingIndicator::new(Arc::clone(&socket), Arc::new(config.clone()));
+    let typing_indicator = TypingIndicator::new(Arc::clone(&socket), Arc::clone(&app_state.config));
 
     loop {
         tokio::select! {
