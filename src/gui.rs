@@ -35,6 +35,13 @@ impl BabbleBoopApp {
     fn set_status(&mut self, msg: impl Into<String>) {
         self.status_message = Some((msg.into(), std::time::Instant::now()));
     }
+
+    fn send_command(&self, cmd: AppCommand) -> Result<(), String> {
+        self.app_state
+            .command_tx
+            .blocking_send(cmd)
+            .map_err(|e| format!("Failed to send command: {}", e))
+    }
 }
 
 impl eframe::App for BabbleBoopApp {
@@ -42,7 +49,9 @@ impl eframe::App for BabbleBoopApp {
         // Signal shutdown to all threads
         self.app_state.request_shutdown();
         // Send Quit command to processing loop
-        let _ = self.app_state.command_tx.blocking_send(AppCommand::Quit);
+        if let Err(e) = self.send_command(AppCommand::Quit) {
+            eprintln!("Warning: {}", e);
+        }
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
@@ -61,6 +70,7 @@ impl eframe::App for BabbleBoopApp {
                 egui::Color32::from_rgb(200, 100, 100)
             };
 
+            let mut toggle_error: Option<String> = None;
             ui.horizontal(|ui| {
                 ui.label("Translation:");
                 if ui
@@ -69,12 +79,14 @@ impl eframe::App for BabbleBoopApp {
                 {
                     let new_state = !enabled;
                     self.app_state.enabled.store(new_state, Ordering::Relaxed);
-                    let _ = self
-                        .app_state
-                        .command_tx
-                        .blocking_send(AppCommand::SetEnabled(new_state));
+                    if let Err(e) = self.send_command(AppCommand::SetEnabled(new_state)) {
+                        toggle_error = Some(e);
+                    }
                 }
             });
+            if let Some(e) = toggle_error {
+                self.set_status(e);
+            }
 
             ui.add_space(10.0);
             ui.separator();
@@ -223,11 +235,10 @@ impl eframe::App for BabbleBoopApp {
                             if let Ok(mut config) = self.app_state.config.write() {
                                 *config = self.config_draft.clone();
                             }
-                            let _ = self
-                                .app_state
-                                .command_tx
-                                .blocking_send(AppCommand::UpdateConfig(self.config_draft.clone()));
-                            self.set_status("Settings saved successfully");
+                            match self.send_command(AppCommand::UpdateConfig(self.config_draft.clone())) {
+                                Ok(()) => self.set_status("Settings saved successfully"),
+                                Err(e) => self.set_status(format!("Settings saved to file, but {}", e)),
+                            }
                         }
                         Err(e) => {
                             self.set_status(format!("Failed to save: {}", e));
