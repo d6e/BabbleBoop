@@ -237,4 +237,45 @@ mod regression_tests {
         // Clean up
         fs::remove_file(&temp_path).ok();
     }
+
+    #[test]
+    fn test_config_migration_from_old_format() {
+        // Old config format used "debug" instead of "keep_audio_files"
+        // and didn't have "max_audio_files"
+        // Note: In TOML, top-level keys must come before any [section] declarations
+        let old_config_toml = r#"
+debug = true
+
+[osc]
+address = "127.0.0.1"
+input_port = 9001
+output_port = 9000
+max_message_chunks = 9
+display_time = 3000
+
+[openai]
+api_key = "test-key"
+model = "gpt-4o-mini"
+
+[translation]
+target_language = "Japanese"
+include_original_message = false
+
+[audio]
+silence_threshold = 100
+noise_gate_threshold = 0.3
+noise_gate_hold_time = 0.20
+min_transcription_duration = 1.0
+
+[rate_limit]
+requests_per_minute = 50
+"#;
+
+        let config: Config = toml::from_str(old_config_toml).expect("Failed to parse old config format");
+
+        // "debug = true" should be read as keep_audio_files = true
+        assert!(config.keep_audio_files, "debug should be aliased to keep_audio_files");
+        // max_audio_files should default to 10
+        assert_eq!(config.max_audio_files, 10, "max_audio_files should default to 10");
+    }
 }

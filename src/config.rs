@@ -13,8 +13,14 @@ pub struct Config {
     pub translation: TranslationConfig,
     pub audio: AudioConfig,
     pub rate_limit: RateLimitConfig,
+    #[serde(alias = "debug", default)]
     pub keep_audio_files: bool,
+    #[serde(default = "default_max_audio_files")]
     pub max_audio_files: usize,
+}
+
+fn default_max_audio_files() -> usize {
+    10
 }
 
 impl Config {
