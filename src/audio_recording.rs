@@ -45,7 +45,7 @@ pub fn start_audio_recording(
     let host = cpal::default_host();
     let device = host
         .default_input_device()
-        .expect("No input device available");
+        .ok_or("No input device available")?;
     let device_config = device.default_input_config()?;
 
     let sample_rate = device_config.sample_rate().0 as f32;
