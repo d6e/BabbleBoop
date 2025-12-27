@@ -12,6 +12,34 @@ fn i16_to_f32(sample: i16) -> f32 {
     sample as f32 / i16::MAX as f32
 }
 
+fn encode_wav_buffer(samples: &[f32], channels: usize, sample_rate: f32) -> Option<Vec<u8>> {
+    let mut wav_buffer = Vec::new();
+    let mut writer = WavWriter::new(
+        Cursor::new(&mut wav_buffer),
+        hound::WavSpec {
+            channels: channels as u16,
+            sample_rate: sample_rate as u32,
+            bits_per_sample: 32,
+            sample_format: hound::SampleFormat::Float,
+        },
+    )
+    .ok()?;
+
+    for &sample in samples.iter() {
+        if writer.write_sample(sample).is_err() {
+            eprintln!("Error writing audio sample");
+            return None;
+        }
+    }
+
+    if writer.finalize().is_err() {
+        eprintln!("Error finalizing WAV buffer");
+        return None;
+    }
+
+    Some(wav_buffer)
+}
+
 struct NoiseGate {
     threshold: f32,
     hold_time: f32,
@@ -164,26 +192,9 @@ fn process_audio_data(
             let mut buffer = audio_data.lock().unwrap();
             if !buffer.is_empty() {
                 println!("Silence detected. Stopping recording and processing audio...");
-                let mut wav_buffer = Vec::new();
-                {
-                    let mut writer = WavWriter::new(
-                        Cursor::new(&mut wav_buffer),
-                        hound::WavSpec {
-                            channels: channels as u16,
-                            sample_rate: sample_rate as u32,
-                            bits_per_sample: 32,
-                            sample_format: hound::SampleFormat::Float,
-                        },
-                    )
-                    .unwrap();
-
-                    for &sample in buffer.iter() {
-                        writer.write_sample(sample).unwrap();
-                    }
-                    writer.finalize().unwrap();
+                if let Some(wav_buffer) = encode_wav_buffer(&buffer, channels, sample_rate) {
+                    let _ = tx.try_send(AudioEvent::AudioData(wav_buffer));
                 }
-
-                let _ = tx.try_send(AudioEvent::AudioData(wav_buffer));
                 buffer.clear();
             }
 
