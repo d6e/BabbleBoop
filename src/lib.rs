@@ -9,3 +9,6 @@ pub mod transcription;
 pub mod translation;
 pub mod types;
 pub mod typing_indicator;
+
+#[cfg(test)]
+mod tests;
