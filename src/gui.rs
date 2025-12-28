@@ -361,20 +361,17 @@ impl eframe::App for BabbleBoopApp {
 
             // Activity Log (fixed height with scroll)
             ui.label(egui::RichText::new("Activity Log").strong());
-            let available_width = ui.available_width();
             egui::Frame::none()
                 .fill(egui::Color32::from_rgb(30, 30, 30))
-                .rounding(4.0)
                 .inner_margin(6.0)
                 .show(ui, |ui| {
-                    ui.set_min_width(available_width);
+                    ui.set_width(ui.available_width());
                     egui::ScrollArea::vertical()
                         .id_salt("activity_log_scroll")
-                        .min_scrolled_width(available_width - 12.0)
                         .max_height(120.0)
                         .stick_to_bottom(true)
                         .show(ui, |ui| {
-                            ui.set_min_width(available_width - 24.0);
+                            ui.set_width(ui.available_width());
                             if self.log_entries.is_empty() {
                                 ui.label(egui::RichText::new("No activity yet...").italics().color(egui::Color32::GRAY));
                             } else {
