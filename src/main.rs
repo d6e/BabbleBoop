@@ -102,7 +102,8 @@ async fn run_processing_loop(
         .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.into() })?;
 
     let mut rate_limiter = RateLimiter::new(config.rate_limit.requests_per_minute);
-    let mut price_estimator = PriceEstimator::new(&config.openai.model);
+    let mut price_estimator =
+        PriceEstimator::new(&config.openai.model, &config.openai.transcription_model);
     println!("Loaded total cost: ${:.4}", price_estimator.total_cost);
 
     let mut recording_manager = if config.keep_audio_files {

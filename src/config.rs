@@ -50,6 +50,12 @@ pub struct OscConfig {
 pub struct OpenAiConfig {
     pub api_key: String,
     pub model: String,
+    #[serde(default = "default_transcription_model")]
+    pub transcription_model: String,
+}
+
+fn default_transcription_model() -> String {
+    "whisper-1".to_string()
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug, PartialEq)]

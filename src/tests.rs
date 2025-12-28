@@ -26,7 +26,7 @@ mod regression_tests {
         ];
 
         for model in models_with_pricing {
-            let estimator = PriceEstimator::new(model);
+            let estimator = PriceEstimator::new(model, "whisper-1");
             // Verify we can estimate non-zero costs
             let cost = estimator.estimate_translation_cost(1000, 500);
             assert!(
@@ -40,7 +40,7 @@ mod regression_tests {
     #[test]
     fn test_unknown_model_uses_default_pricing() {
         // Unknown models should use conservative default pricing (gpt-4o-mini rates)
-        let estimator = PriceEstimator::new("unknown-model-xyz");
+        let estimator = PriceEstimator::new("unknown-model-xyz", "whisper-1");
         let cost = estimator.estimate_translation_cost(1000, 500);
         // Should use gpt-4o-mini pricing as fallback, not zero
         assert!(cost > 0.0, "Unknown models should use default pricing");
@@ -184,6 +184,7 @@ mod regression_tests {
             openai: OpenAiConfig {
                 api_key: "test-api-key".to_string(),
                 model: "gpt-4o-mini".to_string(),
+                transcription_model: "whisper-1".to_string(),
             },
             translation: TranslationConfig {
                 target_language: "Japanese".to_string(),

@@ -10,7 +10,7 @@ pub struct PriceEstimator {
 }
 
 impl PriceEstimator {
-    pub fn new(model: &str) -> Self {
+    pub fn new(model: &str, transcription_model: &str) -> Self {
         let (input_price, output_price, known) = Self::get_model_pricing(model);
 
         if !known {
@@ -20,13 +20,34 @@ impl PriceEstimator {
             );
         }
 
+        let (whisper_price, transcription_known) =
+            Self::get_transcription_pricing(transcription_model);
+
+        if !transcription_known {
+            eprintln!(
+                "Warning: Unknown transcription model '{}' for pricing. Cost estimates will be inaccurate.",
+                transcription_model
+            );
+        }
+
         let total_cost = Self::load_total_cost().unwrap_or(0.0);
 
         PriceEstimator {
-            whisper_price_per_minute: 0.006,
+            whisper_price_per_minute: whisper_price,
             gpt_input_price_per_million_tokens: input_price,
             gpt_output_price_per_million_tokens: output_price,
             total_cost,
+        }
+    }
+
+    fn get_transcription_pricing(model: &str) -> (f64, bool) {
+        // Prices per minute as of late 2024
+        // See: https://openai.com/api/pricing/
+        match model {
+            "whisper-1" => (0.006, true),
+            "gpt-4o-transcribe" => (0.006, true),
+            "gpt-4o-mini-transcribe" => (0.003, true),
+            _ => (0.006, false), // Default to whisper-1 pricing
         }
     }
 

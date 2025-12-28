@@ -26,7 +26,7 @@ pub async fn transcribe_audio(
 
     let form = reqwest::multipart::Form::new()
         .part("file", part)
-        .text("model", "whisper-1");
+        .text("model", config.transcription_model.clone());
 
     println!("Sending request to OpenAI Whisper API");
     let res = client

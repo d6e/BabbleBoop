@@ -10,6 +10,7 @@ max_message_chunks = 9  # large messages are split into chunks, this is the max 
 [openai]
 api_key = "YOUR API KEY"
 model = "gpt-4o-mini"
+transcription_model = "whisper-1"  # whisper-1, gpt-4o-transcribe, or gpt-4o-mini-transcribe
 
 [translation]
 target_language = "Japanese"
