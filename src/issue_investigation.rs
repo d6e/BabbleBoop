@@ -1,6 +1,7 @@
 //! Investigation tests for issues found in commit review
 //!
 //! These tests demonstrate and verify the issues identified.
+//! Each test documents the issue, its severity, and whether it's a TRUE issue.
 
 #[cfg(test)]
 mod shutdown_investigation {

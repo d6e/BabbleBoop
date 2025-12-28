@@ -2,41 +2,22 @@ use babble_boop::app_state::{AppCommand, AppState};
 use babble_boop::audio_processing::process_audio;
 use babble_boop::audio_recording::start_audio_recording;
 use babble_boop::config::{Config, CONFIG_PATH};
-use babble_boop::gui::run_gui;
+use babble_boop::gui::{run_error_dialog, run_gui};
 use babble_boop::price_estimator::PriceEstimator;
 use babble_boop::rate_limiter::RateLimiter;
 use babble_boop::recording_manager::RecordingManager;
 use babble_boop::types::AudioEvent;
 use babble_boop::typing_indicator::TypingIndicator;
 
-use rfd::{MessageButtons, MessageDialog, MessageLevel};
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 
-fn show_error(title: &str, message: &str) {
-    MessageDialog::new()
-        .set_level(MessageLevel::Error)
-        .set_title(title)
-        .set_description(message)
-        .set_buttons(MessageButtons::Ok)
-        .show();
-}
-
-fn show_info(title: &str, message: &str) {
-    MessageDialog::new()
-        .set_level(MessageLevel::Info)
-        .set_title(title)
-        .set_description(message)
-        .set_buttons(MessageButtons::Ok)
-        .show();
-}
-
 fn main() {
     // Load or create config
-    let (config, created) = match Config::load_or_create(CONFIG_PATH) {
+    let (config, first_run) = match Config::load_or_create(CONFIG_PATH) {
         Ok(result) => result,
         Err(e) => {
             let message = format!(
@@ -45,19 +26,10 @@ fn main() {
                 e
             );
             eprintln!("{}", message);
-            show_error("Configuration Error", &message);
+            let _ = run_error_dialog("Configuration Error", &message);
             std::process::exit(1);
         }
     };
-
-    // If config was just created, inform the user they need to set the API key
-    if created {
-        show_info(
-            "Welcome to BabbleBoop",
-            "A default configuration file has been created (config.toml).\n\n\
-            Please set your OpenAI API key in the settings to get started.",
-        );
-    }
 
     // Create command channel for GUI -> processing communication
     let (cmd_tx, cmd_rx) = mpsc::channel::<AppCommand>(32);
@@ -77,10 +49,10 @@ fn main() {
     });
 
     // Run GUI on main thread
-    if let Err(e) = run_gui(app_state) {
+    if let Err(e) = run_gui(app_state, first_run) {
         let message = format!("Failed to start the application window: {}", e);
         eprintln!("{}", message);
-        show_error("GUI Error", &message);
+        let _ = run_error_dialog("GUI Error", &message);
     }
 
     // Wait for processing thread to finish

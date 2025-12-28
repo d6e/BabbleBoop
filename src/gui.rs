@@ -479,7 +479,7 @@ impl eframe::App for BabbleBoopApp {
     }
 }
 
-pub fn run_gui(app_state: Arc<AppState>) -> Result<(), eframe::Error> {
+pub fn run_gui(app_state: Arc<AppState>, first_run: bool) -> Result<(), eframe::Error> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([400.0, 500.0])
@@ -490,6 +490,60 @@ pub fn run_gui(app_state: Arc<AppState>) -> Result<(), eframe::Error> {
     eframe::run_native(
         "BabbleBoop",
         options,
-        Box::new(|_cc| Ok(Box::new(BabbleBoopApp::new(app_state)))),
+        Box::new(move |_cc| {
+            let mut app = BabbleBoopApp::new(app_state);
+            if first_run {
+                app.set_status_info("Welcome! Please set your OpenAI API key to get started.");
+            }
+            Ok(Box::new(app))
+        }),
     )
+}
+
+/// Shows a simple error dialog using egui. Used for startup errors.
+pub fn run_error_dialog(title: &str, message: &str) -> Result<(), eframe::Error> {
+    let title = title.to_string();
+    let message = message.to_string();
+    let window_title = title.clone();
+
+    let options = eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default()
+            .with_inner_size([400.0, 200.0])
+            .with_min_inner_size([300.0, 150.0]),
+        ..Default::default()
+    };
+
+    eframe::run_native(
+        &window_title,
+        options,
+        Box::new(move |_cc| Ok(Box::new(ErrorDialog::new(title, message)))),
+    )
+}
+
+struct ErrorDialog {
+    title: String,
+    message: String,
+}
+
+impl ErrorDialog {
+    fn new(title: String, message: String) -> Self {
+        Self { title, message }
+    }
+}
+
+impl eframe::App for ErrorDialog {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        egui::CentralPanel::default().show(ctx, |ui| {
+            ui.vertical_centered(|ui| {
+                ui.add_space(20.0);
+                ui.heading(egui::RichText::new(&self.title).color(egui::Color32::from_rgb(220, 80, 80)));
+                ui.add_space(15.0);
+                ui.label(&self.message);
+                ui.add_space(20.0);
+                if ui.button("OK").clicked() {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+            });
+        });
+    }
 }
