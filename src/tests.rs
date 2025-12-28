@@ -241,8 +241,9 @@ mod regression_tests {
 
     #[test]
     fn test_config_migration_from_old_format() {
-        // Old config format used "debug" instead of "keep_audio_files"
-        // and didn't have "max_audio_files"
+        // Old config format (v0.3.1) used "debug" instead of "keep_audio_files",
+        // didn't have "max_audio_files" or "transcription_model",
+        // and had "passthrough_enabled" and "passthrough_port" in [osc]
         // Note: In TOML, top-level keys must come before any [section] declarations
         let old_config_toml = r#"
 debug = true
@@ -253,6 +254,8 @@ input_port = 9001
 output_port = 9000
 max_message_chunks = 9
 display_time = 3000
+passthrough_enabled = false
+passthrough_port = 9002
 
 [openai]
 api_key = "test-key"
@@ -278,5 +281,8 @@ requests_per_minute = 50
         assert!(config.keep_audio_files, "debug should be aliased to keep_audio_files");
         // max_audio_files should default to 10
         assert_eq!(config.max_audio_files, 10, "max_audio_files should default to 10");
+        // transcription_model should default to whisper-1
+        assert_eq!(config.openai.transcription_model, "whisper-1", "transcription_model should default to whisper-1");
+        // Removed fields (passthrough_enabled, passthrough_port) should be silently ignored
     }
 }
