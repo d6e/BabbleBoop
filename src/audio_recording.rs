@@ -160,6 +160,7 @@ fn build_input_stream_i16(
     Ok(stream)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn process_audio_data(
     data: &[f32],
     audio_data: &Arc<Mutex<Vec<f32>>>,

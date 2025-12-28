@@ -209,14 +209,13 @@ impl BabbleBoopApp {
                 }
 
                 // Reset button (only show if there are changes)
-                if self.has_unsaved_changes() {
-                    if ui
+                if self.has_unsaved_changes()
+                    && ui
                         .button("Reset")
                         .on_hover_text("Discard changes and reload saved settings")
                         .clicked()
-                    {
-                        self.reload_config();
-                    }
+                {
+                    self.reload_config();
                 }
 
                 // Save button

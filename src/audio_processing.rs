@@ -13,6 +13,7 @@ use std::time::Duration;
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 
+#[allow(clippy::too_many_arguments)]
 pub async fn process_audio(
     audio_data: Vec<u8>,
     config: &Config,
@@ -72,7 +73,7 @@ pub async fn process_audio(
     if config.translation.include_original_message {
         response = response + "\n" + &transcription;
     }
-    send_to_chatbox(&response, &config, socket).await?;
+    send_to_chatbox(&response, config, socket).await?;
 
     typing_indicator.stop_typing().await;
 
