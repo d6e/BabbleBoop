@@ -80,6 +80,7 @@ pub enum AppCommand {
     SetEnabled(bool),
     UpdateConfig(Config),
     StartTestRecording,
+    StopTestRecording,
     TestRecordingComplete(Vec<u8>), // WAV data for playback
     Quit,
 }

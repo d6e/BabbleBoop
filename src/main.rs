@@ -170,6 +170,20 @@ async fn run_processing_loop(
                         test_recording_start = Some(Instant::now());
                         app_state.test_mode_active.store(true, Ordering::SeqCst);
                     }
+                    Some(AppCommand::StopTestRecording) => {
+                        if app_state.test_mode_active.load(Ordering::Relaxed) {
+                            println!("Stopping test recording early...");
+                            app_state.test_mode_active.store(false, Ordering::SeqCst);
+                            test_recording_start = None;
+
+                            if !test_recording_buffer.is_empty() {
+                                let wav_data = std::mem::take(&mut test_recording_buffer);
+                                if let Err(e) = app_state.command_tx.try_send(AppCommand::TestRecordingComplete(wav_data)) {
+                                    eprintln!("Failed to send test recording complete: {}", e);
+                                }
+                            }
+                        }
+                    }
                     Some(AppCommand::TestRecordingComplete(wav_data)) => {
                         println!("Playing back test recording ({} bytes)...", wav_data.len());
                         match play_wav_buffer(wav_data, Arc::clone(&playback_active)) {

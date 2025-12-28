@@ -484,8 +484,12 @@ impl eframe::App for BabbleBoopApp {
                     let is_testing = self.app_state.test_mode_active.load(Ordering::Relaxed);
                     ui.horizontal(|ui| {
                         if is_testing {
-                            ui.add_enabled(false, egui::Button::new("Recording... (3s)"));
-                        } else if ui.button("Test Microphone").on_hover_text("Record 3 seconds of audio and play it back").clicked() {
+                            if ui.button("Stop Recording").on_hover_text("Stop recording and play back").clicked() {
+                                if let Err(e) = self.send_command(AppCommand::StopTestRecording) {
+                                    self.set_status_error(format!("Failed to stop test: {}", e));
+                                }
+                            }
+                        } else if ui.button("Test Microphone").on_hover_text("Record audio and play it back (click again to stop)").clicked() {
                             if let Err(e) = self.send_command(AppCommand::StartTestRecording) {
                                 self.set_status_error(format!("Failed to start test: {}", e));
                             }
