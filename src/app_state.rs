@@ -4,20 +4,44 @@ use std::sync::{Arc, RwLock};
 use std::time::Instant;
 use tokio::sync::mpsc;
 
+/// Log level for activity log entries.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum LogLevel {
+    Info,
+    Success,
+    Error,
+}
+
 /// A log entry for the activity log displayed in the GUI.
 #[derive(Debug, Clone)]
 pub struct LogEntry {
     pub timestamp: Instant,
-    pub original: String,
-    pub translated: String,
+    pub message: String,
+    pub level: LogLevel,
 }
 
 impl LogEntry {
-    pub fn new(original: String, translated: String) -> Self {
+    pub fn info(message: impl Into<String>) -> Self {
         Self {
             timestamp: Instant::now(),
-            original,
-            translated,
+            message: message.into(),
+            level: LogLevel::Info,
+        }
+    }
+
+    pub fn success(message: impl Into<String>) -> Self {
+        Self {
+            timestamp: Instant::now(),
+            message: message.into(),
+            level: LogLevel::Success,
+        }
+    }
+
+    pub fn error(message: impl Into<String>) -> Self {
+        Self {
+            timestamp: Instant::now(),
+            message: message.into(),
+            level: LogLevel::Error,
         }
     }
 }

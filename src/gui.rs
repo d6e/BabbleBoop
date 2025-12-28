@@ -1,4 +1,4 @@
-use crate::app_state::{AppCommand, AppState, LogEntry};
+use crate::app_state::{AppCommand, AppState, LogEntry, LogLevel};
 use crate::config::{Config, CONFIG_PATH};
 use eframe::egui;
 use std::sync::atomic::Ordering;
@@ -348,6 +348,42 @@ impl eframe::App for BabbleBoopApp {
             }
 
             ui.add_space(10.0);
+
+            // Activity Log (always visible at top)
+            egui::CollapsingHeader::new("Activity Log")
+                .default_open(true)
+                .show(ui, |ui| {
+                    if self.log_entries.is_empty() {
+                        ui.label(egui::RichText::new("No activity yet...").italics().color(egui::Color32::GRAY));
+                    } else {
+                        egui::ScrollArea::vertical()
+                            .id_salt("activity_log_scroll")
+                            .max_height(150.0)
+                            .stick_to_bottom(true)
+                            .show(ui, |ui| {
+                                for entry in &self.log_entries {
+                                    let timestamp = self.format_timestamp(entry);
+                                    let color = match entry.level {
+                                        LogLevel::Info => egui::Color32::from_rgb(180, 180, 180),
+                                        LogLevel::Success => egui::Color32::from_rgb(120, 200, 120),
+                                        LogLevel::Error => egui::Color32::from_rgb(220, 100, 100),
+                                    };
+                                    ui.horizontal_wrapped(|ui| {
+                                        ui.label(
+                                            egui::RichText::new(format!("[{}]", timestamp))
+                                                .color(egui::Color32::from_rgb(120, 120, 120))
+                                                .small()
+                                        );
+                                        ui.label(
+                                            egui::RichText::new(&entry.message)
+                                                .color(color)
+                                        );
+                                    });
+                                }
+                            });
+                    }
+                });
+
             ui.separator();
             ui.add_space(10.0);
 
@@ -585,45 +621,6 @@ impl eframe::App for BabbleBoopApp {
                         });
                 });
 
-                ui.add_space(5.0);
-
-                // Activity Log
-                egui::CollapsingHeader::new("Activity Log")
-                    .default_open(true)
-                    .show(ui, |ui| {
-                        if self.log_entries.is_empty() {
-                            ui.label(egui::RichText::new("No activity yet...").italics().color(egui::Color32::GRAY));
-                        } else {
-                            egui::ScrollArea::vertical()
-                                .id_salt("activity_log_scroll")
-                                .max_height(150.0)
-                                .stick_to_bottom(true)
-                                .show(ui, |ui| {
-                                    for entry in &self.log_entries {
-                                        let timestamp = self.format_timestamp(entry);
-                                        ui.horizontal_wrapped(|ui| {
-                                            ui.label(
-                                                egui::RichText::new(format!("[{}]", timestamp))
-                                                    .color(egui::Color32::from_rgb(120, 120, 120))
-                                                    .small()
-                                            );
-                                            ui.label(
-                                                egui::RichText::new(&entry.original)
-                                                    .color(egui::Color32::from_rgb(180, 180, 220))
-                                            );
-                                            ui.label(
-                                                egui::RichText::new("->")
-                                                    .color(egui::Color32::from_rgb(100, 100, 100))
-                                            );
-                                            ui.label(
-                                                egui::RichText::new(&entry.translated)
-                                                    .color(egui::Color32::from_rgb(120, 200, 120))
-                                            );
-                                        });
-                                    }
-                                });
-                        }
-                    });
             });
         });
 

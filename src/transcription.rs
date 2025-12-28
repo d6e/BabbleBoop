@@ -8,11 +8,6 @@ pub async fn transcribe_audio(
     config: &OpenAiConfig,
     rate_limiter: &mut RateLimiter,
 ) -> Result<String, Box<dyn Error>> {
-    println!(
-        "Starting audio transcription. Audio data size: {} bytes",
-        audio_data.len()
-    );
-
     if audio_data.is_empty() {
         return Err("Audio data is empty".into());
     }
@@ -28,7 +23,6 @@ pub async fn transcribe_audio(
         .part("file", part)
         .text("model", config.transcription_model.clone());
 
-    println!("Sending request to OpenAI Whisper API");
     let res = client
         .post("https://api.openai.com/v1/audio/transcriptions")
         .header("Authorization", format!("Bearer {}", &config.api_key))
@@ -47,7 +41,6 @@ pub async fn transcribe_audio(
     }
 
     let transcription: TranscriptionResponse = res.json().await?;
-    println!("Transcription received: {}", transcription.text);
 
     if transcription.text.is_empty() {
         return Err("Received empty transcription from API".into());

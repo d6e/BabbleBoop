@@ -1,4 +1,4 @@
-use crate::app_state::AudioParams;
+use crate::app_state::{AudioParams, LogEntry};
 use crate::types::AudioEvent;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::Stream;
@@ -82,6 +82,7 @@ fn build_input_stream_f32(
     test_mode_active: Arc<AtomicBool>,
     test_recording_buffer: Arc<Mutex<Vec<f32>>>,
     tx: mpsc::Sender<AudioEvent>,
+    log_tx: mpsc::Sender<LogEntry>,
     channels: usize,
     sample_rate: f32,
 ) -> Result<Stream, Box<dyn Error>> {
@@ -110,6 +111,7 @@ fn build_input_stream_f32(
                 &test_mode_active,
                 &test_recording_buffer,
                 &tx,
+                &log_tx,
                 channels,
                 sample_rate,
             );
@@ -130,6 +132,7 @@ fn build_input_stream_i16(
     test_mode_active: Arc<AtomicBool>,
     test_recording_buffer: Arc<Mutex<Vec<f32>>>,
     tx: mpsc::Sender<AudioEvent>,
+    log_tx: mpsc::Sender<LogEntry>,
     channels: usize,
     sample_rate: f32,
 ) -> Result<Stream, Box<dyn Error>> {
@@ -159,6 +162,7 @@ fn build_input_stream_i16(
                 &test_mode_active,
                 &test_recording_buffer,
                 &tx,
+                &log_tx,
                 channels,
                 sample_rate,
             );
@@ -182,6 +186,7 @@ fn process_audio_data(
     test_mode_active: &Arc<AtomicBool>,
     test_recording_buffer: &Arc<Mutex<Vec<f32>>>,
     tx: &mpsc::Sender<AudioEvent>,
+    log_tx: &mpsc::Sender<LogEntry>,
     channels: usize,
     sample_rate: f32,
 ) {
@@ -205,9 +210,11 @@ fn process_audio_data(
 
         if !*is_recording {
             *is_recording = true;
-            println!("Sound detected. Starting recording...");
+            let _ = log_tx.try_send(LogEntry::info("Sound detected, recording..."));
             if let Err(e) = tx.try_send(AudioEvent::StartRecording) {
-                eprintln!("Warning: Failed to send StartRecording event: {}", e);
+                let _ = log_tx.try_send(LogEntry::error(format!(
+                    "Failed to send StartRecording: {}", e
+                )));
             }
         }
 
@@ -222,18 +229,18 @@ fn process_audio_data(
 
             let mut buffer = audio_data.lock().unwrap();
             if !buffer.is_empty() {
-                println!("Silence detected. Stopping recording and processing audio...");
+                let _ = log_tx.try_send(LogEntry::info("Silence detected, processing..."));
                 if let Some(wav_buffer) = encode_wav_buffer(&buffer, channels, sample_rate) {
                     if let Err(e) = tx.try_send(AudioEvent::AudioData(wav_buffer)) {
-                        eprintln!("Warning: Failed to send AudioData event: {}", e);
+                        let _ = log_tx.try_send(LogEntry::error(format!(
+                            "Failed to send AudioData: {}", e
+                        )));
                     }
                 }
                 buffer.clear();
             }
 
-            if let Err(e) = tx.try_send(AudioEvent::StopRecording) {
-                eprintln!("Warning: Failed to send StopRecording event: {}", e);
-            }
+            let _ = tx.try_send(AudioEvent::StopRecording);
         } else {
             // Keep recording during short pauses
             let mut buffer = audio_data.lock().unwrap();
@@ -254,6 +261,7 @@ pub fn start_audio_recording(
     test_mode_active: Arc<AtomicBool>,
     test_recording_buffer: Arc<Mutex<Vec<f32>>>,
     tx: mpsc::Sender<AudioEvent>,
+    log_tx: mpsc::Sender<LogEntry>,
 ) -> Result<(Stream, AudioStreamInfo), Box<dyn Error>> {
     let host = cpal::default_host();
     let device = host
@@ -279,6 +287,7 @@ pub fn start_audio_recording(
             test_mode_active,
             test_recording_buffer,
             tx,
+            log_tx,
             channels,
             sample_rate,
         )?,
@@ -290,6 +299,7 @@ pub fn start_audio_recording(
             test_mode_active,
             test_recording_buffer,
             tx,
+            log_tx,
             channels,
             sample_rate,
         )?,

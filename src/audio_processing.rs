@@ -28,17 +28,18 @@ pub async fn process_audio(
 
     let min_duration = Duration::from_secs_f32(config.audio.min_transcription_duration);
     if audio_duration < min_duration {
-        println!(
-            "Audio too short ({:.2}s). Minimum duration is {:.2}s. Skipping transcription.",
+        let msg = format!(
+            "Audio too short ({:.2}s < {:.2}s), skipping",
             audio_duration.as_secs_f32(),
             min_duration.as_secs_f32()
         );
+        let _ = log_tx.try_send(LogEntry::info(msg));
         typing_indicator.stop_typing().await;
         return Ok(());
     }
 
     let transcription = transcribe_audio(audio_data.clone(), &config.openai, rate_limiter).await?;
-    println!("Transcription: {}", transcription);
+    let _ = log_tx.try_send(LogEntry::info(format!("Transcription: {}", transcription)));
 
     // Save the audio recording if debug mode is enabled
     if let Some(manager) = recording_manager {
@@ -50,14 +51,8 @@ pub async fn process_audio(
         config.translation.target_language, transcription
     );
 
-    let mut response = ask_chatgpt(&translation_prompt, &config.openai, rate_limiter).await?;
-    println!("Translation: {}", response);
-
-    // Send log entry to GUI
-    let log_entry = LogEntry::new(transcription.clone(), response.clone());
-    if let Err(e) = log_tx.try_send(log_entry) {
-        eprintln!("Failed to send log entry: {}", e);
-    }
+    let response = ask_chatgpt(&translation_prompt, &config.openai, rate_limiter).await?;
+    let _ = log_tx.try_send(LogEntry::success(format!("Translation: {}", response)));
 
     let transcription_cost = price_estimator.estimate_transcription_cost(audio_duration);
     let input_tokens = translation_prompt.len() / 4;
@@ -66,14 +61,16 @@ pub async fn process_audio(
     let total_cost = transcription_cost + translation_cost;
 
     price_estimator.add_cost(total_cost);
-    println!("Estimated cost for this operation: ${:.4}", total_cost);
-    println!("Total cost so far: ${:.4}", price_estimator.total_cost);
-    println!("---");
+    let _ = log_tx.try_send(LogEntry::info(format!(
+        "Cost: ${:.4} (total: ${:.4})",
+        total_cost, price_estimator.total_cost
+    )));
 
+    let mut final_response = response;
     if config.translation.include_original_message {
-        response = response + "\n" + &transcription;
+        final_response = final_response + "\n" + &transcription;
     }
-    send_to_chatbox(&response, config, socket).await?;
+    send_to_chatbox(&final_response, config, socket).await?;
 
     typing_indicator.stop_typing().await;
 
