@@ -189,11 +189,12 @@ fn process_audio_data(
     let max_amplitude = data.iter().map(|&s| s.abs()).fold(0.0f32, f32::max);
     audio_level.store(max_amplitude.to_bits(), Ordering::Relaxed);
 
-    // If test mode is active, write raw samples to the test buffer
+    // If test mode is active, write raw samples to the test buffer and skip normal processing
     if test_mode_active.load(Ordering::Relaxed) {
         if let Ok(mut buffer) = test_recording_buffer.lock() {
             buffer.extend_from_slice(data);
         }
+        return;
     }
 
     // Read silence_threshold from atomics for hot reload support
