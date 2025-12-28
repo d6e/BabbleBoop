@@ -1,10 +1,11 @@
-use crate::config::Config;
+use crate::app_state::AudioParams;
 use crate::types::AudioEvent;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::Stream;
 use hound::WavWriter;
 use std::error::Error;
 use std::io::Cursor;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 
@@ -41,29 +42,30 @@ fn encode_wav_buffer(samples: &[f32], channels: usize, sample_rate: f32) -> Opti
 }
 
 struct NoiseGate {
-    threshold: f32,
-    hold_time: f32,
+    params: Arc<AudioParams>,
     last_active: std::time::Instant,
     is_active: bool,
 }
 
 impl NoiseGate {
-    fn new(threshold: f32, hold_time: f32) -> Self {
+    fn new(params: Arc<AudioParams>) -> Self {
         NoiseGate {
-            threshold,
-            hold_time,
+            params,
             last_active: std::time::Instant::now(),
             is_active: false,
         }
     }
 
     fn process(&mut self, samples: &[f32]) -> bool {
+        // Read threshold and hold_time from atomics for hot reload support
+        let threshold = self.params.get_noise_gate_threshold();
+        let hold_time = self.params.get_noise_gate_hold_time();
         let max_amplitude = samples.iter().map(|&s| s.abs()).fold(0.0f32, f32::max);
 
-        if max_amplitude > self.threshold {
+        if max_amplitude > threshold {
             self.last_active = std::time::Instant::now();
             self.is_active = true;
-        } else if self.is_active && self.last_active.elapsed().as_secs_f32() > self.hold_time {
+        } else if self.is_active && self.last_active.elapsed().as_secs_f32() > hold_time {
             self.is_active = false;
         }
 
@@ -74,7 +76,8 @@ impl NoiseGate {
 fn build_input_stream_f32(
     device: &cpal::Device,
     device_config: cpal::SupportedStreamConfig,
-    config: &Config,
+    audio_params: Arc<AudioParams>,
+    audio_level: Arc<AtomicU32>,
     tx: mpsc::Sender<AudioEvent>,
     channels: usize,
     sample_rate: f32,
@@ -82,14 +85,11 @@ fn build_input_stream_f32(
     let audio_data = Arc::new(Mutex::new(Vec::new()));
     let audio_data_clone = Arc::clone(&audio_data);
 
-    let mut noise_gate = NoiseGate::new(
-        config.audio.noise_gate_threshold,
-        config.audio.noise_gate_hold_time,
-    );
+    let params_clone = Arc::clone(&audio_params);
+    let mut noise_gate = NoiseGate::new(params_clone);
 
     let mut is_recording = false;
     let mut silent_frames = 0;
-    let silence_threshold = config.audio.silence_threshold;
 
     let err_fn = |err| eprintln!("An error occurred on the audio stream: {}", err);
 
@@ -102,7 +102,8 @@ fn build_input_stream_f32(
                 &mut noise_gate,
                 &mut is_recording,
                 &mut silent_frames,
-                silence_threshold,
+                &audio_params,
+                &audio_level,
                 &tx,
                 channels,
                 sample_rate,
@@ -118,7 +119,8 @@ fn build_input_stream_f32(
 fn build_input_stream_i16(
     device: &cpal::Device,
     device_config: cpal::SupportedStreamConfig,
-    config: &Config,
+    audio_params: Arc<AudioParams>,
+    audio_level: Arc<AtomicU32>,
     tx: mpsc::Sender<AudioEvent>,
     channels: usize,
     sample_rate: f32,
@@ -126,14 +128,11 @@ fn build_input_stream_i16(
     let audio_data = Arc::new(Mutex::new(Vec::new()));
     let audio_data_clone = Arc::clone(&audio_data);
 
-    let mut noise_gate = NoiseGate::new(
-        config.audio.noise_gate_threshold,
-        config.audio.noise_gate_hold_time,
-    );
+    let params_clone = Arc::clone(&audio_params);
+    let mut noise_gate = NoiseGate::new(params_clone);
 
     let mut is_recording = false;
     let mut silent_frames = 0;
-    let silence_threshold = config.audio.silence_threshold;
 
     let err_fn = |err| eprintln!("An error occurred on the audio stream: {}", err);
 
@@ -147,7 +146,8 @@ fn build_input_stream_i16(
                 &mut noise_gate,
                 &mut is_recording,
                 &mut silent_frames,
-                silence_threshold,
+                &audio_params,
+                &audio_level,
                 &tx,
                 channels,
                 sample_rate,
@@ -167,11 +167,19 @@ fn process_audio_data(
     noise_gate: &mut NoiseGate,
     is_recording: &mut bool,
     silent_frames: &mut u32,
-    silence_threshold: u32,
+    audio_params: &Arc<AudioParams>,
+    audio_level: &Arc<AtomicU32>,
     tx: &mpsc::Sender<AudioEvent>,
     channels: usize,
     sample_rate: f32,
 ) {
+    // Calculate and store the current audio level for the GUI level meter
+    let max_amplitude = data.iter().map(|&s| s.abs()).fold(0.0f32, f32::max);
+    audio_level.store(max_amplitude.to_bits(), Ordering::Relaxed);
+
+    // Read silence_threshold from atomics for hot reload support
+    let silence_threshold = audio_params.get_silence_threshold();
+
     if noise_gate.process(data) {
         let mut buffer = audio_data.lock().unwrap();
 
@@ -215,7 +223,8 @@ fn process_audio_data(
 }
 
 pub fn start_audio_recording(
-    config: &Config,
+    audio_params: Arc<AudioParams>,
+    audio_level: Arc<AtomicU32>,
     tx: mpsc::Sender<AudioEvent>,
 ) -> Result<Stream, Box<dyn Error>> {
     let host = cpal::default_host();
@@ -229,12 +238,24 @@ pub fn start_audio_recording(
     let sample_format = device_config.sample_format();
 
     let stream: Stream = match sample_format {
-        cpal::SampleFormat::F32 => {
-            build_input_stream_f32(&device, device_config, config, tx, channels, sample_rate)?
-        }
-        cpal::SampleFormat::I16 => {
-            build_input_stream_i16(&device, device_config, config, tx, channels, sample_rate)?
-        }
+        cpal::SampleFormat::F32 => build_input_stream_f32(
+            &device,
+            device_config,
+            audio_params,
+            audio_level,
+            tx,
+            channels,
+            sample_rate,
+        )?,
+        cpal::SampleFormat::I16 => build_input_stream_i16(
+            &device,
+            device_config,
+            audio_params,
+            audio_level,
+            tx,
+            channels,
+            sample_rate,
+        )?,
         _ => return Err(format!("Unsupported sample format: {:?}", sample_format).into()),
     };
 

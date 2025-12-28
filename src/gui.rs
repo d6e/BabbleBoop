@@ -5,6 +5,42 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
+/// Draw an audio level meter with threshold indicator
+fn draw_audio_level_meter(ui: &mut egui::Ui, current_level: f32, threshold: f32) {
+    let meter_size = egui::vec2(ui.available_width().min(200.0), 16.0);
+    let (rect, _response) = ui.allocate_exact_size(meter_size, egui::Sense::hover());
+
+    if ui.is_rect_visible(rect) {
+        let painter = ui.painter();
+
+        // Background
+        painter.rect_filled(rect, 2.0, egui::Color32::from_gray(40));
+
+        // Level bar with color gradient based on level
+        let level_width = rect.width() * current_level.min(1.0);
+        if level_width > 0.0 {
+            let level_rect =
+                egui::Rect::from_min_size(rect.min, egui::vec2(level_width, rect.height()));
+            let color = if current_level > 0.8 {
+                egui::Color32::from_rgb(220, 60, 60) // Red for high levels
+            } else if current_level > 0.5 {
+                egui::Color32::from_rgb(220, 180, 60) // Yellow for medium
+            } else {
+                egui::Color32::from_rgb(60, 180, 60) // Green for low
+            };
+            painter.rect_filled(level_rect, 2.0, color);
+        }
+
+        // Threshold indicator line
+        let threshold_x = rect.left() + rect.width() * threshold;
+        painter.vline(
+            threshold_x,
+            rect.y_range(),
+            egui::Stroke::new(2.0, egui::Color32::WHITE),
+        );
+    }
+}
+
 const MAX_LOG_ENTRIES: usize = 50;
 
 #[derive(Clone, Copy, PartialEq)]
@@ -435,14 +471,27 @@ impl eframe::App for BabbleBoopApp {
                 ui.add_space(5.0);
 
                 // Audio Settings
-                egui::CollapsingHeader::new("Audio Settings")
+                let audio_header = egui::CollapsingHeader::new("Audio Settings")
                     .show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.spacing_mut().item_spacing.x = 4.0;
-                        ui.label(egui::RichText::new("⚠").color(egui::Color32::from_rgb(255, 180, 0)));
-                        ui.label(egui::RichText::new("Changes require restart").italics());
-                    });
+                    // Audio level meter at the top
+                    ui.label("Input Level:");
+                    let level_bits = self.app_state.current_audio_level.load(Ordering::Relaxed);
+                    let current_level = f32::from_bits(level_bits);
+                    draw_audio_level_meter(ui, current_level, self.config_draft.audio.noise_gate_threshold);
                     ui.add_space(4.0);
+
+                    // Test Microphone button
+                    let is_testing = self.app_state.test_mode_active.load(Ordering::Relaxed);
+                    ui.horizontal(|ui| {
+                        if is_testing {
+                            ui.add_enabled(false, egui::Button::new("Recording... (3s)"));
+                        } else if ui.button("Test Microphone").on_hover_text("Record 3 seconds of audio and play it back").clicked() {
+                            if let Err(e) = self.send_command(AppCommand::StartTestRecording) {
+                                self.set_status_error(format!("Failed to start test: {}", e));
+                            }
+                        }
+                    });
+                    ui.add_space(8.0);
 
                     egui::Grid::new("audio_grid")
                         .num_columns(2)
@@ -455,7 +504,7 @@ impl eframe::App for BabbleBoopApp {
                             ui.end_row();
 
                             ui.label("Noise Gate Threshold:")
-                                .on_hover_text("Audio level below which input is considered silence (0.0-1.0)");
+                                .on_hover_text("Audio level below which input is considered silence (0.0-1.0). White line on meter shows threshold.");
                             ui.add(
                                 egui::DragValue::new(&mut self.config_draft.audio.noise_gate_threshold)
                                     .speed(0.01)
@@ -482,6 +531,10 @@ impl eframe::App for BabbleBoopApp {
                             ui.end_row();
                         });
                 });
+                // Request repaint when audio settings is open to update the level meter
+                if audio_header.body_returned.is_some() {
+                    ctx.request_repaint();
+                }
 
                 ui.add_space(5.0);
 

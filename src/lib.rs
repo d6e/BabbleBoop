@@ -1,4 +1,5 @@
 pub mod app_state;
+pub mod audio_playback;
 pub mod audio_processing;
 pub mod audio_recording;
 pub mod chatbox;

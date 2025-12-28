@@ -1,4 +1,5 @@
 use babble_boop::app_state::{AppCommand, AppState, LogEntry};
+use babble_boop::audio_playback::play_wav_buffer;
 use babble_boop::audio_processing::process_audio;
 use babble_boop::audio_recording::start_audio_recording;
 use babble_boop::config::{Config, CONFIG_PATH};
@@ -10,8 +11,9 @@ use babble_boop::types::AudioEvent;
 use babble_boop::typing_indicator::TypingIndicator;
 
 use std::path::PathBuf;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 
@@ -87,15 +89,12 @@ async fn run_processing_loop(
     let (tx, mut rx) = mpsc::channel::<AudioEvent>(100);
 
     // Start the audio recording in a separate thread
-    let config_for_audio = app_state
-        .config
-        .read()
-        .expect("Config lock poisoned")
-        .clone();
+    let audio_params = Arc::clone(&app_state.audio_params);
+    let audio_level = Arc::clone(&app_state.current_audio_level);
     let shutdown_signal = Arc::clone(&app_state.shutdown);
     let (init_tx, init_rx) = std::sync::mpsc::channel::<Result<(), String>>();
     std::thread::spawn(move || {
-        match start_audio_recording(&config_for_audio, tx) {
+        match start_audio_recording(audio_params, audio_level, tx) {
             Ok(stream) => {
                 let _ = init_tx.send(Ok(()));
                 let _stream = stream;
@@ -134,6 +133,14 @@ async fn run_processing_loop(
 
     let typing_indicator = TypingIndicator::new(Arc::clone(&socket), Arc::clone(&app_state.config));
 
+    // Test recording state
+    let mut test_recording_buffer: Vec<u8> = Vec::new();
+    let mut test_recording_start: Option<Instant> = None;
+    let test_recording_duration = Duration::from_secs(3);
+    // Keep playback stream alive until playback completes
+    let mut _playback_stream: Option<cpal::Stream> = None;
+    let playback_active = Arc::new(AtomicBool::new(false));
+
     loop {
         tokio::select! {
             // Prioritize command channel to handle Quit promptly
@@ -146,6 +153,8 @@ async fn run_processing_loop(
                     }
                     Some(AppCommand::UpdateConfig(new_config)) => {
                         println!("Config updated");
+                        // Update hot-reloadable audio params
+                        app_state.audio_params.update(&new_config.audio);
                         // Update rate limiter if needed
                         rate_limiter = RateLimiter::new(new_config.rate_limit.requests_per_minute);
                         // Update recording manager if keep_audio_files changed
@@ -155,6 +164,24 @@ async fn run_processing_loop(
                             None
                         };
                     }
+                    Some(AppCommand::StartTestRecording) => {
+                        println!("Starting test recording...");
+                        test_recording_buffer.clear();
+                        test_recording_start = Some(Instant::now());
+                        app_state.test_mode_active.store(true, Ordering::SeqCst);
+                    }
+                    Some(AppCommand::TestRecordingComplete(wav_data)) => {
+                        println!("Playing back test recording ({} bytes)...", wav_data.len());
+                        match play_wav_buffer(wav_data, Arc::clone(&playback_active)) {
+                            Ok(stream) => {
+                                _playback_stream = Some(stream);
+                            }
+                            Err(e) => {
+                                eprintln!("Failed to play test recording: {}", e);
+                                playback_active.store(false, Ordering::SeqCst);
+                            }
+                        }
+                    }
                     Some(AppCommand::Quit) | None => {
                         // Quit command received or channel closed
                         println!("Shutting down...");
@@ -163,6 +190,31 @@ async fn run_processing_loop(
                 }
             }
             Some(event) = rx.recv() => {
+                // Check if test recording is active and has timed out
+                if let Some(start_time) = test_recording_start {
+                    if start_time.elapsed() >= test_recording_duration {
+                        println!("Test recording complete, {} bytes captured", test_recording_buffer.len());
+                        app_state.test_mode_active.store(false, Ordering::SeqCst);
+                        test_recording_start = None;
+
+                        // Send the captured audio for playback
+                        if !test_recording_buffer.is_empty() {
+                            let wav_data = std::mem::take(&mut test_recording_buffer);
+                            if let Err(e) = app_state.command_tx.try_send(AppCommand::TestRecordingComplete(wav_data)) {
+                                eprintln!("Failed to send test recording complete: {}", e);
+                            }
+                        }
+                    }
+                }
+
+                // Handle test recording mode: capture audio data instead of processing
+                if app_state.test_mode_active.load(Ordering::Relaxed) {
+                    if let AudioEvent::AudioData(audio_data) = event {
+                        test_recording_buffer.extend_from_slice(&audio_data);
+                    }
+                    continue;
+                }
+
                 // Check if enabled
                 if !app_state.enabled.load(Ordering::Relaxed) {
                     // Still handle typing indicator but skip processing
