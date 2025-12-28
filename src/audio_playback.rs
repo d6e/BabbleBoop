@@ -20,20 +20,10 @@ pub fn play_wav_buffer(
     let sample_format = supported_config.sample_format();
     let config: cpal::StreamConfig = supported_config.into();
 
-    println!(
-        "  Output device: {} channels, {} Hz, {:?}",
-        config.channels, config.sample_rate.0, sample_format
-    );
-
     // Parse WAV header to get samples
     let reader = hound::WavReader::new(Cursor::new(&wav_data))?;
     let spec = reader.spec();
     let wav_channels = spec.channels as usize;
-
-    println!(
-        "  WAV source: {} channels, {} Hz",
-        spec.channels, spec.sample_rate
-    );
 
     // Convert samples to f32
     let samples: Vec<f32> = if spec.sample_format == hound::SampleFormat::Float {
@@ -48,8 +38,6 @@ pub fn play_wav_buffer(
             .map(|s| s as f32 / i16::MAX as f32)
             .collect()
     };
-
-    println!("  Loaded {} samples for playback", samples.len());
 
     let samples = Arc::new(samples);
     let position = Arc::new(AtomicUsize::new(0));
@@ -108,7 +96,6 @@ pub fn play_wav_buffer(
     };
 
     stream.play()?;
-    println!("  Playback started");
     Ok(stream)
 }
 

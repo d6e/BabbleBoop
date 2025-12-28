@@ -30,18 +30,6 @@ fn encode_samples_to_wav(samples: &[f32], spec: hound::WavSpec) -> Option<Vec<u8
     Some(buffer)
 }
 
-/// Decode WAV data to raw f32 samples, returning samples and spec
-fn decode_wav_to_samples(wav_data: &[u8]) -> Option<(Vec<f32>, hound::WavSpec)> {
-    let cursor = Cursor::new(wav_data);
-    let reader = hound::WavReader::new(cursor).ok()?;
-    let spec = reader.spec();
-    let samples: Vec<f32> = reader
-        .into_samples::<f32>()
-        .filter_map(|s| s.ok())
-        .collect();
-    Some((samples, spec))
-}
-
 fn main() {
     // Load or create config
     let (config, first_run) = match Config::load_or_create(CONFIG_PATH) {
@@ -240,14 +228,9 @@ async fn run_processing_loop(
                         }
                     }
                     Some(AppCommand::TestRecordingComplete(wav_data)) => {
-                        println!("Playing back test recording ({} bytes)...", wav_data.len());
-                        // Decode to check sample count
-                        if let Some((samples, spec)) = decode_wav_to_samples(&wav_data) {
-                            println!("  WAV: {} samples, {} channels, {} Hz", samples.len(), spec.channels, spec.sample_rate);
-                        }
+                        println!("Playing back test recording...");
                         match play_wav_buffer(wav_data, Arc::clone(&playback_active)) {
                             Ok(stream) => {
-                                println!("  Playback stream started");
                                 _playback_stream = Some(stream);
                             }
                             Err(e) => {

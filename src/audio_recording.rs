@@ -73,6 +73,7 @@ impl NoiseGate {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_input_stream_f32(
     device: &cpal::Device,
     device_config: cpal::SupportedStreamConfig,
@@ -120,6 +121,7 @@ fn build_input_stream_f32(
     Ok(stream)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_input_stream_i16(
     device: &cpal::Device,
     device_config: cpal::SupportedStreamConfig,
