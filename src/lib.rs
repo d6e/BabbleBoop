@@ -14,6 +14,3 @@ pub mod typing_indicator;
 
 #[cfg(test)]
 mod tests;
-
-#[cfg(test)]
-mod issue_investigation;
