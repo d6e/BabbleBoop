@@ -6,7 +6,7 @@ use std::path::Path;
 /// Default path to the configuration file
 pub const CONFIG_PATH: &str = "config.toml";
 
-#[derive(Deserialize, Serialize, Clone, Debug)]
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq)]
 pub struct Config {
     pub osc: OscConfig,
     pub openai: OpenAiConfig,
@@ -37,7 +37,7 @@ impl Config {
     }
 }
 
-#[derive(Deserialize, Serialize, Clone, Debug)]
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq)]
 pub struct OscConfig {
     pub address: String,
     pub input_port: u16,
@@ -46,19 +46,19 @@ pub struct OscConfig {
     pub display_time: u64,
 }
 
-#[derive(Deserialize, Serialize, Clone, Debug)]
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq)]
 pub struct OpenAiConfig {
     pub api_key: String,
     pub model: String,
 }
 
-#[derive(Deserialize, Serialize, Clone, Debug)]
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq)]
 pub struct TranslationConfig {
     pub target_language: String,
     pub include_original_message: bool,
 }
 
-#[derive(Deserialize, Serialize, Clone, Debug)]
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq)]
 pub struct AudioConfig {
     pub silence_threshold: u32,
     pub noise_gate_threshold: f32,
@@ -66,7 +66,7 @@ pub struct AudioConfig {
     pub min_transcription_duration: f32,
 }
 
-#[derive(Deserialize, Serialize, Clone, Debug)]
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq)]
 pub struct RateLimitConfig {
     pub requests_per_minute: usize,
 }

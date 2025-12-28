@@ -4,27 +4,89 @@ use eframe::egui;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
+#[derive(Clone, Copy, PartialEq)]
+enum StatusType {
+    Success,
+    Error,
+    Info,
+}
+
+const OPENAI_MODELS: &[&str] = &[
+    "gpt-4o",
+    "gpt-4o-mini",
+    "gpt-4-turbo",
+    "gpt-4",
+    "gpt-3.5-turbo",
+];
+
 pub struct BabbleBoopApp {
     app_state: Arc<AppState>,
     config_draft: Config,
-    status_message: Option<(String, std::time::Instant)>,
+    saved_config: Config,
+    status_message: Option<(String, StatusType, std::time::Instant)>,
 }
 
 impl BabbleBoopApp {
     pub fn new(app_state: Arc<AppState>) -> Self {
         let config_draft = app_state.config.read().expect("Config lock poisoned").clone();
+        let saved_config = config_draft.clone();
         Self {
             app_state,
             config_draft,
+            saved_config,
             status_message: None,
         }
     }
 
+    fn has_unsaved_changes(&self) -> bool {
+        self.config_draft != self.saved_config
+    }
+
+    fn reload_config(&mut self) {
+        self.config_draft = self.saved_config.clone();
+        self.set_status_info("Changes discarded");
+    }
+
+    fn validate_config(&self) -> Result<(), String> {
+        // Validate ports
+        if self.config_draft.osc.input_port == 0 {
+            return Err("Input port cannot be 0".to_string());
+        }
+        if self.config_draft.osc.output_port == 0 {
+            return Err("Output port cannot be 0".to_string());
+        }
+        if self.config_draft.osc.input_port == self.config_draft.osc.output_port {
+            return Err("Input and output ports cannot be the same".to_string());
+        }
+
+        // Validate API key
+        if self.config_draft.openai.api_key.trim().is_empty() {
+            return Err("OpenAI API key is required".to_string());
+        }
+
+        // Validate model
+        if self.config_draft.openai.model.trim().is_empty() {
+            return Err("OpenAI model is required".to_string());
+        }
+
+        // Validate target language
+        if self.config_draft.translation.target_language.trim().is_empty() {
+            return Err("Target language is required".to_string());
+        }
+
+        Ok(())
+    }
+
     fn show_status(&mut self, ctx: &egui::Context) {
-        if let Some((msg, time)) = &self.status_message {
+        if let Some((msg, status_type, time)) = &self.status_message {
             if time.elapsed().as_secs() < 3 {
                 egui::TopBottomPanel::bottom("status_bar").show(ctx, |ui| {
-                    ui.label(msg.as_str());
+                    let color = match status_type {
+                        StatusType::Success => egui::Color32::from_rgb(100, 200, 100),
+                        StatusType::Error => egui::Color32::from_rgb(220, 80, 80),
+                        StatusType::Info => egui::Color32::from_rgb(150, 150, 220),
+                    };
+                    ui.colored_label(color, msg.as_str());
                 });
             } else {
                 self.status_message = None;
@@ -32,8 +94,16 @@ impl BabbleBoopApp {
         }
     }
 
-    fn set_status(&mut self, msg: impl Into<String>) {
-        self.status_message = Some((msg.into(), std::time::Instant::now()));
+    fn set_status_success(&mut self, msg: impl Into<String>) {
+        self.status_message = Some((msg.into(), StatusType::Success, std::time::Instant::now()));
+    }
+
+    fn set_status_error(&mut self, msg: impl Into<String>) {
+        self.status_message = Some((msg.into(), StatusType::Error, std::time::Instant::now()));
+    }
+
+    fn set_status_info(&mut self, msg: impl Into<String>) {
+        self.status_message = Some((msg.into(), StatusType::Info, std::time::Instant::now()));
     }
 
     fn send_command(&self, cmd: AppCommand) -> Result<(), String> {
@@ -85,7 +155,7 @@ impl eframe::App for BabbleBoopApp {
                 }
             });
             if let Some(e) = toggle_error {
-                self.set_status(e);
+                self.set_status_error(e);
             }
 
             ui.add_space(10.0);
@@ -93,30 +163,41 @@ impl eframe::App for BabbleBoopApp {
             ui.add_space(10.0);
 
             egui::ScrollArea::vertical().show(ui, |ui| {
+                let grid_spacing = [10.0, 6.0];
+                let label_width = 160.0;
+
                 // OSC Settings
-                ui.collapsing("OSC Settings", |ui| {
+                egui::CollapsingHeader::new("OSC Settings")
+                    .default_open(true)
+                    .show(ui, |ui| {
                     egui::Grid::new("osc_grid")
                         .num_columns(2)
-                        .spacing([10.0, 4.0])
+                        .spacing(grid_spacing)
+                        .min_col_width(label_width)
                         .show(ui, |ui| {
-                            ui.label("Address:");
+                            ui.label("Address:")
+                                .on_hover_text("OSC server address (usually 127.0.0.1 for local)");
                             ui.text_edit_singleline(&mut self.config_draft.osc.address);
                             ui.end_row();
 
-                            ui.label("Input Port:");
-                            ui.add(egui::DragValue::new(&mut self.config_draft.osc.input_port));
+                            ui.label("Input Port:")
+                                .on_hover_text("Port to receive OSC messages from VRChat");
+                            ui.add(egui::DragValue::new(&mut self.config_draft.osc.input_port).range(1..=65535));
                             ui.end_row();
 
-                            ui.label("Output Port:");
-                            ui.add(egui::DragValue::new(&mut self.config_draft.osc.output_port));
+                            ui.label("Output Port:")
+                                .on_hover_text("Port to send OSC messages to VRChat");
+                            ui.add(egui::DragValue::new(&mut self.config_draft.osc.output_port).range(1..=65535));
                             ui.end_row();
 
-                            ui.label("Display Time (ms):");
-                            ui.add(egui::DragValue::new(&mut self.config_draft.osc.display_time));
+                            ui.label("Display Time (ms):")
+                                .on_hover_text("How long messages stay visible in VRChat");
+                            ui.add(egui::DragValue::new(&mut self.config_draft.osc.display_time).range(1000..=30000));
                             ui.end_row();
 
-                            ui.label("Max Message Chunks:");
-                            ui.add(egui::DragValue::new(&mut self.config_draft.osc.max_message_chunks));
+                            ui.label("Max Message Chunks:")
+                                .on_hover_text("Maximum number of message parts for long text");
+                            ui.add(egui::DragValue::new(&mut self.config_draft.osc.max_message_chunks).range(1..=10));
                             ui.end_row();
                         });
                 });
@@ -124,20 +205,35 @@ impl eframe::App for BabbleBoopApp {
                 ui.add_space(5.0);
 
                 // OpenAI Settings
-                ui.collapsing("OpenAI Settings", |ui| {
+                egui::CollapsingHeader::new("OpenAI Settings")
+                    .default_open(true)
+                    .show(ui, |ui| {
                     egui::Grid::new("openai_grid")
                         .num_columns(2)
-                        .spacing([10.0, 4.0])
+                        .spacing(grid_spacing)
+                        .min_col_width(label_width)
                         .show(ui, |ui| {
-                            ui.label("API Key:");
+                            ui.label("API Key:")
+                                .on_hover_text("Your OpenAI API key for transcription and translation");
                             ui.add(
                                 egui::TextEdit::singleline(&mut self.config_draft.openai.api_key)
                                     .password(true),
                             );
                             ui.end_row();
 
-                            ui.label("Model:");
-                            ui.text_edit_singleline(&mut self.config_draft.openai.model);
+                            ui.label("Model:")
+                                .on_hover_text("OpenAI model for translation (gpt-4o recommended)");
+                            egui::ComboBox::from_id_salt("model_combo")
+                                .selected_text(&self.config_draft.openai.model)
+                                .show_ui(ui, |ui| {
+                                    for model in OPENAI_MODELS {
+                                        ui.selectable_value(
+                                            &mut self.config_draft.openai.model,
+                                            model.to_string(),
+                                            *model,
+                                        );
+                                    }
+                                });
                             ui.end_row();
                         });
                 });
@@ -145,16 +241,21 @@ impl eframe::App for BabbleBoopApp {
                 ui.add_space(5.0);
 
                 // Translation Settings
-                ui.collapsing("Translation Settings", |ui| {
+                egui::CollapsingHeader::new("Translation Settings")
+                    .default_open(true)
+                    .show(ui, |ui| {
                     egui::Grid::new("translation_grid")
                         .num_columns(2)
-                        .spacing([10.0, 4.0])
+                        .spacing(grid_spacing)
+                        .min_col_width(label_width)
                         .show(ui, |ui| {
-                            ui.label("Target Language:");
+                            ui.label("Target Language:")
+                                .on_hover_text("Language to translate your speech into (e.g., Japanese, Spanish)");
                             ui.text_edit_singleline(&mut self.config_draft.translation.target_language);
                             ui.end_row();
 
-                            ui.label("Include Original:");
+                            ui.label("Include Original:")
+                                .on_hover_text("Show original text alongside the translation");
                             ui.checkbox(
                                 &mut self.config_draft.translation.include_original_message,
                                 "",
@@ -166,16 +267,27 @@ impl eframe::App for BabbleBoopApp {
                 ui.add_space(5.0);
 
                 // Audio Settings
-                ui.collapsing("Audio Settings (requires restart)", |ui| {
+                egui::CollapsingHeader::new("Audio Settings")
+                    .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 4.0;
+                        ui.label(egui::RichText::new("⚠").color(egui::Color32::from_rgb(255, 180, 0)));
+                        ui.label(egui::RichText::new("Changes require restart").italics());
+                    });
+                    ui.add_space(4.0);
+
                     egui::Grid::new("audio_grid")
                         .num_columns(2)
-                        .spacing([10.0, 4.0])
+                        .spacing(grid_spacing)
+                        .min_col_width(label_width)
                         .show(ui, |ui| {
-                            ui.label("Silence Threshold:");
-                            ui.add(egui::DragValue::new(&mut self.config_draft.audio.silence_threshold));
+                            ui.label("Silence Threshold:")
+                                .on_hover_text("Number of consecutive silent samples before stopping recording");
+                            ui.add(egui::DragValue::new(&mut self.config_draft.audio.silence_threshold).range(1..=200));
                             ui.end_row();
 
-                            ui.label("Noise Gate Threshold:");
+                            ui.label("Noise Gate Threshold:")
+                                .on_hover_text("Audio level below which input is considered silence (0.0-1.0)");
                             ui.add(
                                 egui::DragValue::new(&mut self.config_draft.audio.noise_gate_threshold)
                                     .speed(0.01)
@@ -183,7 +295,8 @@ impl eframe::App for BabbleBoopApp {
                             );
                             ui.end_row();
 
-                            ui.label("Noise Gate Hold Time (s):");
+                            ui.label("Noise Gate Hold (s):")
+                                .on_hover_text("Time to keep gate open after audio drops below threshold");
                             ui.add(
                                 egui::DragValue::new(&mut self.config_draft.audio.noise_gate_hold_time)
                                     .speed(0.01)
@@ -191,7 +304,8 @@ impl eframe::App for BabbleBoopApp {
                             );
                             ui.end_row();
 
-                            ui.label("Min Transcription Duration (s):");
+                            ui.label("Min Duration (s):")
+                                .on_hover_text("Minimum recording length before transcription (filters out noise)");
                             ui.add(
                                 egui::DragValue::new(&mut self.config_draft.audio.min_transcription_duration)
                                     .speed(0.1)
@@ -204,55 +318,99 @@ impl eframe::App for BabbleBoopApp {
                 ui.add_space(5.0);
 
                 // Rate Limit Settings
-                ui.collapsing("Rate Limit", |ui| {
+                egui::CollapsingHeader::new("Rate Limit")
+                    .show(ui, |ui| {
                     egui::Grid::new("rate_limit_grid")
                         .num_columns(2)
-                        .spacing([10.0, 4.0])
+                        .spacing(grid_spacing)
+                        .min_col_width(label_width)
                         .show(ui, |ui| {
-                            ui.label("Requests per Minute:");
+                            ui.label("Requests per Minute:")
+                                .on_hover_text("Maximum API requests per minute to avoid rate limiting");
                             ui.add(egui::DragValue::new(
                                 &mut self.config_draft.rate_limit.requests_per_minute,
-                            ));
+                            ).range(1..=120));
                             ui.end_row();
                         });
                 });
 
                 ui.add_space(5.0);
 
-                // Keep Audio Files
-                ui.horizontal(|ui| {
-                    ui.label("Keep Audio Files:");
-                    ui.checkbox(&mut self.config_draft.keep_audio_files, "");
-                });
+                // Debug/Development Settings
+                egui::CollapsingHeader::new("Debug")
+                    .show(ui, |ui| {
+                    egui::Grid::new("debug_grid")
+                        .num_columns(2)
+                        .spacing(grid_spacing)
+                        .min_col_width(label_width)
+                        .show(ui, |ui| {
+                            ui.label("Keep Audio Files:")
+                                .on_hover_text("Save recorded audio files for debugging");
+                            ui.checkbox(&mut self.config_draft.keep_audio_files, "");
+                            ui.end_row();
 
-                ui.horizontal(|ui| {
-                    ui.add_enabled_ui(self.config_draft.keep_audio_files, |ui| {
-                        ui.label("Max Audio Files:");
-                        ui.add(egui::DragValue::new(&mut self.config_draft.max_audio_files).range(1..=100));
-                    });
+                            ui.add_enabled_ui(self.config_draft.keep_audio_files, |ui| {
+                                ui.label("Max Audio Files:")
+                                    .on_hover_text("Maximum number of audio files to keep");
+                            });
+                            ui.add_enabled_ui(self.config_draft.keep_audio_files, |ui| {
+                                ui.add(egui::DragValue::new(&mut self.config_draft.max_audio_files).range(1..=100));
+                            });
+                            ui.end_row();
+                        });
                 });
+            });
+        });
 
-                ui.add_space(20.0);
+        // Bottom panel with save/reset buttons
+        egui::TopBottomPanel::bottom("button_panel").show(ctx, |ui| {
+            ui.add_space(8.0);
+
+            ui.horizontal(|ui| {
+                // Unsaved changes indicator
+                if self.has_unsaved_changes() {
+                    ui.label(egui::RichText::new("● Unsaved changes").color(egui::Color32::from_rgb(255, 180, 0)));
+                    ui.separator();
+                }
+
+                // Reset button (only show if there are changes)
+                if self.has_unsaved_changes() {
+                    if ui.button("Reset").on_hover_text("Discard changes and reload saved settings").clicked() {
+                        self.reload_config();
+                    }
+                }
 
                 // Save button
-                if ui.button("Save Settings").clicked() {
-                    match self.config_draft.save(CONFIG_PATH) {
-                        Ok(()) => {
-                            // Update the shared config
-                            if let Ok(mut config) = self.app_state.config.write() {
-                                *config = self.config_draft.clone();
+                let save_button = ui.add_enabled(
+                    self.has_unsaved_changes(),
+                    egui::Button::new("Save Settings"),
+                );
+
+                if save_button.clicked() {
+                    if let Err(e) = self.validate_config() {
+                        self.set_status_error(e);
+                    } else {
+                        match self.config_draft.save(CONFIG_PATH) {
+                            Ok(()) => {
+                                // Update the shared config
+                                if let Ok(mut config) = self.app_state.config.write() {
+                                    *config = self.config_draft.clone();
+                                }
+                                self.saved_config = self.config_draft.clone();
+                                match self.send_command(AppCommand::UpdateConfig(self.config_draft.clone())) {
+                                    Ok(()) => self.set_status_success("Settings saved successfully"),
+                                    Err(e) => self.set_status_error(format!("Settings saved to file, but {}", e)),
+                                }
                             }
-                            match self.send_command(AppCommand::UpdateConfig(self.config_draft.clone())) {
-                                Ok(()) => self.set_status("Settings saved successfully"),
-                                Err(e) => self.set_status(format!("Settings saved to file, but {}", e)),
+                            Err(e) => {
+                                self.set_status_error(format!("Failed to save: {}", e));
                             }
-                        }
-                        Err(e) => {
-                            self.set_status(format!("Failed to save: {}", e));
                         }
                     }
                 }
             });
+
+            ui.add_space(4.0);
         });
 
         // Request repaint for status message timeout
