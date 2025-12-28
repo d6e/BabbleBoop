@@ -359,18 +359,21 @@ impl eframe::App for BabbleBoopApp {
 
             ui.add_space(10.0);
 
-            // Activity Log (always visible at top)
-            egui::CollapsingHeader::new("Activity Log")
-                .default_open(true)
+            // Activity Log (fixed height with scroll)
+            ui.label(egui::RichText::new("Activity Log").strong());
+            egui::Frame::none()
+                .fill(egui::Color32::from_rgb(30, 30, 30))
+                .rounding(4.0)
+                .inner_margin(6.0)
                 .show(ui, |ui| {
-                    if self.log_entries.is_empty() {
-                        ui.label(egui::RichText::new("No activity yet...").italics().color(egui::Color32::GRAY));
-                    } else {
-                        egui::ScrollArea::vertical()
-                            .id_salt("activity_log_scroll")
-                            .max_height(150.0)
-                            .stick_to_bottom(true)
-                            .show(ui, |ui| {
+                    egui::ScrollArea::vertical()
+                        .id_salt("activity_log_scroll")
+                        .max_height(120.0)
+                        .stick_to_bottom(true)
+                        .show(ui, |ui| {
+                            if self.log_entries.is_empty() {
+                                ui.label(egui::RichText::new("No activity yet...").italics().color(egui::Color32::GRAY));
+                            } else {
                                 for entry in &self.log_entries {
                                     let timestamp = self.format_timestamp(entry);
                                     let color = match entry.level {
@@ -390,8 +393,8 @@ impl eframe::App for BabbleBoopApp {
                                         );
                                     });
                                 }
-                            });
-                    }
+                            }
+                        });
                 });
 
             ui.separator();
