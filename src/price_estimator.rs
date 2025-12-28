@@ -66,8 +66,11 @@ impl PriceEstimator {
             "gpt-4o-mini" | "gpt-4o-mini-2024-07-18" => (0.15, 0.60, true),
 
             // GPT-4 Turbo models
-            "gpt-4-turbo" | "gpt-4-turbo-2024-04-09" | "gpt-4-turbo-preview"
-            | "gpt-4-0125-preview" | "gpt-4-1106-preview" => (10.00, 30.00, true),
+            "gpt-4-turbo"
+            | "gpt-4-turbo-2024-04-09"
+            | "gpt-4-turbo-preview"
+            | "gpt-4-0125-preview"
+            | "gpt-4-1106-preview" => (10.00, 30.00, true),
 
             // GPT-4 models
             "gpt-4" | "gpt-4-0613" => (30.00, 60.00, true),

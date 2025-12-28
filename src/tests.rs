@@ -29,11 +29,7 @@ mod regression_tests {
             let estimator = PriceEstimator::new(model, "whisper-1");
             // Verify we can estimate non-zero costs
             let cost = estimator.estimate_translation_cost(1000, 500);
-            assert!(
-                cost > 0.0,
-                "Model {} should have non-zero pricing",
-                model
-            );
+            assert!(cost > 0.0, "Model {} should have non-zero pricing", model);
         }
     }
 
@@ -226,8 +222,13 @@ mod regression_tests {
             loaded.translation.include_original_message,
             config.translation.include_original_message
         );
-        assert_eq!(loaded.audio.silence_threshold, config.audio.silence_threshold);
-        assert!((loaded.audio.noise_gate_threshold - config.audio.noise_gate_threshold).abs() < 0.001);
+        assert_eq!(
+            loaded.audio.silence_threshold,
+            config.audio.silence_threshold
+        );
+        assert!(
+            (loaded.audio.noise_gate_threshold - config.audio.noise_gate_threshold).abs() < 0.001
+        );
         assert_eq!(
             loaded.rate_limit.requests_per_minute,
             config.rate_limit.requests_per_minute
@@ -275,14 +276,24 @@ min_transcription_duration = 1.0
 requests_per_minute = 50
 "#;
 
-        let config: Config = toml::from_str(old_config_toml).expect("Failed to parse old config format");
+        let config: Config =
+            toml::from_str(old_config_toml).expect("Failed to parse old config format");
 
         // "debug = true" should be read as keep_audio_files = true
-        assert!(config.keep_audio_files, "debug should be aliased to keep_audio_files");
+        assert!(
+            config.keep_audio_files,
+            "debug should be aliased to keep_audio_files"
+        );
         // max_audio_files should default to 10
-        assert_eq!(config.max_audio_files, 10, "max_audio_files should default to 10");
+        assert_eq!(
+            config.max_audio_files, 10,
+            "max_audio_files should default to 10"
+        );
         // transcription_model should default to whisper-1
-        assert_eq!(config.openai.transcription_model, "whisper-1", "transcription_model should default to whisper-1");
+        assert_eq!(
+            config.openai.transcription_model, "whisper-1",
+            "transcription_model should default to whisper-1"
+        );
         // Removed fields (passthrough_enabled, passthrough_port) should be silently ignored
     }
 }

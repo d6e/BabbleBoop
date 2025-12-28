@@ -54,7 +54,12 @@ fn toggle_switch(on: &mut bool) -> impl egui::Widget + '_ {
             let knob_radius = radius - 2.0;
             let knob_x = egui::lerp((rect.left() + radius)..=(rect.right() - radius), how_on);
             let knob_center = egui::pos2(knob_x, rect.center().y);
-            ui.painter().circle(knob_center, knob_radius, egui::Color32::WHITE, egui::Stroke::NONE);
+            ui.painter().circle(
+                knob_center,
+                knob_radius,
+                egui::Color32::WHITE,
+                egui::Stroke::NONE,
+            );
         }
 
         response
@@ -73,7 +78,11 @@ pub struct BabbleBoopApp {
 
 impl BabbleBoopApp {
     pub fn new(app_state: Arc<AppState>, log_rx: mpsc::Receiver<LogEntry>) -> Self {
-        let config_draft = app_state.config.read().expect("Config lock poisoned").clone();
+        let config_draft = app_state
+            .config
+            .read()
+            .expect("Config lock poisoned")
+            .clone();
         let saved_config = config_draft.clone();
         Self {
             app_state,
@@ -136,7 +145,13 @@ impl BabbleBoopApp {
         }
 
         // Validate target language
-        if self.config_draft.translation.target_language.trim().is_empty() {
+        if self
+            .config_draft
+            .translation
+            .target_language
+            .trim()
+            .is_empty()
+        {
             return Err("Target language is required".to_string());
         }
 
@@ -186,13 +201,20 @@ impl BabbleBoopApp {
             ui.horizontal(|ui| {
                 // Unsaved changes indicator
                 if self.has_unsaved_changes() {
-                    ui.label(egui::RichText::new("● Unsaved changes").color(egui::Color32::from_rgb(255, 180, 0)));
+                    ui.label(
+                        egui::RichText::new("● Unsaved changes")
+                            .color(egui::Color32::from_rgb(255, 180, 0)),
+                    );
                     ui.separator();
                 }
 
                 // Reset button (only show if there are changes)
                 if self.has_unsaved_changes() {
-                    if ui.button("Reset").on_hover_text("Discard changes and reload saved settings").clicked() {
+                    if ui
+                        .button("Reset")
+                        .on_hover_text("Discard changes and reload saved settings")
+                        .clicked()
+                    {
                         self.reload_config();
                     }
                 }
@@ -214,9 +236,16 @@ impl BabbleBoopApp {
                                     *config = self.config_draft.clone();
                                 }
                                 self.saved_config = self.config_draft.clone();
-                                match self.send_command(AppCommand::UpdateConfig(self.config_draft.clone())) {
-                                    Ok(()) => self.set_status_success("Settings saved successfully"),
-                                    Err(e) => self.set_status_error(format!("Settings saved to file, but {}", e)),
+                                match self.send_command(AppCommand::UpdateConfig(
+                                    self.config_draft.clone(),
+                                )) {
+                                    Ok(()) => {
+                                        self.set_status_success("Settings saved successfully")
+                                    }
+                                    Err(e) => self.set_status_error(format!(
+                                        "Settings saved to file, but {}",
+                                        e
+                                    )),
                                 }
                             }
                             Err(e) => {
@@ -610,7 +639,9 @@ impl eframe::App for ErrorDialog {
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.vertical_centered(|ui| {
                 ui.add_space(20.0);
-                ui.heading(egui::RichText::new(&self.title).color(egui::Color32::from_rgb(220, 80, 80)));
+                ui.heading(
+                    egui::RichText::new(&self.title).color(egui::Color32::from_rgb(220, 80, 80)),
+                );
                 ui.add_space(15.0);
                 ui.label(&self.message);
                 ui.add_space(20.0);
