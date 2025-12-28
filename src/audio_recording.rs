@@ -5,7 +5,7 @@ use cpal::Stream;
 use hound::WavWriter;
 use std::error::Error;
 use std::io::Cursor;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 
@@ -78,6 +78,8 @@ fn build_input_stream_f32(
     device_config: cpal::SupportedStreamConfig,
     audio_params: Arc<AudioParams>,
     audio_level: Arc<AtomicU32>,
+    test_mode_active: Arc<AtomicBool>,
+    test_recording_buffer: Arc<Mutex<Vec<f32>>>,
     tx: mpsc::Sender<AudioEvent>,
     channels: usize,
     sample_rate: f32,
@@ -104,6 +106,8 @@ fn build_input_stream_f32(
                 &mut silent_frames,
                 &audio_params,
                 &audio_level,
+                &test_mode_active,
+                &test_recording_buffer,
                 &tx,
                 channels,
                 sample_rate,
@@ -121,6 +125,8 @@ fn build_input_stream_i16(
     device_config: cpal::SupportedStreamConfig,
     audio_params: Arc<AudioParams>,
     audio_level: Arc<AtomicU32>,
+    test_mode_active: Arc<AtomicBool>,
+    test_recording_buffer: Arc<Mutex<Vec<f32>>>,
     tx: mpsc::Sender<AudioEvent>,
     channels: usize,
     sample_rate: f32,
@@ -148,6 +154,8 @@ fn build_input_stream_i16(
                 &mut silent_frames,
                 &audio_params,
                 &audio_level,
+                &test_mode_active,
+                &test_recording_buffer,
                 &tx,
                 channels,
                 sample_rate,
@@ -169,6 +177,8 @@ fn process_audio_data(
     silent_frames: &mut u32,
     audio_params: &Arc<AudioParams>,
     audio_level: &Arc<AtomicU32>,
+    test_mode_active: &Arc<AtomicBool>,
+    test_recording_buffer: &Arc<Mutex<Vec<f32>>>,
     tx: &mpsc::Sender<AudioEvent>,
     channels: usize,
     sample_rate: f32,
@@ -176,6 +186,13 @@ fn process_audio_data(
     // Calculate and store the current audio level for the GUI level meter
     let max_amplitude = data.iter().map(|&s| s.abs()).fold(0.0f32, f32::max);
     audio_level.store(max_amplitude.to_bits(), Ordering::Relaxed);
+
+    // If test mode is active, write raw samples to the test buffer
+    if test_mode_active.load(Ordering::Relaxed) {
+        if let Ok(mut buffer) = test_recording_buffer.lock() {
+            buffer.extend_from_slice(data);
+        }
+    }
 
     // Read silence_threshold from atomics for hot reload support
     let silence_threshold = audio_params.get_silence_threshold();
@@ -222,11 +239,19 @@ fn process_audio_data(
     }
 }
 
+/// Information about the audio stream configuration
+pub struct AudioStreamInfo {
+    pub sample_rate: u32,
+    pub channels: u16,
+}
+
 pub fn start_audio_recording(
     audio_params: Arc<AudioParams>,
     audio_level: Arc<AtomicU32>,
+    test_mode_active: Arc<AtomicBool>,
+    test_recording_buffer: Arc<Mutex<Vec<f32>>>,
     tx: mpsc::Sender<AudioEvent>,
-) -> Result<Stream, Box<dyn Error>> {
+) -> Result<(Stream, AudioStreamInfo), Box<dyn Error>> {
     let host = cpal::default_host();
     let device = host
         .default_input_device()
@@ -237,12 +262,19 @@ pub fn start_audio_recording(
     let channels = device_config.channels() as usize;
     let sample_format = device_config.sample_format();
 
+    let stream_info = AudioStreamInfo {
+        sample_rate: sample_rate as u32,
+        channels: channels as u16,
+    };
+
     let stream: Stream = match sample_format {
         cpal::SampleFormat::F32 => build_input_stream_f32(
             &device,
             device_config,
             audio_params,
             audio_level,
+            test_mode_active,
+            test_recording_buffer,
             tx,
             channels,
             sample_rate,
@@ -252,6 +284,8 @@ pub fn start_audio_recording(
             device_config,
             audio_params,
             audio_level,
+            test_mode_active,
+            test_recording_buffer,
             tx,
             channels,
             sample_rate,
@@ -261,5 +295,5 @@ pub fn start_audio_recording(
 
     stream.play()?;
 
-    Ok(stream)
+    Ok((stream, stream_info))
 }

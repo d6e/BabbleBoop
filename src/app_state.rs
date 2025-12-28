@@ -73,6 +73,8 @@ pub struct AppState {
     pub audio_params: Arc<AudioParams>,
     /// Flag indicating test recording mode is active
     pub test_mode_active: Arc<AtomicBool>,
+    /// Buffer for test recording samples (written by audio thread, read by main thread)
+    pub test_recording_buffer: Arc<std::sync::Mutex<Vec<f32>>>,
 }
 
 #[derive(Debug)]
@@ -101,6 +103,7 @@ impl AppState {
             current_audio_level: Arc::new(AtomicU32::new(0)),
             audio_params,
             test_mode_active: Arc::new(AtomicBool::new(false)),
+            test_recording_buffer: Arc::new(std::sync::Mutex::new(Vec::new())),
         }
     }
 
