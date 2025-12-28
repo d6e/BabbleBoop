@@ -19,6 +19,45 @@ const OPENAI_MODELS: &[&str] = &[
     "gpt-3.5-turbo",
 ];
 
+const TRANSCRIPTION_MODELS: &[&str] = &["whisper-1", "gpt-4o-transcribe", "gpt-4o-mini-transcribe"];
+
+/// Custom toggle switch widget
+fn toggle_switch(on: &mut bool) -> impl egui::Widget + '_ {
+    move |ui: &mut egui::Ui| {
+        let desired_size = egui::vec2(36.0, 20.0);
+        let (rect, mut response) = ui.allocate_exact_size(desired_size, egui::Sense::click());
+
+        if response.clicked() {
+            *on = !*on;
+            response.mark_changed();
+        }
+
+        if ui.is_rect_visible(rect) {
+            let how_on = ui.ctx().animate_bool_responsive(response.id, *on);
+            let visuals = ui.style().interact_selectable(&response, *on);
+
+            let rect = rect.expand(visuals.expansion);
+            let radius = 0.5 * rect.height();
+
+            // Track background
+            let bg_color = egui::Color32::from_rgb(
+                (60.0 + how_on * 40.0) as u8,
+                (60.0 + how_on * 100.0) as u8,
+                (60.0 + how_on * 40.0) as u8,
+            );
+            ui.painter().rect(rect, radius, bg_color, visuals.bg_stroke);
+
+            // Knob
+            let knob_radius = radius - 2.0;
+            let knob_x = egui::lerp((rect.left() + radius)..=(rect.right() - radius), how_on);
+            let knob_center = egui::pos2(knob_x, rect.center().y);
+            ui.painter().circle(knob_center, knob_radius, egui::Color32::WHITE, egui::Stroke::NONE);
+        }
+
+        response
+    }
+}
+
 pub struct BabbleBoopApp {
     app_state: Arc<AppState>,
     config_draft: Config,
@@ -186,27 +225,29 @@ impl eframe::App for BabbleBoopApp {
             ui.add_space(10.0);
 
             // Enable/Disable toggle
-            let enabled = self.app_state.enabled.load(Ordering::Relaxed);
-            let toggle_text = if enabled { "Enabled" } else { "Disabled" };
-            let toggle_color = if enabled {
-                egui::Color32::from_rgb(100, 200, 100)
-            } else {
-                egui::Color32::from_rgb(200, 100, 100)
-            };
+            let mut enabled = self.app_state.enabled.load(Ordering::Relaxed);
 
             let mut toggle_error: Option<String> = None;
             ui.horizontal(|ui| {
                 ui.label("Translation:");
-                if ui
-                    .add(egui::Button::new(toggle_text).fill(toggle_color))
-                    .clicked()
-                {
-                    let new_state = !enabled;
-                    self.app_state.enabled.store(new_state, Ordering::Relaxed);
-                    if let Err(e) = self.send_command(AppCommand::SetEnabled(new_state)) {
+                ui.add_space(8.0);
+
+                // Toggle switch
+                let response = ui.add(toggle_switch(&mut enabled));
+                if response.changed() {
+                    self.app_state.enabled.store(enabled, Ordering::Relaxed);
+                    if let Err(e) = self.send_command(AppCommand::SetEnabled(enabled)) {
                         toggle_error = Some(e);
                     }
                 }
+
+                // Status text
+                let (status_text, status_color) = if enabled {
+                    ("Enabled", egui::Color32::from_rgb(80, 160, 80))
+                } else {
+                    ("Disabled", egui::Color32::from_rgb(140, 140, 140))
+                };
+                ui.label(egui::RichText::new(status_text).color(status_color));
             });
             if let Some(e) = toggle_error {
                 self.set_status_error(e);
@@ -283,6 +324,21 @@ impl eframe::App for BabbleBoopApp {
                                     for model in OPENAI_MODELS {
                                         ui.selectable_value(
                                             &mut self.config_draft.openai.model,
+                                            model.to_string(),
+                                            *model,
+                                        );
+                                    }
+                                });
+                            ui.end_row();
+
+                            ui.label("Transcription:")
+                                .on_hover_text("Model for speech-to-text (gpt-4o-mini-transcribe is cheapest)");
+                            egui::ComboBox::from_id_salt("transcription_model_combo")
+                                .selected_text(&self.config_draft.openai.transcription_model)
+                                .show_ui(ui, |ui| {
+                                    for model in TRANSCRIPTION_MODELS {
+                                        ui.selectable_value(
+                                            &mut self.config_draft.openai.transcription_model,
                                             model.to_string(),
                                             *model,
                                         );
