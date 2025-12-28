@@ -20,29 +20,48 @@ pub struct LogEntry {
     pub level: LogLevel,
 }
 
-impl LogEntry {
-    pub fn info(message: impl Into<String>) -> Self {
-        Self {
+/// Logger that outputs to stdout/stderr and the GUI activity log.
+#[derive(Clone)]
+pub struct Logger {
+    log_tx: mpsc::Sender<LogEntry>,
+}
+
+impl Logger {
+    pub fn new(log_tx: mpsc::Sender<LogEntry>) -> Self {
+        Self { log_tx }
+    }
+
+    /// Log an info message to stdout and the activity log.
+    pub fn info(&self, message: impl Into<String>) {
+        let msg = message.into();
+        println!("{}", msg);
+        let _ = self.log_tx.try_send(LogEntry {
             timestamp: Instant::now(),
-            message: message.into(),
+            message: msg,
             level: LogLevel::Info,
-        }
+        });
     }
 
-    pub fn success(message: impl Into<String>) -> Self {
-        Self {
+    /// Log a success message to stdout and the activity log.
+    pub fn success(&self, message: impl Into<String>) {
+        let msg = message.into();
+        println!("{}", msg);
+        let _ = self.log_tx.try_send(LogEntry {
             timestamp: Instant::now(),
-            message: message.into(),
+            message: msg,
             level: LogLevel::Success,
-        }
+        });
     }
 
-    pub fn error(message: impl Into<String>) -> Self {
-        Self {
+    /// Log an error message to stderr and the activity log.
+    pub fn error(&self, message: impl Into<String>) {
+        let msg = message.into();
+        eprintln!("{}", msg);
+        let _ = self.log_tx.try_send(LogEntry {
             timestamp: Instant::now(),
-            message: message.into(),
+            message: msg,
             level: LogLevel::Error,
-        }
+        });
     }
 }
 
@@ -91,6 +110,7 @@ pub struct AppState {
     pub shutdown: Arc<AtomicBool>,
     pub command_tx: mpsc::Sender<AppCommand>,
     pub log_tx: mpsc::Sender<LogEntry>,
+    pub logger: Logger,
     /// Current audio input level (f32 stored as bits) for the level meter
     pub current_audio_level: Arc<AtomicU32>,
     /// Hot-reloadable audio parameters shared with the audio thread
@@ -120,12 +140,14 @@ impl AppState {
         log_tx: mpsc::Sender<LogEntry>,
     ) -> Self {
         let audio_params = Arc::new(AudioParams::new(&config.audio));
+        let logger = Logger::new(log_tx.clone());
         Self {
             config: Arc::new(RwLock::new(config)),
             enabled: Arc::new(AtomicBool::new(true)),
             shutdown: Arc::new(AtomicBool::new(false)),
             command_tx,
             log_tx,
+            logger,
             current_audio_level: Arc::new(AtomicU32::new(0)),
             audio_params,
             test_mode_active: Arc::new(AtomicBool::new(false)),

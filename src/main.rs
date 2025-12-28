@@ -91,11 +91,11 @@ async fn run_processing_loop(
     let socket_address = format!("{}:{}", config.osc.address, config.osc.input_port);
     let socket = Arc::new(UdpSocket::bind(&socket_address).await?);
 
-    let _ = app_state.log_tx.try_send(LogEntry::info("Starting audio recording..."));
-    let _ = app_state.log_tx.try_send(LogEntry::info(format!(
+    app_state.logger.info("Starting audio recording...");
+    app_state.logger.info(format!(
         "Translating to: {}",
         config.translation.target_language
-    )));
+    ));
 
     let (tx, mut rx) = mpsc::channel::<AudioEvent>(100);
 
@@ -105,7 +105,7 @@ async fn run_processing_loop(
     let test_mode_active = Arc::clone(&app_state.test_mode_active);
     let test_recording_buffer = Arc::clone(&app_state.test_recording_buffer);
     let shutdown_signal = Arc::clone(&app_state.shutdown);
-    let log_tx_for_audio = app_state.log_tx.clone();
+    let logger_for_audio = app_state.logger.clone();
     let (init_tx, init_rx) =
         std::sync::mpsc::channel::<Result<babble_boop::audio_recording::AudioStreamInfo, String>>();
     std::thread::spawn(move || {
@@ -115,7 +115,7 @@ async fn run_processing_loop(
             test_mode_active,
             test_recording_buffer,
             tx,
-            log_tx_for_audio,
+            logger_for_audio,
         ) {
             Ok((stream, stream_info)) => {
                 let _ = init_tx.send(Ok(stream_info));
@@ -138,10 +138,10 @@ async fn run_processing_loop(
         .map_err(|_| "Audio recording thread failed to start")?
         .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.into() })?;
 
-    let _ = app_state.log_tx.try_send(LogEntry::info(format!(
+    app_state.logger.info(format!(
         "Audio: {} ch, {} Hz",
         audio_stream_info.channels, audio_stream_info.sample_rate
-    )));
+    ));
 
     let mut rate_limiter = RateLimiter::new(config.rate_limit.requests_per_minute);
     let mut price_estimator =
@@ -183,12 +183,12 @@ async fn run_processing_loop(
             cmd = cmd_rx.recv() => {
                 match cmd {
                     Some(AppCommand::SetEnabled(enabled)) => {
-                        let _ = app_state.log_tx.try_send(LogEntry::info(
+                        app_state.logger.info(
                             if enabled { "Translation enabled" } else { "Translation disabled" }
-                        ));
+                        );
                     }
                     Some(AppCommand::UpdateConfig(new_config)) => {
-                        let _ = app_state.log_tx.try_send(LogEntry::info("Config updated"));
+                        app_state.logger.info("Config updated");
                         // Update hot-reloadable audio params
                         app_state.audio_params.update(&new_config.audio);
                         // Update rate limiter if needed
@@ -201,7 +201,7 @@ async fn run_processing_loop(
                         };
                     }
                     Some(AppCommand::StartTestRecording) => {
-                        let _ = app_state.log_tx.try_send(LogEntry::info("Test recording started..."));
+                        app_state.logger.info("Test recording started...");
                         // Clear the shared buffer
                         if let Ok(mut buffer) = app_state.test_recording_buffer.lock() {
                             buffer.clear();
@@ -218,15 +218,15 @@ async fn run_processing_loop(
                             if let Ok(mut buffer) = app_state.test_recording_buffer.lock() {
                                 if !buffer.is_empty() {
                                     let samples: Vec<f32> = buffer.drain(..).collect();
-                                    let _ = app_state.log_tx.try_send(LogEntry::info(format!(
+                                    app_state.logger.info(format!(
                                         "Test recording stopped, {} samples",
                                         samples.len()
-                                    )));
+                                    ));
                                     if let Some(wav_data) = encode_samples_to_wav(&samples, test_wav_spec) {
                                         if let Err(e) = app_state.command_tx.try_send(AppCommand::TestRecordingComplete(wav_data)) {
-                                            let _ = app_state.log_tx.try_send(LogEntry::error(format!(
+                                            app_state.logger.error(format!(
                                                 "Failed to send test recording: {}", e
-                                            )));
+                                            ));
                                         }
                                     }
                                 }
@@ -234,15 +234,15 @@ async fn run_processing_loop(
                         }
                     }
                     Some(AppCommand::TestRecordingComplete(wav_data)) => {
-                        let _ = app_state.log_tx.try_send(LogEntry::info("Playing back test recording..."));
+                        app_state.logger.info("Playing back test recording...");
                         match play_wav_buffer(wav_data, Arc::clone(&playback_active)) {
                             Ok(stream) => {
                                 _playback_stream = Some(stream);
                             }
                             Err(e) => {
-                                let _ = app_state.log_tx.try_send(LogEntry::error(format!(
+                                app_state.logger.error(format!(
                                     "Failed to play test recording: {}", e
-                                )));
+                                ));
                                 playback_active.store(false, Ordering::SeqCst);
                             }
                         }
@@ -264,19 +264,19 @@ async fn run_processing_loop(
                         if let Ok(mut buffer) = app_state.test_recording_buffer.lock() {
                             if !buffer.is_empty() {
                                 let samples: Vec<f32> = buffer.drain(..).collect();
-                                let _ = app_state.log_tx.try_send(LogEntry::info(format!(
+                                app_state.logger.info(format!(
                                     "Test recording complete, {} samples",
                                     samples.len()
-                                )));
+                                ));
                                 if let Some(wav_data) = encode_samples_to_wav(&samples, test_wav_spec) {
                                     if let Err(e) = app_state.command_tx.try_send(AppCommand::TestRecordingComplete(wav_data)) {
-                                        let _ = app_state.log_tx.try_send(LogEntry::error(format!(
+                                        app_state.logger.error(format!(
                                             "Failed to send test recording: {}", e
-                                        )));
+                                        ));
                                     }
                                 }
                             } else {
-                                let _ = app_state.log_tx.try_send(LogEntry::info("Test recording complete, 0 samples"));
+                                app_state.logger.info("Test recording complete, 0 samples");
                             }
                         }
                     }
@@ -319,9 +319,7 @@ async fn run_processing_loop(
                         )
                         .await
                         {
-                            let _ = app_state.log_tx.try_send(LogEntry::error(format!(
-                                "Error: {}", e
-                            )));
+                            app_state.logger.error(format!("Error: {}", e));
                         }
                     }
                 }

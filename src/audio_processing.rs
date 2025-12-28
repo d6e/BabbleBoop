@@ -1,4 +1,4 @@
-use crate::app_state::{AppState, LogEntry};
+use crate::app_state::AppState;
 use crate::chatbox::send_to_chatbox;
 use crate::config::Config;
 use crate::price_estimator::PriceEstimator;
@@ -28,18 +28,17 @@ pub async fn process_audio(
 
     let min_duration = Duration::from_secs_f32(config.audio.min_transcription_duration);
     if audio_duration < min_duration {
-        let msg = format!(
+        app_state.logger.info(format!(
             "Audio too short ({:.2}s < {:.2}s), skipping",
             audio_duration.as_secs_f32(),
             min_duration.as_secs_f32()
-        );
-        let _ = app_state.log_tx.try_send(LogEntry::info(msg));
+        ));
         typing_indicator.stop_typing().await;
         return Ok(());
     }
 
     let transcription = transcribe_audio(audio_data.clone(), &config.openai, rate_limiter).await?;
-    let _ = app_state.log_tx.try_send(LogEntry::info(format!("Transcription: {}", transcription)));
+    app_state.logger.info(format!("Transcription: {}", transcription));
 
     // Save the audio recording if debug mode is enabled
     if let Some(manager) = recording_manager {
@@ -52,7 +51,7 @@ pub async fn process_audio(
     );
 
     let response = ask_chatgpt(&translation_prompt, &config.openai, rate_limiter).await?;
-    let _ = app_state.log_tx.try_send(LogEntry::success(format!("Translation: {}", response)));
+    app_state.logger.success(format!("Translation: {}", response));
 
     let transcription_cost = price_estimator.estimate_transcription_cost(audio_duration);
     let input_tokens = translation_prompt.len() / 4;

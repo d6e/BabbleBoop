@@ -361,11 +361,13 @@ impl eframe::App for BabbleBoopApp {
 
             // Activity Log (fixed height with scroll)
             ui.label(egui::RichText::new("Activity Log").strong());
+            let available_width = ui.available_width();
             egui::Frame::none()
                 .fill(egui::Color32::from_rgb(30, 30, 30))
                 .rounding(4.0)
                 .inner_margin(6.0)
                 .show(ui, |ui| {
+                    ui.set_width(available_width - 12.0); // Account for inner margin
                     egui::ScrollArea::vertical()
                         .id_salt("activity_log_scroll")
                         .max_height(120.0)

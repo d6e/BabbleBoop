@@ -1,4 +1,4 @@
-use crate::app_state::{AudioParams, LogEntry};
+use crate::app_state::{AudioParams, Logger};
 use crate::types::AudioEvent;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::Stream;
@@ -82,7 +82,7 @@ fn build_input_stream_f32(
     test_mode_active: Arc<AtomicBool>,
     test_recording_buffer: Arc<Mutex<Vec<f32>>>,
     tx: mpsc::Sender<AudioEvent>,
-    log_tx: mpsc::Sender<LogEntry>,
+    logger: Logger,
     channels: usize,
     sample_rate: f32,
 ) -> Result<Stream, Box<dyn Error>> {
@@ -111,7 +111,7 @@ fn build_input_stream_f32(
                 &test_mode_active,
                 &test_recording_buffer,
                 &tx,
-                &log_tx,
+                &logger,
                 channels,
                 sample_rate,
             );
@@ -132,7 +132,7 @@ fn build_input_stream_i16(
     test_mode_active: Arc<AtomicBool>,
     test_recording_buffer: Arc<Mutex<Vec<f32>>>,
     tx: mpsc::Sender<AudioEvent>,
-    log_tx: mpsc::Sender<LogEntry>,
+    logger: Logger,
     channels: usize,
     sample_rate: f32,
 ) -> Result<Stream, Box<dyn Error>> {
@@ -162,7 +162,7 @@ fn build_input_stream_i16(
                 &test_mode_active,
                 &test_recording_buffer,
                 &tx,
-                &log_tx,
+                &logger,
                 channels,
                 sample_rate,
             );
@@ -186,7 +186,7 @@ fn process_audio_data(
     test_mode_active: &Arc<AtomicBool>,
     test_recording_buffer: &Arc<Mutex<Vec<f32>>>,
     tx: &mpsc::Sender<AudioEvent>,
-    log_tx: &mpsc::Sender<LogEntry>,
+    logger: &Logger,
     channels: usize,
     sample_rate: f32,
 ) {
@@ -210,11 +210,9 @@ fn process_audio_data(
 
         if !*is_recording {
             *is_recording = true;
-            let _ = log_tx.try_send(LogEntry::info("Sound detected, recording..."));
+            logger.info("Sound detected, recording...");
             if let Err(e) = tx.try_send(AudioEvent::StartRecording) {
-                let _ = log_tx.try_send(LogEntry::error(format!(
-                    "Failed to send StartRecording: {}", e
-                )));
+                logger.error(format!("Failed to send StartRecording: {}", e));
             }
         }
 
@@ -229,12 +227,10 @@ fn process_audio_data(
 
             let mut buffer = audio_data.lock().unwrap();
             if !buffer.is_empty() {
-                let _ = log_tx.try_send(LogEntry::info("Silence detected, processing..."));
+                logger.info("Silence detected, processing...");
                 if let Some(wav_buffer) = encode_wav_buffer(&buffer, channels, sample_rate) {
                     if let Err(e) = tx.try_send(AudioEvent::AudioData(wav_buffer)) {
-                        let _ = log_tx.try_send(LogEntry::error(format!(
-                            "Failed to send AudioData: {}", e
-                        )));
+                        logger.error(format!("Failed to send AudioData: {}", e));
                     }
                 }
                 buffer.clear();
@@ -261,7 +257,7 @@ pub fn start_audio_recording(
     test_mode_active: Arc<AtomicBool>,
     test_recording_buffer: Arc<Mutex<Vec<f32>>>,
     tx: mpsc::Sender<AudioEvent>,
-    log_tx: mpsc::Sender<LogEntry>,
+    logger: Logger,
 ) -> Result<(Stream, AudioStreamInfo), Box<dyn Error>> {
     let host = cpal::default_host();
     let device = host
@@ -287,7 +283,7 @@ pub fn start_audio_recording(
             test_mode_active,
             test_recording_buffer,
             tx,
-            log_tx,
+            logger,
             channels,
             sample_rate,
         )?,
@@ -299,7 +295,7 @@ pub fn start_audio_recording(
             test_mode_active,
             test_recording_buffer,
             tx,
-            log_tx,
+            logger,
             channels,
             sample_rate,
         )?,
