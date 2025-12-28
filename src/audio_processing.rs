@@ -1,3 +1,4 @@
+use crate::app_state::LogEntry;
 use crate::chatbox::send_to_chatbox;
 use crate::config::Config;
 use crate::price_estimator::PriceEstimator;
@@ -10,6 +11,7 @@ use crate::typing_indicator::TypingIndicator;
 use std::error::Error;
 use std::time::Duration;
 use tokio::net::UdpSocket;
+use tokio::sync::mpsc;
 
 pub async fn process_audio(
     audio_data: Vec<u8>,
@@ -19,6 +21,7 @@ pub async fn process_audio(
     typing_indicator: &TypingIndicator,
     price_estimator: &mut PriceEstimator,
     recording_manager: Option<&RecordingManager>,
+    log_tx: &mpsc::Sender<LogEntry>,
 ) -> Result<(), Box<dyn Error>> {
     let audio_duration = calculate_audio_duration(&audio_data)?;
 
@@ -48,6 +51,12 @@ pub async fn process_audio(
 
     let mut response = ask_chatgpt(&translation_prompt, &config.openai, rate_limiter).await?;
     println!("Translation: {}", response);
+
+    // Send log entry to GUI
+    let log_entry = LogEntry::new(transcription.clone(), response.clone());
+    if let Err(e) = log_tx.try_send(log_entry) {
+        eprintln!("Failed to send log entry: {}", e);
+    }
 
     let transcription_cost = price_estimator.estimate_transcription_cost(audio_duration);
     let input_tokens = translation_prompt.len() / 4;

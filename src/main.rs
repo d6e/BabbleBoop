@@ -1,4 +1,4 @@
-use babble_boop::app_state::{AppCommand, AppState};
+use babble_boop::app_state::{AppCommand, AppState, LogEntry};
 use babble_boop::audio_processing::process_audio;
 use babble_boop::audio_recording::start_audio_recording;
 use babble_boop::config::{Config, CONFIG_PATH};
@@ -34,8 +34,11 @@ fn main() {
     // Create command channel for GUI -> processing communication
     let (cmd_tx, cmd_rx) = mpsc::channel::<AppCommand>(32);
 
+    // Create log channel for processing -> GUI communication
+    let (log_tx, log_rx) = mpsc::channel::<LogEntry>(100);
+
     // Create shared app state
-    let app_state = Arc::new(AppState::new(config, cmd_tx));
+    let app_state = Arc::new(AppState::new(config, cmd_tx, log_tx));
     let app_state_clone = Arc::clone(&app_state);
 
     // Spawn background thread with tokio runtime for audio processing
@@ -49,7 +52,7 @@ fn main() {
     });
 
     // Run GUI on main thread
-    if let Err(e) = run_gui(app_state, first_run) {
+    if let Err(e) = run_gui(app_state, log_rx, first_run) {
         let message = format!("Failed to start the application window: {}", e);
         eprintln!("{}", message);
         let _ = run_error_dialog("GUI Error", &message);
@@ -182,6 +185,7 @@ async fn run_processing_loop(
                             &typing_indicator,
                             &mut price_estimator,
                             recording_manager.as_ref(),
+                            &app_state.log_tx,
                         )
                         .await
                         {

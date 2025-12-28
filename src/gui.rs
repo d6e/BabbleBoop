@@ -1,8 +1,11 @@
-use crate::app_state::{AppCommand, AppState};
+use crate::app_state::{AppCommand, AppState, LogEntry};
 use crate::config::{Config, CONFIG_PATH};
 use eframe::egui;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use tokio::sync::mpsc;
+
+const MAX_LOG_ENTRIES: usize = 50;
 
 #[derive(Clone, Copy, PartialEq)]
 enum StatusType {
@@ -63,10 +66,13 @@ pub struct BabbleBoopApp {
     config_draft: Config,
     saved_config: Config,
     status_message: Option<(String, StatusType, std::time::Instant)>,
+    log_rx: mpsc::Receiver<LogEntry>,
+    log_entries: Vec<LogEntry>,
+    start_time: std::time::Instant,
 }
 
 impl BabbleBoopApp {
-    pub fn new(app_state: Arc<AppState>) -> Self {
+    pub fn new(app_state: Arc<AppState>, log_rx: mpsc::Receiver<LogEntry>) -> Self {
         let config_draft = app_state.config.read().expect("Config lock poisoned").clone();
         let saved_config = config_draft.clone();
         Self {
@@ -74,7 +80,28 @@ impl BabbleBoopApp {
             config_draft,
             saved_config,
             status_message: None,
+            log_rx,
+            log_entries: Vec::new(),
+            start_time: std::time::Instant::now(),
         }
+    }
+
+    fn poll_log_entries(&mut self) {
+        while let Ok(entry) = self.log_rx.try_recv() {
+            self.log_entries.push(entry);
+            if self.log_entries.len() > MAX_LOG_ENTRIES {
+                self.log_entries.remove(0);
+            }
+        }
+    }
+
+    fn format_timestamp(&self, entry: &LogEntry) -> String {
+        let elapsed = entry.timestamp.duration_since(self.start_time);
+        let total_secs = elapsed.as_secs();
+        let hours = total_secs / 3600;
+        let mins = (total_secs % 3600) / 60;
+        let secs = total_secs % 60;
+        format!("{:02}:{:02}:{:02}", hours, mins, secs)
     }
 
     fn has_unsaved_changes(&self) -> bool {
@@ -216,6 +243,9 @@ impl eframe::App for BabbleBoopApp {
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Poll for new log entries
+        self.poll_log_entries();
+
         // Render bottom panels FIRST so CentralPanel knows remaining space
         self.show_status(ctx);
         self.show_button_panel(ctx);
@@ -469,21 +499,65 @@ impl eframe::App for BabbleBoopApp {
                             ui.end_row();
                         });
                 });
+
+                ui.add_space(5.0);
+
+                // Activity Log
+                egui::CollapsingHeader::new("Activity Log")
+                    .default_open(true)
+                    .show(ui, |ui| {
+                        if self.log_entries.is_empty() {
+                            ui.label(egui::RichText::new("No activity yet...").italics().color(egui::Color32::GRAY));
+                        } else {
+                            egui::ScrollArea::vertical()
+                                .id_salt("activity_log_scroll")
+                                .max_height(150.0)
+                                .stick_to_bottom(true)
+                                .show(ui, |ui| {
+                                    for entry in &self.log_entries {
+                                        let timestamp = self.format_timestamp(entry);
+                                        ui.horizontal_wrapped(|ui| {
+                                            ui.label(
+                                                egui::RichText::new(format!("[{}]", timestamp))
+                                                    .color(egui::Color32::from_rgb(120, 120, 120))
+                                                    .small()
+                                            );
+                                            ui.label(
+                                                egui::RichText::new(&entry.original)
+                                                    .color(egui::Color32::from_rgb(180, 180, 220))
+                                            );
+                                            ui.label(
+                                                egui::RichText::new("->")
+                                                    .color(egui::Color32::from_rgb(100, 100, 100))
+                                            );
+                                            ui.label(
+                                                egui::RichText::new(&entry.translated)
+                                                    .color(egui::Color32::from_rgb(120, 200, 120))
+                                            );
+                                        });
+                                    }
+                                });
+                        }
+                    });
             });
         });
 
-        // Request repaint for status message timeout
-        if self.status_message.is_some() {
+        // Request repaint for status message timeout and log polling
+        if self.status_message.is_some() || !self.log_entries.is_empty() {
             ctx.request_repaint();
         }
     }
 }
 
-pub fn run_gui(app_state: Arc<AppState>, first_run: bool) -> Result<(), eframe::Error> {
+pub fn run_gui(
+    app_state: Arc<AppState>,
+    log_rx: mpsc::Receiver<LogEntry>,
+    first_run: bool,
+) -> Result<(), eframe::Error> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([400.0, 500.0])
-            .with_min_inner_size([350.0, 400.0]),
+            .with_inner_size([400.0, 600.0])
+            .with_min_inner_size([350.0, 500.0]),
         ..Default::default()
     };
 
@@ -491,7 +565,7 @@ pub fn run_gui(app_state: Arc<AppState>, first_run: bool) -> Result<(), eframe::
         "BabbleBoop",
         options,
         Box::new(move |_cc| {
-            let mut app = BabbleBoopApp::new(app_state);
+            let mut app = BabbleBoopApp::new(app_state, log_rx);
             if first_run {
                 app.set_status_info("Welcome! Please set your OpenAI API key to get started.");
             }
