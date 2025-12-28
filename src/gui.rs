@@ -112,6 +112,58 @@ impl BabbleBoopApp {
             .blocking_send(cmd)
             .map_err(|e| format!("Failed to send command: {}", e))
     }
+
+    fn show_button_panel(&mut self, ctx: &egui::Context) {
+        egui::TopBottomPanel::bottom("button_panel").show(ctx, |ui| {
+            ui.add_space(8.0);
+
+            ui.horizontal(|ui| {
+                // Unsaved changes indicator
+                if self.has_unsaved_changes() {
+                    ui.label(egui::RichText::new("● Unsaved changes").color(egui::Color32::from_rgb(255, 180, 0)));
+                    ui.separator();
+                }
+
+                // Reset button (only show if there are changes)
+                if self.has_unsaved_changes() {
+                    if ui.button("Reset").on_hover_text("Discard changes and reload saved settings").clicked() {
+                        self.reload_config();
+                    }
+                }
+
+                // Save button
+                let save_button = ui.add_enabled(
+                    self.has_unsaved_changes(),
+                    egui::Button::new("Save Settings"),
+                );
+
+                if save_button.clicked() {
+                    if let Err(e) = self.validate_config() {
+                        self.set_status_error(e);
+                    } else {
+                        match self.config_draft.save(CONFIG_PATH) {
+                            Ok(()) => {
+                                // Update the shared config
+                                if let Ok(mut config) = self.app_state.config.write() {
+                                    *config = self.config_draft.clone();
+                                }
+                                self.saved_config = self.config_draft.clone();
+                                match self.send_command(AppCommand::UpdateConfig(self.config_draft.clone())) {
+                                    Ok(()) => self.set_status_success("Settings saved successfully"),
+                                    Err(e) => self.set_status_error(format!("Settings saved to file, but {}", e)),
+                                }
+                            }
+                            Err(e) => {
+                                self.set_status_error(format!("Failed to save: {}", e));
+                            }
+                        }
+                    }
+                }
+            });
+
+            ui.add_space(4.0);
+        });
+    }
 }
 
 impl eframe::App for BabbleBoopApp {
@@ -125,7 +177,9 @@ impl eframe::App for BabbleBoopApp {
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Render bottom panels FIRST so CentralPanel knows remaining space
         self.show_status(ctx);
+        self.show_button_panel(ctx);
 
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.heading("BabbleBoop");
@@ -360,57 +414,6 @@ impl eframe::App for BabbleBoopApp {
                         });
                 });
             });
-        });
-
-        // Bottom panel with save/reset buttons
-        egui::TopBottomPanel::bottom("button_panel").show(ctx, |ui| {
-            ui.add_space(8.0);
-
-            ui.horizontal(|ui| {
-                // Unsaved changes indicator
-                if self.has_unsaved_changes() {
-                    ui.label(egui::RichText::new("● Unsaved changes").color(egui::Color32::from_rgb(255, 180, 0)));
-                    ui.separator();
-                }
-
-                // Reset button (only show if there are changes)
-                if self.has_unsaved_changes() {
-                    if ui.button("Reset").on_hover_text("Discard changes and reload saved settings").clicked() {
-                        self.reload_config();
-                    }
-                }
-
-                // Save button
-                let save_button = ui.add_enabled(
-                    self.has_unsaved_changes(),
-                    egui::Button::new("Save Settings"),
-                );
-
-                if save_button.clicked() {
-                    if let Err(e) = self.validate_config() {
-                        self.set_status_error(e);
-                    } else {
-                        match self.config_draft.save(CONFIG_PATH) {
-                            Ok(()) => {
-                                // Update the shared config
-                                if let Ok(mut config) = self.app_state.config.write() {
-                                    *config = self.config_draft.clone();
-                                }
-                                self.saved_config = self.config_draft.clone();
-                                match self.send_command(AppCommand::UpdateConfig(self.config_draft.clone())) {
-                                    Ok(()) => self.set_status_success("Settings saved successfully"),
-                                    Err(e) => self.set_status_error(format!("Settings saved to file, but {}", e)),
-                                }
-                            }
-                            Err(e) => {
-                                self.set_status_error(format!("Failed to save: {}", e));
-                            }
-                        }
-                    }
-                }
-            });
-
-            ui.add_space(4.0);
         });
 
         // Request repaint for status message timeout
