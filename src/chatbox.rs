@@ -4,6 +4,9 @@ use std::error::Error;
 use tokio::net::UdpSocket;
 use tokio::time::sleep;
 
+/// VRChat chatbox has a 144 character limit per message
+const VRCHAT_CHATBOX_CHAR_LIMIT: usize = 144;
+
 pub async fn send_to_chatbox(
     message: &str,
     config: &Config,
@@ -14,7 +17,7 @@ pub async fn send_to_chatbox(
     let chunks: Vec<String> = message
         .chars()
         .collect::<Vec<char>>()
-        .chunks(144)
+        .chunks(VRCHAT_CHATBOX_CHAR_LIMIT)
         .map(|chunk| chunk.iter().collect::<String>())
         .collect();
 

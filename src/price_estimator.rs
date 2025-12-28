@@ -2,6 +2,9 @@ use std::error::Error;
 use std::fs;
 use std::time::Duration;
 
+/// File to persist total API cost across sessions
+const TOTAL_COST_FILE: &str = "total_cost.txt";
+
 pub struct PriceEstimator {
     whisper_price_per_minute: f64,
     gpt_input_price_per_million_tokens: f64,
@@ -98,12 +101,12 @@ impl PriceEstimator {
     }
 
     fn load_total_cost() -> Result<f64, Box<dyn Error>> {
-        let content = fs::read_to_string("total_cost.txt")?;
+        let content = fs::read_to_string(TOTAL_COST_FILE)?;
         Ok(content.trim().parse()?)
     }
 
     fn save_total_cost(&self) {
-        if let Err(e) = fs::write("total_cost.txt", self.total_cost.to_string()) {
+        if let Err(e) = fs::write(TOTAL_COST_FILE, self.total_cost.to_string()) {
             eprintln!("Failed to save total cost: {}", e);
         }
     }

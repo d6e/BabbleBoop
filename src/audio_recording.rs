@@ -177,7 +177,9 @@ fn process_audio_data(
         if !*is_recording {
             *is_recording = true;
             println!("Sound detected. Starting recording...");
-            let _ = tx.try_send(AudioEvent::StartRecording);
+            if let Err(e) = tx.try_send(AudioEvent::StartRecording) {
+                eprintln!("Warning: Failed to send StartRecording event: {}", e);
+            }
         }
 
         buffer.extend_from_slice(data);
@@ -193,12 +195,16 @@ fn process_audio_data(
             if !buffer.is_empty() {
                 println!("Silence detected. Stopping recording and processing audio...");
                 if let Some(wav_buffer) = encode_wav_buffer(&buffer, channels, sample_rate) {
-                    let _ = tx.try_send(AudioEvent::AudioData(wav_buffer));
+                    if let Err(e) = tx.try_send(AudioEvent::AudioData(wav_buffer)) {
+                        eprintln!("Warning: Failed to send AudioData event: {}", e);
+                    }
                 }
                 buffer.clear();
             }
 
-            let _ = tx.try_send(AudioEvent::StopRecording);
+            if let Err(e) = tx.try_send(AudioEvent::StopRecording) {
+                eprintln!("Warning: Failed to send StopRecording event: {}", e);
+            }
         } else {
             // Keep recording during short pauses
             let mut buffer = audio_data.lock().unwrap();
