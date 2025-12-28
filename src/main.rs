@@ -146,6 +146,8 @@ async fn run_processing_loop(
     let mut rate_limiter = RateLimiter::new(config.rate_limit.requests_per_minute);
     let mut price_estimator =
         PriceEstimator::new(&config.openai.model, &config.openai.transcription_model);
+    // Initialize the shared cost from the loaded value
+    app_state.set_total_cost(price_estimator.total_cost);
 
     let mut recording_manager = if config.keep_audio_files {
         Some(RecordingManager::new(
@@ -313,7 +315,7 @@ async fn run_processing_loop(
                             &typing_indicator,
                             &mut price_estimator,
                             recording_manager.as_ref(),
-                            &app_state.log_tx,
+                            &app_state,
                         )
                         .await
                         {

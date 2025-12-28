@@ -1,4 +1,4 @@
-use crate::app_state::LogEntry;
+use crate::app_state::{AppState, LogEntry};
 use crate::chatbox::send_to_chatbox;
 use crate::config::Config;
 use crate::price_estimator::PriceEstimator;
@@ -9,9 +9,9 @@ use crate::translation::ask_chatgpt;
 use crate::typing_indicator::TypingIndicator;
 
 use std::error::Error;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::UdpSocket;
-use tokio::sync::mpsc;
 
 #[allow(clippy::too_many_arguments)]
 pub async fn process_audio(
@@ -22,7 +22,7 @@ pub async fn process_audio(
     typing_indicator: &TypingIndicator,
     price_estimator: &mut PriceEstimator,
     recording_manager: Option<&RecordingManager>,
-    log_tx: &mpsc::Sender<LogEntry>,
+    app_state: &Arc<AppState>,
 ) -> Result<(), Box<dyn Error>> {
     let audio_duration = calculate_audio_duration(&audio_data)?;
 
@@ -33,13 +33,13 @@ pub async fn process_audio(
             audio_duration.as_secs_f32(),
             min_duration.as_secs_f32()
         );
-        let _ = log_tx.try_send(LogEntry::info(msg));
+        let _ = app_state.log_tx.try_send(LogEntry::info(msg));
         typing_indicator.stop_typing().await;
         return Ok(());
     }
 
     let transcription = transcribe_audio(audio_data.clone(), &config.openai, rate_limiter).await?;
-    let _ = log_tx.try_send(LogEntry::info(format!("Transcription: {}", transcription)));
+    let _ = app_state.log_tx.try_send(LogEntry::info(format!("Transcription: {}", transcription)));
 
     // Save the audio recording if debug mode is enabled
     if let Some(manager) = recording_manager {
@@ -52,19 +52,16 @@ pub async fn process_audio(
     );
 
     let response = ask_chatgpt(&translation_prompt, &config.openai, rate_limiter).await?;
-    let _ = log_tx.try_send(LogEntry::success(format!("Translation: {}", response)));
+    let _ = app_state.log_tx.try_send(LogEntry::success(format!("Translation: {}", response)));
 
     let transcription_cost = price_estimator.estimate_transcription_cost(audio_duration);
     let input_tokens = translation_prompt.len() / 4;
     let output_tokens = response.len() / 4;
     let translation_cost = price_estimator.estimate_translation_cost(input_tokens, output_tokens);
-    let total_cost = transcription_cost + translation_cost;
+    let op_cost = transcription_cost + translation_cost;
 
-    price_estimator.add_cost(total_cost);
-    let _ = log_tx.try_send(LogEntry::info(format!(
-        "Cost: ${:.4} (total: ${:.4})",
-        total_cost, price_estimator.total_cost
-    )));
+    price_estimator.add_cost(op_cost);
+    app_state.set_total_cost(price_estimator.total_cost);
 
     let mut final_response = response;
     if config.translation.include_original_message {

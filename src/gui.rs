@@ -320,6 +320,7 @@ impl eframe::App for BabbleBoopApp {
 
             // Enable/Disable toggle
             let mut enabled = self.app_state.enabled.load(Ordering::Relaxed);
+            let total_cost = self.app_state.get_total_cost();
 
             let mut toggle_error: Option<String> = None;
             ui.horizontal(|ui| {
@@ -342,6 +343,15 @@ impl eframe::App for BabbleBoopApp {
                     ("Disabled", egui::Color32::from_rgb(140, 140, 140))
                 };
                 ui.label(egui::RichText::new(status_text).color(status_color));
+
+                // Cost display on the right
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(
+                        egui::RichText::new(format!("${:.4}", total_cost))
+                            .color(egui::Color32::from_rgb(180, 180, 100))
+                            .small()
+                    ).on_hover_text("Total API cost this session");
+                });
             });
             if let Some(e) = toggle_error {
                 self.set_status_error(e);

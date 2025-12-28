@@ -99,6 +99,8 @@ pub struct AppState {
     pub test_mode_active: Arc<AtomicBool>,
     /// Buffer for test recording samples (written by audio thread, read by main thread)
     pub test_recording_buffer: Arc<std::sync::Mutex<Vec<f32>>>,
+    /// Total API cost (f64 stored as bits) for display in GUI
+    pub total_cost: Arc<std::sync::atomic::AtomicU64>,
 }
 
 #[derive(Debug)]
@@ -128,7 +130,17 @@ impl AppState {
             audio_params,
             test_mode_active: Arc::new(AtomicBool::new(false)),
             test_recording_buffer: Arc::new(std::sync::Mutex::new(Vec::new())),
+            total_cost: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         }
+    }
+
+    pub fn set_total_cost(&self, cost: f64) {
+        self.total_cost
+            .store(cost.to_bits(), Ordering::Relaxed);
+    }
+
+    pub fn get_total_cost(&self) -> f64 {
+        f64::from_bits(self.total_cost.load(Ordering::Relaxed))
     }
 
     pub fn request_shutdown(&self) {
