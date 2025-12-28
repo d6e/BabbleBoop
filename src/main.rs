@@ -10,12 +10,37 @@ use babble_boop::recording_manager::RecordingManager;
 use babble_boop::types::AudioEvent;
 use babble_boop::typing_indicator::TypingIndicator;
 
+use std::io::Cursor;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
+
+/// Encode raw f32 samples to WAV format
+fn encode_samples_to_wav(samples: &[f32], spec: hound::WavSpec) -> Option<Vec<u8>> {
+    let mut buffer = Vec::new();
+    let cursor = Cursor::new(&mut buffer);
+    let mut writer = hound::WavWriter::new(cursor, spec).ok()?;
+    for &sample in samples {
+        writer.write_sample(sample).ok()?;
+    }
+    writer.finalize().ok()?;
+    Some(buffer)
+}
+
+/// Decode WAV data to raw f32 samples, returning samples and spec
+fn decode_wav_to_samples(wav_data: &[u8]) -> Option<(Vec<f32>, hound::WavSpec)> {
+    let cursor = Cursor::new(wav_data);
+    let reader = hound::WavReader::new(cursor).ok()?;
+    let spec = reader.spec();
+    let samples: Vec<f32> = reader
+        .into_samples::<f32>()
+        .filter_map(|s| s.ok())
+        .collect();
+    Some((samples, spec))
+}
 
 fn main() {
     // Load or create config
@@ -133,8 +158,9 @@ async fn run_processing_loop(
 
     let typing_indicator = TypingIndicator::new(Arc::clone(&socket), Arc::clone(&app_state.config));
 
-    // Test recording state
-    let mut test_recording_buffer: Vec<u8> = Vec::new();
+    // Test recording state - accumulate raw f32 samples, then encode to WAV at the end
+    let mut test_recording_samples: Vec<f32> = Vec::new();
+    let mut test_recording_spec: Option<hound::WavSpec> = None;
     let mut test_recording_start: Option<Instant> = None;
     let test_recording_duration = Duration::from_secs(3);
     // Keep playback stream alive until playback completes
@@ -166,7 +192,8 @@ async fn run_processing_loop(
                     }
                     Some(AppCommand::StartTestRecording) => {
                         println!("Starting test recording...");
-                        test_recording_buffer.clear();
+                        test_recording_samples.clear();
+                        test_recording_spec = None;
                         test_recording_start = Some(Instant::now());
                         app_state.test_mode_active.store(true, Ordering::SeqCst);
                     }
@@ -176,10 +203,14 @@ async fn run_processing_loop(
                             app_state.test_mode_active.store(false, Ordering::SeqCst);
                             test_recording_start = None;
 
-                            if !test_recording_buffer.is_empty() {
-                                let wav_data = std::mem::take(&mut test_recording_buffer);
-                                if let Err(e) = app_state.command_tx.try_send(AppCommand::TestRecordingComplete(wav_data)) {
-                                    eprintln!("Failed to send test recording complete: {}", e);
+                            if !test_recording_samples.is_empty() {
+                                if let Some(spec) = test_recording_spec {
+                                    let samples = std::mem::take(&mut test_recording_samples);
+                                    if let Some(wav_data) = encode_samples_to_wav(&samples, spec) {
+                                        if let Err(e) = app_state.command_tx.try_send(AppCommand::TestRecordingComplete(wav_data)) {
+                                            eprintln!("Failed to send test recording complete: {}", e);
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -207,24 +238,33 @@ async fn run_processing_loop(
                 // Check if test recording is active and has timed out
                 if let Some(start_time) = test_recording_start {
                     if start_time.elapsed() >= test_recording_duration {
-                        println!("Test recording complete, {} bytes captured", test_recording_buffer.len());
+                        println!("Test recording complete, {} samples captured", test_recording_samples.len());
                         app_state.test_mode_active.store(false, Ordering::SeqCst);
                         test_recording_start = None;
 
-                        // Send the captured audio for playback
-                        if !test_recording_buffer.is_empty() {
-                            let wav_data = std::mem::take(&mut test_recording_buffer);
-                            if let Err(e) = app_state.command_tx.try_send(AppCommand::TestRecordingComplete(wav_data)) {
-                                eprintln!("Failed to send test recording complete: {}", e);
+                        // Encode accumulated samples to WAV and send for playback
+                        if !test_recording_samples.is_empty() {
+                            if let Some(spec) = test_recording_spec {
+                                let samples = std::mem::take(&mut test_recording_samples);
+                                if let Some(wav_data) = encode_samples_to_wav(&samples, spec) {
+                                    if let Err(e) = app_state.command_tx.try_send(AppCommand::TestRecordingComplete(wav_data)) {
+                                        eprintln!("Failed to send test recording complete: {}", e);
+                                    }
+                                }
                             }
                         }
                     }
                 }
 
-                // Handle test recording mode: capture audio data instead of processing
+                // Handle test recording mode: decode WAV chunks and accumulate raw samples
                 if app_state.test_mode_active.load(Ordering::Relaxed) {
                     if let AudioEvent::AudioData(audio_data) = event {
-                        test_recording_buffer.extend_from_slice(&audio_data);
+                        if let Some((samples, spec)) = decode_wav_to_samples(&audio_data) {
+                            if test_recording_spec.is_none() {
+                                test_recording_spec = Some(spec);
+                            }
+                            test_recording_samples.extend_from_slice(&samples);
+                        }
                     }
                     continue;
                 }
