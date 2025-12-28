@@ -9,23 +9,55 @@ use babble_boop::recording_manager::RecordingManager;
 use babble_boop::types::AudioEvent;
 use babble_boop::typing_indicator::TypingIndicator;
 
+use rfd::{MessageButtons, MessageDialog, MessageLevel};
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 
+fn show_error(title: &str, message: &str) {
+    MessageDialog::new()
+        .set_level(MessageLevel::Error)
+        .set_title(title)
+        .set_description(message)
+        .set_buttons(MessageButtons::Ok)
+        .show();
+}
+
+fn show_info(title: &str, message: &str) {
+    MessageDialog::new()
+        .set_level(MessageLevel::Info)
+        .set_title(title)
+        .set_description(message)
+        .set_buttons(MessageButtons::Ok)
+        .show();
+}
+
 fn main() {
-    // Load config
-    let config = match Config::load(CONFIG_PATH) {
-        Ok(c) => c,
+    // Load or create config
+    let (config, created) = match Config::load_or_create(CONFIG_PATH) {
+        Ok(result) => result,
         Err(e) => {
-            eprintln!("Error reading config file: {}", e);
-            eprintln!("Please ensure that the 'config.toml' file exists in the same directory as the executable.");
-            eprintln!("You can refer to 'config.toml.example' for an example configuration.");
+            let message = format!(
+                "Failed to load or create config file: {}\n\n\
+                Please check file permissions and try again.",
+                e
+            );
+            eprintln!("{}", message);
+            show_error("Configuration Error", &message);
             std::process::exit(1);
         }
     };
+
+    // If config was just created, inform the user they need to set the API key
+    if created {
+        show_info(
+            "Welcome to BabbleBoop",
+            "A default configuration file has been created (config.toml).\n\n\
+            Please set your OpenAI API key in the settings to get started.",
+        );
+    }
 
     // Create command channel for GUI -> processing communication
     let (cmd_tx, cmd_rx) = mpsc::channel::<AppCommand>(32);
@@ -46,7 +78,9 @@ fn main() {
 
     // Run GUI on main thread
     if let Err(e) = run_gui(app_state) {
-        eprintln!("GUI error: {}", e);
+        let message = format!("Failed to start the application window: {}", e);
+        eprintln!("{}", message);
+        show_error("GUI Error", &message);
     }
 
     // Wait for processing thread to finish
