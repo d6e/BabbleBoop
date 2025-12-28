@@ -367,12 +367,14 @@ impl eframe::App for BabbleBoopApp {
                 .rounding(4.0)
                 .inner_margin(6.0)
                 .show(ui, |ui| {
-                    ui.set_width(available_width - 12.0); // Account for inner margin
+                    ui.set_min_width(available_width);
                     egui::ScrollArea::vertical()
                         .id_salt("activity_log_scroll")
+                        .min_scrolled_width(available_width - 12.0)
                         .max_height(120.0)
                         .stick_to_bottom(true)
                         .show(ui, |ui| {
+                            ui.set_min_width(available_width - 24.0);
                             if self.log_entries.is_empty() {
                                 ui.label(egui::RichText::new("No activity yet...").italics().color(egui::Color32::GRAY));
                             } else {
