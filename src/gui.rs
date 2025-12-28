@@ -5,10 +5,23 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
-/// Draw an audio level meter with threshold indicator
-fn draw_audio_level_meter(ui: &mut egui::Ui, current_level: f32, threshold: f32) {
+/// Draw an audio level meter with draggable threshold indicator
+fn draw_audio_level_meter(ui: &mut egui::Ui, current_level: f32, threshold: &mut f32) {
     let meter_size = egui::vec2(ui.available_width().min(200.0), 16.0);
-    let (rect, _response) = ui.allocate_exact_size(meter_size, egui::Sense::hover());
+    let (rect, response) = ui.allocate_exact_size(meter_size, egui::Sense::click_and_drag());
+
+    // Handle dragging to adjust threshold
+    if response.dragged() {
+        if let Some(pos) = response.interact_pointer_pos() {
+            let new_threshold = ((pos.x - rect.left()) / rect.width()).clamp(0.0, 1.0);
+            *threshold = new_threshold;
+        }
+    }
+
+    // Change cursor to indicate draggability
+    if response.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+    }
 
     if ui.is_rect_visible(rect) {
         let painter = ui.painter();
@@ -31,12 +44,17 @@ fn draw_audio_level_meter(ui: &mut egui::Ui, current_level: f32, threshold: f32)
             painter.rect_filled(level_rect, 2.0, color);
         }
 
-        // Threshold indicator line
-        let threshold_x = rect.left() + rect.width() * threshold;
+        // Threshold indicator line (highlight when hovered/dragged)
+        let threshold_x = rect.left() + rect.width() * *threshold;
+        let line_color = if response.hovered() || response.dragged() {
+            egui::Color32::YELLOW
+        } else {
+            egui::Color32::WHITE
+        };
         painter.vline(
             threshold_x,
             rect.y_range(),
-            egui::Stroke::new(2.0, egui::Color32::WHITE),
+            egui::Stroke::new(2.0, line_color),
         );
     }
 }
@@ -527,7 +545,7 @@ impl eframe::App for BabbleBoopApp {
                     ui.label("Input Level:");
                     let level_bits = self.app_state.current_audio_level.load(Ordering::Relaxed);
                     let current_level = f32::from_bits(level_bits);
-                    draw_audio_level_meter(ui, current_level, self.config_draft.audio.noise_gate_threshold);
+                    draw_audio_level_meter(ui, current_level, &mut self.config_draft.audio.noise_gate_threshold);
                     ui.add_space(4.0);
 
                     // Test Microphone button
@@ -558,7 +576,7 @@ impl eframe::App for BabbleBoopApp {
                             ui.end_row();
 
                             ui.label("Noise Gate Threshold:")
-                                .on_hover_text("Audio level below which input is considered silence (0.0-1.0). White line on meter shows threshold.");
+                                .on_hover_text("Audio level below which input is considered silence (0.0-1.0). Drag the line on the meter or use this field.");
                             ui.add(
                                 egui::DragValue::new(&mut self.config_draft.audio.noise_gate_threshold)
                                     .speed(0.01)
