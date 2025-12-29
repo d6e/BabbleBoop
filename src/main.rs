@@ -319,7 +319,7 @@ async fn run_processing_loop(
                         )
                         .await
                         {
-                            app_state.logger.error(format!("Error: {}", e));
+                            app_state.logger.error_api(format!("Error: {}", e));
                         }
                     }
                 }

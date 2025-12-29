@@ -1,4 +1,5 @@
 use crate::config::{AudioConfig, Config};
+use serde_json::Value;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Instant;
@@ -63,6 +64,64 @@ impl Logger {
             level: LogLevel::Error,
         });
     }
+
+    /// Log an API error. Shows raw details to stderr but a cleaner message to the activity log.
+    pub fn error_api(&self, message: impl Into<String>) {
+        let raw_msg = message.into();
+        eprintln!("{}", raw_msg);
+
+        let clean_msg = parse_api_error_for_display(&raw_msg);
+        let _ = self.log_tx.try_send(LogEntry {
+            timestamp: Instant::now(),
+            message: clean_msg,
+            level: LogLevel::Error,
+        });
+    }
+}
+
+/// Parse an API error message and extract a user-friendly version for display.
+fn parse_api_error_for_display(error: &str) -> String {
+    // Try to find JSON in the error message
+    if let Some(json_start) = error.find('{') {
+        if let Ok(parsed) = serde_json::from_str::<Value>(&error[json_start..]) {
+            if let Some(err_obj) = parsed.get("error") {
+                // Extract the error code if available
+                let code = err_obj
+                    .get("code")
+                    .and_then(|c| c.as_str())
+                    .unwrap_or("");
+
+                // Map common error codes to user-friendly messages
+                match code {
+                    "invalid_api_key" => {
+                        return "Invalid API key. Check your OpenAI API key in settings.".into();
+                    }
+                    "insufficient_quota" => {
+                        return "OpenAI API quota exceeded. Check your billing.".into();
+                    }
+                    "rate_limit_exceeded" => {
+                        return "Rate limit exceeded. Please wait and try again.".into();
+                    }
+                    "model_not_found" => {
+                        return "Model not found. Check your model settings.".into();
+                    }
+                    _ => {}
+                }
+
+                // Fall back to the message field if no specific code matched
+                if let Some(message) = err_obj.get("message").and_then(|m| m.as_str()) {
+                    // Truncate if too long
+                    if message.len() > 120 {
+                        return format!("{}...", &message[..117]);
+                    }
+                    return message.to_string();
+                }
+            }
+        }
+    }
+
+    // Fall back to original message if parsing fails
+    error.to_string()
 }
 
 /// Shared audio parameters that can be hot-reloaded without restarting the audio stream.
