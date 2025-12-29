@@ -105,6 +105,11 @@ async fn run_processing_loop(
     let test_mode_active = Arc::clone(&app_state.test_mode_active);
     let test_recording_buffer = Arc::clone(&app_state.test_recording_buffer);
     let shutdown_signal = Arc::clone(&app_state.shutdown);
+    let is_recording_state = Arc::clone(&app_state.is_recording);
+    let silent_frames_state = Arc::clone(&app_state.silent_frames);
+    let noise_gate_active_state = Arc::clone(&app_state.noise_gate_active);
+    let noise_gate_hold_remaining = Arc::clone(&app_state.noise_gate_hold_remaining);
+    let recording_duration_state = Arc::clone(&app_state.recording_duration);
     let logger_for_audio = app_state.logger.clone();
     let (init_tx, init_rx) =
         std::sync::mpsc::channel::<Result<babble_boop::audio_recording::AudioStreamInfo, String>>();
@@ -116,6 +121,11 @@ async fn run_processing_loop(
             test_recording_buffer,
             tx,
             logger_for_audio,
+            is_recording_state,
+            silent_frames_state,
+            noise_gate_active_state,
+            noise_gate_hold_remaining,
+            recording_duration_state,
         ) {
             Ok((stream, stream_info)) => {
                 let _ = init_tx.send(Ok(stream_info));

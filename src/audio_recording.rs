@@ -41,6 +41,11 @@ fn encode_wav_buffer(samples: &[f32], channels: usize, sample_rate: f32) -> Opti
     Some(wav_buffer)
 }
 
+struct NoiseGateResult {
+    is_active: bool,
+    hold_remaining: f32,
+}
+
 struct NoiseGate {
     params: Arc<AudioParams>,
     last_active: std::time::Instant,
@@ -56,20 +61,33 @@ impl NoiseGate {
         }
     }
 
-    fn process(&mut self, samples: &[f32]) -> bool {
+    fn process(&mut self, samples: &[f32]) -> NoiseGateResult {
         // Read threshold and hold_time from atomics for hot reload support
         let threshold = self.params.get_noise_gate_threshold();
         let hold_time = self.params.get_noise_gate_hold_time();
         let max_amplitude = samples.iter().map(|&s| s.abs()).fold(0.0f32, f32::max);
 
+        let hold_remaining;
         if max_amplitude > threshold {
             self.last_active = std::time::Instant::now();
             self.is_active = true;
-        } else if self.is_active && self.last_active.elapsed().as_secs_f32() > hold_time {
-            self.is_active = false;
+            hold_remaining = 0.0;
+        } else if self.is_active {
+            let elapsed = self.last_active.elapsed().as_secs_f32();
+            if elapsed > hold_time {
+                self.is_active = false;
+                hold_remaining = 0.0;
+            } else {
+                hold_remaining = hold_time - elapsed;
+            }
+        } else {
+            hold_remaining = 0.0;
         }
 
-        self.is_active
+        NoiseGateResult {
+            is_active: self.is_active,
+            hold_remaining,
+        }
     }
 }
 
@@ -85,6 +103,11 @@ fn build_input_stream_f32(
     logger: Logger,
     channels: usize,
     sample_rate: f32,
+    is_recording_state: Arc<AtomicBool>,
+    silent_frames_state: Arc<AtomicU32>,
+    noise_gate_active_state: Arc<AtomicBool>,
+    noise_gate_hold_remaining: Arc<AtomicU32>,
+    recording_duration_state: Arc<AtomicU32>,
 ) -> Result<Stream, Box<dyn Error>> {
     let audio_data = Arc::new(Mutex::new(Vec::new()));
     let audio_data_clone = Arc::clone(&audio_data);
@@ -93,7 +116,8 @@ fn build_input_stream_f32(
     let mut noise_gate = NoiseGate::new(params_clone);
 
     let mut is_recording = false;
-    let mut silent_frames = 0;
+    let mut silent_frames = 0u32;
+    let mut recording_start: Option<std::time::Instant> = None;
 
     let err_fn = |err| eprintln!("An error occurred on the audio stream: {}", err);
 
@@ -106,6 +130,7 @@ fn build_input_stream_f32(
                 &mut noise_gate,
                 &mut is_recording,
                 &mut silent_frames,
+                &mut recording_start,
                 &audio_params,
                 &audio_level,
                 &test_mode_active,
@@ -114,6 +139,11 @@ fn build_input_stream_f32(
                 &logger,
                 channels,
                 sample_rate,
+                &is_recording_state,
+                &silent_frames_state,
+                &noise_gate_active_state,
+                &noise_gate_hold_remaining,
+                &recording_duration_state,
             );
         },
         err_fn,
@@ -135,6 +165,11 @@ fn build_input_stream_i16(
     logger: Logger,
     channels: usize,
     sample_rate: f32,
+    is_recording_state: Arc<AtomicBool>,
+    silent_frames_state: Arc<AtomicU32>,
+    noise_gate_active_state: Arc<AtomicBool>,
+    noise_gate_hold_remaining: Arc<AtomicU32>,
+    recording_duration_state: Arc<AtomicU32>,
 ) -> Result<Stream, Box<dyn Error>> {
     let audio_data = Arc::new(Mutex::new(Vec::new()));
     let audio_data_clone = Arc::clone(&audio_data);
@@ -143,7 +178,8 @@ fn build_input_stream_i16(
     let mut noise_gate = NoiseGate::new(params_clone);
 
     let mut is_recording = false;
-    let mut silent_frames = 0;
+    let mut silent_frames = 0u32;
+    let mut recording_start: Option<std::time::Instant> = None;
 
     let err_fn = |err| eprintln!("An error occurred on the audio stream: {}", err);
 
@@ -157,6 +193,7 @@ fn build_input_stream_i16(
                 &mut noise_gate,
                 &mut is_recording,
                 &mut silent_frames,
+                &mut recording_start,
                 &audio_params,
                 &audio_level,
                 &test_mode_active,
@@ -165,6 +202,11 @@ fn build_input_stream_i16(
                 &logger,
                 channels,
                 sample_rate,
+                &is_recording_state,
+                &silent_frames_state,
+                &noise_gate_active_state,
+                &noise_gate_hold_remaining,
+                &recording_duration_state,
             );
         },
         err_fn,
@@ -181,6 +223,7 @@ fn process_audio_data(
     noise_gate: &mut NoiseGate,
     is_recording: &mut bool,
     silent_frames: &mut u32,
+    recording_start: &mut Option<std::time::Instant>,
     audio_params: &Arc<AudioParams>,
     audio_level: &Arc<AtomicU32>,
     test_mode_active: &Arc<AtomicBool>,
@@ -189,6 +232,11 @@ fn process_audio_data(
     logger: &Logger,
     channels: usize,
     sample_rate: f32,
+    is_recording_state: &Arc<AtomicBool>,
+    silent_frames_state: &Arc<AtomicU32>,
+    noise_gate_active_state: &Arc<AtomicBool>,
+    noise_gate_hold_remaining: &Arc<AtomicU32>,
+    recording_duration_state: &Arc<AtomicU32>,
 ) {
     // Calculate and store the current audio level for the GUI level meter
     let max_amplitude = data.iter().map(|&s| s.abs()).fold(0.0f32, f32::max);
@@ -205,11 +253,18 @@ fn process_audio_data(
     // Read silence_threshold from atomics for hot reload support
     let silence_threshold = audio_params.get_silence_threshold();
 
-    if noise_gate.process(data) {
+    let gate_result = noise_gate.process(data);
+
+    // Publish noise gate state
+    noise_gate_active_state.store(gate_result.is_active, Ordering::Relaxed);
+    noise_gate_hold_remaining.store(gate_result.hold_remaining.to_bits(), Ordering::Relaxed);
+
+    if gate_result.is_active {
         let mut buffer = audio_data.lock().unwrap();
 
         if !*is_recording {
             *is_recording = true;
+            *recording_start = Some(std::time::Instant::now());
             logger.info("Sound detected, recording...");
             if let Err(e) = tx.try_send(AudioEvent::StartRecording) {
                 logger.error(format!("Failed to send StartRecording: {}", e));
@@ -224,6 +279,7 @@ fn process_audio_data(
         if *silent_frames >= silence_threshold {
             *is_recording = false;
             *silent_frames = 0;
+            *recording_start = None;
 
             let mut buffer = audio_data.lock().unwrap();
             if !buffer.is_empty() {
@@ -243,6 +299,16 @@ fn process_audio_data(
             buffer.extend_from_slice(data);
         }
     }
+
+    // Publish recording state
+    is_recording_state.store(*is_recording, Ordering::Relaxed);
+    silent_frames_state.store(*silent_frames, Ordering::Relaxed);
+
+    // Publish recording duration
+    let duration = recording_start
+        .map(|start| start.elapsed().as_secs_f32())
+        .unwrap_or(0.0);
+    recording_duration_state.store(duration.to_bits(), Ordering::Relaxed);
 }
 
 /// Information about the audio stream configuration
@@ -251,6 +317,7 @@ pub struct AudioStreamInfo {
     pub channels: u16,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn start_audio_recording(
     audio_params: Arc<AudioParams>,
     audio_level: Arc<AtomicU32>,
@@ -258,6 +325,11 @@ pub fn start_audio_recording(
     test_recording_buffer: Arc<Mutex<Vec<f32>>>,
     tx: mpsc::Sender<AudioEvent>,
     logger: Logger,
+    is_recording_state: Arc<AtomicBool>,
+    silent_frames_state: Arc<AtomicU32>,
+    noise_gate_active_state: Arc<AtomicBool>,
+    noise_gate_hold_remaining: Arc<AtomicU32>,
+    recording_duration_state: Arc<AtomicU32>,
 ) -> Result<(Stream, AudioStreamInfo), Box<dyn Error>> {
     let host = cpal::default_host();
     let device = host
@@ -286,6 +358,11 @@ pub fn start_audio_recording(
             logger,
             channels,
             sample_rate,
+            is_recording_state,
+            silent_frames_state,
+            noise_gate_active_state,
+            noise_gate_hold_remaining,
+            recording_duration_state,
         )?,
         cpal::SampleFormat::I16 => build_input_stream_i16(
             &device,
@@ -298,6 +375,11 @@ pub fn start_audio_recording(
             logger,
             channels,
             sample_rate,
+            is_recording_state,
+            silent_frames_state,
+            noise_gate_active_state,
+            noise_gate_hold_remaining,
+            recording_duration_state,
         )?,
         _ => return Err(format!("Unsupported sample format: {:?}", sample_format).into()),
     };

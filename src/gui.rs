@@ -59,6 +59,109 @@ fn draw_audio_level_meter(ui: &mut egui::Ui, current_level: f32, threshold: &mut
     }
 }
 
+/// Draw noise gate state indicator with hold time countdown
+fn draw_noise_gate_state(ui: &mut egui::Ui, is_active: bool, hold_remaining: f32, hold_time: f32) {
+    let meter_size = egui::vec2(ui.available_width().min(200.0), 10.0);
+    let (rect, _response) = ui.allocate_exact_size(meter_size, egui::Sense::hover());
+
+    if ui.is_rect_visible(rect) {
+        let painter = ui.painter();
+
+        // Background
+        painter.rect_filled(rect, 2.0, egui::Color32::from_gray(40));
+
+        if is_active {
+            let color = if hold_remaining > 0.0 {
+                // In hold state: orange/amber
+                egui::Color32::from_rgb(220, 160, 60)
+            } else {
+                // Active audio: green
+                egui::Color32::from_rgb(60, 180, 60)
+            };
+
+            // Fill amount based on hold state
+            let fill_ratio = if hold_remaining > 0.0 && hold_time > 0.0 {
+                hold_remaining / hold_time
+            } else {
+                1.0
+            };
+
+            let fill_width = rect.width() * fill_ratio;
+            if fill_width > 0.0 {
+                let fill_rect =
+                    egui::Rect::from_min_size(rect.min, egui::vec2(fill_width, rect.height()));
+                painter.rect_filled(fill_rect, 2.0, color);
+            }
+        }
+    }
+}
+
+/// Draw a progress bar showing silent frames toward silence threshold
+fn draw_silence_counter(ui: &mut egui::Ui, silent_frames: u32, threshold: u32) {
+    let meter_size = egui::vec2(ui.available_width().min(200.0), 10.0);
+    let (rect, _response) = ui.allocate_exact_size(meter_size, egui::Sense::hover());
+
+    if ui.is_rect_visible(rect) {
+        let painter = ui.painter();
+
+        // Background
+        painter.rect_filled(rect, 2.0, egui::Color32::from_gray(40));
+
+        // Progress bar
+        let progress = if threshold > 0 {
+            (silent_frames as f32 / threshold as f32).min(1.0)
+        } else {
+            0.0
+        };
+
+        let fill_width = rect.width() * progress;
+        if fill_width > 0.0 {
+            let fill_rect =
+                egui::Rect::from_min_size(rect.min, egui::vec2(fill_width, rect.height()));
+            // Yellow to red gradient as silence progresses
+            let color = egui::Color32::from_rgb(220, (180.0 * (1.0 - progress)) as u8, 60);
+            painter.rect_filled(fill_rect, 2.0, color);
+        }
+    }
+}
+
+/// Draw recording duration progress toward minimum transcription duration
+fn draw_recording_duration(ui: &mut egui::Ui, duration: f32, min_duration: f32) {
+    let meter_size = egui::vec2(ui.available_width().min(200.0), 10.0);
+    let (rect, _response) = ui.allocate_exact_size(meter_size, egui::Sense::hover());
+
+    if ui.is_rect_visible(rect) {
+        let painter = ui.painter();
+
+        // Background
+        painter.rect_filled(rect, 2.0, egui::Color32::from_gray(40));
+
+        // Progress bar
+        let progress = if min_duration > 0.0 {
+            (duration / min_duration).min(1.0)
+        } else {
+            1.0
+        };
+
+        let fill_width = rect.width() * progress;
+        if fill_width > 0.0 {
+            let fill_rect =
+                egui::Rect::from_min_size(rect.min, egui::vec2(fill_width, rect.height()));
+            // Red to green as duration increases
+            let color = if progress >= 1.0 {
+                egui::Color32::from_rgb(60, 180, 60)
+            } else {
+                egui::Color32::from_rgb(
+                    (220.0 * (1.0 - progress) + 60.0 * progress) as u8,
+                    (60.0 * (1.0 - progress) + 180.0 * progress) as u8,
+                    60,
+                )
+            };
+            painter.rect_filled(fill_rect, 2.0, color);
+        }
+    }
+}
+
 const MAX_LOG_ENTRIES: usize = 50;
 
 #[derive(Clone, Copy, PartialEq)]
@@ -547,6 +650,77 @@ impl eframe::App for BabbleBoopApp {
                     let current_level = f32::from_bits(level_bits);
                     draw_audio_level_meter(ui, current_level, &mut self.config_draft.audio.noise_gate_threshold);
                     ui.add_space(4.0);
+
+                    // Read audio state from atomics
+                    let is_recording = self.app_state.is_recording.load(Ordering::Relaxed);
+                    let silent_frames = self.app_state.silent_frames.load(Ordering::Relaxed);
+                    let noise_gate_active = self.app_state.noise_gate_active.load(Ordering::Relaxed);
+                    let hold_remaining = f32::from_bits(
+                        self.app_state.noise_gate_hold_remaining.load(Ordering::Relaxed),
+                    );
+                    let recording_duration = f32::from_bits(
+                        self.app_state.recording_duration.load(Ordering::Relaxed),
+                    );
+
+                    // Noise gate state visualization
+                    ui.horizontal(|ui| {
+                        ui.label("Gate:");
+                        let gate_text = if noise_gate_active {
+                            if hold_remaining > 0.0 {
+                                format!("Hold ({:.2}s)", hold_remaining)
+                            } else {
+                                "Open".to_string()
+                            }
+                        } else {
+                            "Closed".to_string()
+                        };
+                        ui.label(egui::RichText::new(gate_text).small());
+                    });
+                    draw_noise_gate_state(
+                        ui,
+                        noise_gate_active,
+                        hold_remaining,
+                        self.config_draft.audio.noise_gate_hold_time,
+                    );
+                    ui.add_space(4.0);
+
+                    // Silence counter (only visible when recording)
+                    if is_recording {
+                        ui.horizontal(|ui| {
+                            ui.label("Silence:");
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "{}/{}",
+                                    silent_frames, self.config_draft.audio.silence_threshold
+                                ))
+                                .small(),
+                            );
+                        });
+                        draw_silence_counter(
+                            ui,
+                            silent_frames,
+                            self.config_draft.audio.silence_threshold,
+                        );
+                        ui.add_space(4.0);
+
+                        // Recording duration
+                        ui.horizontal(|ui| {
+                            ui.label("Duration:");
+                            let min_dur = self.config_draft.audio.min_transcription_duration;
+                            let status = if recording_duration >= min_dur {
+                                format!("{:.1}s (ready)", recording_duration)
+                            } else {
+                                format!("{:.1}s / {:.1}s", recording_duration, min_dur)
+                            };
+                            ui.label(egui::RichText::new(status).small());
+                        });
+                        draw_recording_duration(
+                            ui,
+                            recording_duration,
+                            self.config_draft.audio.min_transcription_duration,
+                        );
+                        ui.add_space(4.0);
+                    }
 
                     // Test Microphone button
                     let is_testing = self.app_state.test_mode_active.load(Ordering::Relaxed);

@@ -180,6 +180,16 @@ pub struct AppState {
     pub test_recording_buffer: Arc<std::sync::Mutex<Vec<f32>>>,
     /// Total API cost (f64 stored as bits) for display in GUI
     pub total_cost: Arc<std::sync::atomic::AtomicU64>,
+    /// Whether audio is currently being recorded
+    pub is_recording: Arc<AtomicBool>,
+    /// Current count of consecutive silent frames
+    pub silent_frames: Arc<AtomicU32>,
+    /// Whether the noise gate is currently active/open
+    pub noise_gate_active: Arc<AtomicBool>,
+    /// Remaining hold time in seconds (f32 stored as bits)
+    pub noise_gate_hold_remaining: Arc<AtomicU32>,
+    /// Current recording duration in seconds (f32 stored as bits)
+    pub recording_duration: Arc<AtomicU32>,
 }
 
 #[derive(Debug)]
@@ -212,6 +222,11 @@ impl AppState {
             test_mode_active: Arc::new(AtomicBool::new(false)),
             test_recording_buffer: Arc::new(std::sync::Mutex::new(Vec::new())),
             total_cost: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            is_recording: Arc::new(AtomicBool::new(false)),
+            silent_frames: Arc::new(AtomicU32::new(0)),
+            noise_gate_active: Arc::new(AtomicBool::new(false)),
+            noise_gate_hold_remaining: Arc::new(AtomicU32::new(0)),
+            recording_duration: Arc::new(AtomicU32::new(0)),
         }
     }
 
