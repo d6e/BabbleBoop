@@ -106,7 +106,7 @@ impl AppColors {
             enabled_text: Color32::from_rgb(40, 120, 40),
             disabled_text: Color32::from_rgb(120, 120, 120),
             cost_text: Color32::from_rgb(140, 140, 60),
-            unsaved_indicator: Color32::from_rgb(200, 140, 0),
+            unsaved_indicator: Color32::from_rgb(180, 100, 0),
         }
     }
 }
