@@ -8,6 +8,7 @@ pub mod gui;
 pub mod price_estimator;
 pub mod rate_limiter;
 pub mod recording_manager;
+pub mod theme;
 pub mod transcription;
 pub mod translation;
 pub mod types;

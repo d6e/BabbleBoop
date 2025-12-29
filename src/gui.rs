@@ -1,12 +1,18 @@
 use crate::app_state::{AppCommand, AppState, LogEntry, LogLevel};
-use crate::config::{Config, CONFIG_PATH};
+use crate::config::{Config, ThemeMode, CONFIG_PATH};
+use crate::theme::{self, AppColors};
 use eframe::egui;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
 /// Draw an audio level meter with draggable threshold indicator
-fn draw_audio_level_meter(ui: &mut egui::Ui, current_level: f32, threshold: &mut f32) {
+fn draw_audio_level_meter(
+    ui: &mut egui::Ui,
+    current_level: f32,
+    threshold: &mut f32,
+    colors: &AppColors,
+) {
     let meter_size = egui::vec2(ui.available_width().min(200.0), 16.0);
     let (rect, response) = ui.allocate_exact_size(meter_size, egui::Sense::click_and_drag());
 
@@ -27,7 +33,7 @@ fn draw_audio_level_meter(ui: &mut egui::Ui, current_level: f32, threshold: &mut
         let painter = ui.painter();
 
         // Background
-        painter.rect_filled(rect, 2.0, egui::Color32::from_gray(40));
+        painter.rect_filled(rect, 2.0, colors.meter_background);
 
         // Level bar with color gradient based on level
         let level_width = rect.width() * current_level.min(1.0);
@@ -35,11 +41,11 @@ fn draw_audio_level_meter(ui: &mut egui::Ui, current_level: f32, threshold: &mut
             let level_rect =
                 egui::Rect::from_min_size(rect.min, egui::vec2(level_width, rect.height()));
             let color = if current_level > 0.8 {
-                egui::Color32::from_rgb(220, 60, 60) // Red for high levels
+                colors.meter_high
             } else if current_level > 0.5 {
-                egui::Color32::from_rgb(220, 180, 60) // Yellow for medium
+                colors.meter_medium
             } else {
-                egui::Color32::from_rgb(60, 180, 60) // Green for low
+                colors.meter_low
             };
             painter.rect_filled(level_rect, 2.0, color);
         }
@@ -47,9 +53,9 @@ fn draw_audio_level_meter(ui: &mut egui::Ui, current_level: f32, threshold: &mut
         // Threshold indicator line (highlight when hovered/dragged)
         let threshold_x = rect.left() + rect.width() * *threshold;
         let line_color = if response.hovered() || response.dragged() {
-            egui::Color32::YELLOW
+            colors.meter_threshold_active
         } else {
-            egui::Color32::WHITE
+            colors.meter_threshold
         };
         painter.vline(
             threshold_x,
@@ -231,6 +237,7 @@ pub struct BabbleBoopApp {
     log_rx: mpsc::Receiver<LogEntry>,
     log_entries: Vec<LogEntry>,
     start_time: std::time::Instant,
+    colors: AppColors,
 }
 
 impl BabbleBoopApp {
@@ -241,6 +248,7 @@ impl BabbleBoopApp {
             .expect("Config lock poisoned")
             .clone();
         let saved_config = config_draft.clone();
+        let colors = theme::get_colors(config_draft.theme);
         Self {
             app_state,
             config_draft,
@@ -249,6 +257,7 @@ impl BabbleBoopApp {
             log_rx,
             log_entries: Vec::new(),
             start_time: std::time::Instant::now(),
+            colors,
         }
     }
 
@@ -274,8 +283,10 @@ impl BabbleBoopApp {
         self.config_draft != self.saved_config
     }
 
-    fn reload_config(&mut self) {
+    fn reload_config(&mut self, ctx: &egui::Context) {
         self.config_draft = self.saved_config.clone();
+        self.colors = theme::get_colors(self.config_draft.theme);
+        ctx.set_visuals(theme::get_visuals(self.config_draft.theme));
         self.set_status_info("Changes discarded");
     }
 
@@ -318,11 +329,12 @@ impl BabbleBoopApp {
     fn show_status(&mut self, ctx: &egui::Context) {
         if let Some((msg, status_type, time)) = &self.status_message {
             if time.elapsed().as_secs() < 3 {
+                let colors = self.colors;
                 egui::TopBottomPanel::bottom("status_bar").show(ctx, |ui| {
                     let color = match status_type {
-                        StatusType::Success => egui::Color32::from_rgb(100, 200, 100),
-                        StatusType::Error => egui::Color32::from_rgb(220, 80, 80),
-                        StatusType::Info => egui::Color32::from_rgb(150, 150, 220),
+                        StatusType::Success => colors.success,
+                        StatusType::Error => colors.error,
+                        StatusType::Info => colors.info,
                     };
                     ui.colored_label(color, msg.as_str());
                 });
@@ -352,6 +364,8 @@ impl BabbleBoopApp {
     }
 
     fn show_button_panel(&mut self, ctx: &egui::Context) {
+        let colors = self.colors;
+        let mut should_reload = false;
         egui::TopBottomPanel::bottom("button_panel").show(ctx, |ui| {
             ui.add_space(8.0);
 
@@ -360,7 +374,7 @@ impl BabbleBoopApp {
                 if self.has_unsaved_changes() {
                     ui.label(
                         egui::RichText::new("● Unsaved changes")
-                            .color(egui::Color32::from_rgb(255, 180, 0)),
+                            .color(colors.unsaved_indicator),
                     );
                     ui.separator();
                 }
@@ -372,7 +386,7 @@ impl BabbleBoopApp {
                         .on_hover_text("Discard changes and reload saved settings")
                         .clicked()
                 {
-                    self.reload_config();
+                    should_reload = true;
                 }
 
                 // Save button
@@ -414,6 +428,9 @@ impl BabbleBoopApp {
 
             ui.add_space(4.0);
         });
+        if should_reload {
+            self.reload_config(ctx);
+        }
     }
 }
 
@@ -435,8 +452,23 @@ impl eframe::App for BabbleBoopApp {
         self.show_status(ctx);
         self.show_button_panel(ctx);
 
+        let colors = self.colors;
+        let mut theme_changed = false;
+        let mut new_theme = self.config_draft.theme;
+
         egui::CentralPanel::default().show(ctx, |ui| {
-            ui.heading("BabbleBoop");
+            // Header with theme toggle
+            ui.horizontal(|ui| {
+                ui.heading("BabbleBoop");
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let is_dark = self.config_draft.theme == ThemeMode::Dark;
+                    let label = if is_dark { "Light" } else { "Dark" };
+                    if ui.button(label).on_hover_text("Switch theme").clicked() {
+                        new_theme = if is_dark { ThemeMode::Light } else { ThemeMode::Dark };
+                        theme_changed = true;
+                    }
+                });
+            });
             ui.add_space(10.0);
 
             // Enable/Disable toggle
@@ -459,9 +491,9 @@ impl eframe::App for BabbleBoopApp {
 
                 // Status text
                 let (status_text, status_color) = if enabled {
-                    ("Enabled", egui::Color32::from_rgb(80, 160, 80))
+                    ("Enabled", colors.enabled_text)
                 } else {
-                    ("Disabled", egui::Color32::from_rgb(140, 140, 140))
+                    ("Disabled", colors.disabled_text)
                 };
                 ui.label(egui::RichText::new(status_text).color(status_color));
 
@@ -469,7 +501,7 @@ impl eframe::App for BabbleBoopApp {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.label(
                         egui::RichText::new(format!("${:.4}", total_cost))
-                            .color(egui::Color32::from_rgb(180, 180, 100))
+                            .color(colors.cost_text)
                             .small()
                     ).on_hover_text("Total API cost this session");
                 });
@@ -483,7 +515,7 @@ impl eframe::App for BabbleBoopApp {
             // Activity Log (fixed height with scroll)
             ui.label(egui::RichText::new("Activity Log").strong());
             egui::Frame::none()
-                .fill(egui::Color32::from_rgb(30, 30, 30))
+                .fill(colors.panel_background)
                 .inner_margin(6.0)
                 .show(ui, |ui| {
                     ui.set_width(ui.available_width());
@@ -494,19 +526,19 @@ impl eframe::App for BabbleBoopApp {
                         .show(ui, |ui| {
                             ui.set_width(ui.available_width());
                             if self.log_entries.is_empty() {
-                                ui.label(egui::RichText::new("No activity yet...").italics().color(egui::Color32::GRAY));
+                                ui.label(egui::RichText::new("No activity yet...").italics().color(colors.text_muted));
                             } else {
                                 for entry in &self.log_entries {
                                     let timestamp = self.format_timestamp(entry);
                                     let color = match entry.level {
-                                        LogLevel::Info => egui::Color32::from_rgb(180, 180, 180),
-                                        LogLevel::Success => egui::Color32::from_rgb(120, 200, 120),
-                                        LogLevel::Error => egui::Color32::from_rgb(220, 100, 100),
+                                        LogLevel::Info => colors.log_info,
+                                        LogLevel::Success => colors.log_success,
+                                        LogLevel::Error => colors.log_error,
                                     };
                                     ui.horizontal_wrapped(|ui| {
                                         ui.label(
                                             egui::RichText::new(format!("[{}]", timestamp))
-                                                .color(egui::Color32::from_rgb(120, 120, 120))
+                                                .color(colors.log_timestamp)
                                                 .small()
                                         );
                                         ui.label(
@@ -648,7 +680,7 @@ impl eframe::App for BabbleBoopApp {
                     ui.label("Input Level:");
                     let level_bits = self.app_state.current_audio_level.load(Ordering::Relaxed);
                     let current_level = f32::from_bits(level_bits);
-                    draw_audio_level_meter(ui, current_level, &mut self.config_draft.audio.noise_gate_threshold);
+                    draw_audio_level_meter(ui, current_level, &mut self.config_draft.audio.noise_gate_threshold, &colors);
                     ui.add_space(4.0);
 
                     // Read audio state from atomics
@@ -830,6 +862,13 @@ impl eframe::App for BabbleBoopApp {
             });
         });
 
+        // Apply theme change if requested
+        if theme_changed {
+            self.config_draft.theme = new_theme;
+            self.colors = theme::get_colors(new_theme);
+            ctx.set_visuals(theme::get_visuals(new_theme));
+        }
+
         // Request repaint for status message timeout and log polling
         if self.status_message.is_some() || !self.log_entries.is_empty() {
             ctx.request_repaint();
@@ -852,8 +891,13 @@ pub fn run_gui(
     eframe::run_native(
         "BabbleBoop",
         options,
-        Box::new(move |_cc| {
+        Box::new(move |cc| {
             let mut app = BabbleBoopApp::new(app_state, log_rx);
+
+            // Apply saved theme on startup
+            let theme_mode = app.config_draft.theme;
+            cc.egui_ctx.set_visuals(theme::get_visuals(theme_mode));
+
             if first_run {
                 app.set_status_info("Welcome! Please set your OpenAI API key to get started.");
             }

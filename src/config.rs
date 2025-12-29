@@ -6,6 +6,14 @@ use std::path::Path;
 /// Default path to the configuration file
 pub const CONFIG_PATH: &str = "config.toml";
 
+#[derive(Deserialize, Serialize, Clone, Copy, Debug, PartialEq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ThemeMode {
+    #[default]
+    Dark,
+    Light,
+}
+
 #[derive(Deserialize, Serialize, Clone, Debug, PartialEq)]
 pub struct Config {
     pub osc: OscConfig,
@@ -17,6 +25,8 @@ pub struct Config {
     pub keep_audio_files: bool,
     #[serde(default = "default_max_audio_files")]
     pub max_audio_files: usize,
+    #[serde(default)]
+    pub theme: ThemeMode,
 }
 
 fn default_max_audio_files() -> usize {
@@ -33,6 +43,7 @@ impl Default for Config {
             rate_limit: RateLimitConfig::default(),
             keep_audio_files: false,
             max_audio_files: 10,
+            theme: ThemeMode::default(),
         }
     }
 }
