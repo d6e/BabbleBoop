@@ -571,4 +571,39 @@ requests_per_minute = 50
         // The running total stays in memory; it is not reloaded from disk.
         assert_eq!(estimator.total_cost, 1.25);
     }
+
+    /// Time one more rate limiter wait after using up a budget of two
+    /// requests and saving settings with `requests_per_minute` set to `limit`.
+    async fn wait_after_saving_limit(limit: usize) -> std::time::Duration {
+        use crate::processing_loop::ProcessingServices;
+        use tokio::time::Instant;
+
+        let mut config = Config::default();
+        config.rate_limit.requests_per_minute = 2;
+        let mut services = ProcessingServices::new(&config);
+        services.rate_limiter.wait().await;
+        services.rate_limiter.wait().await;
+
+        config.rate_limit.requests_per_minute = limit;
+        services.apply_config(&config);
+
+        let start = Instant::now();
+        services.rate_limiter.wait().await;
+        start.elapsed()
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_saving_settings_keeps_rate_limit_budget() {
+        use std::time::Duration;
+
+        // The budget is used up, so the next request waits for the window.
+        assert!(wait_after_saving_limit(2).await >= Duration::from_secs(59));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_raised_rate_limit_applies_at_once() {
+        use std::time::Duration;
+
+        assert_eq!(wait_after_saving_limit(3).await, Duration::ZERO);
+    }
 }

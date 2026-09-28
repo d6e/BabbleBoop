@@ -31,7 +31,9 @@ impl ProcessingServices {
 
     /// Apply settings saved in the GUI.
     pub fn apply_config(&mut self, config: &Config) {
-        self.rate_limiter = RateLimiter::new(config.rate_limit.requests_per_minute);
+        // Keep the requests already counted; a new limiter would reset them.
+        self.rate_limiter
+            .set_max_requests(config.rate_limit.requests_per_minute);
         self.price_estimator
             .set_models(&config.openai.model, &config.openai.transcription_model);
         self.recording_manager = recording_manager(config);

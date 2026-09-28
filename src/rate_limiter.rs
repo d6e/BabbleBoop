@@ -16,6 +16,12 @@ impl RateLimiter {
         }
     }
 
+    /// Change the limit. Requests already made in the current minute still
+    /// count against it.
+    pub fn set_max_requests(&mut self, max_requests: usize) {
+        self.max_requests = max_requests;
+    }
+
     pub async fn wait(&mut self) {
         let now = Instant::now();
         let elapsed = now.duration_since(self.last_request);
