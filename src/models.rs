@@ -149,6 +149,9 @@ pub const CHAT_MODELS: &[ChatModel] = &[
     retiring_chat("gpt-3.5-turbo", 0.50, 1.50, "2026-10-23", "gpt-5.6-terra"),
     retiring_chat("gpt-3.5-turbo-0125", 0.50, 1.50, "2026-10-23", "gpt-5.6-terra"),
     retiring_chat("gpt-3.5-turbo-1106", 1.00, 2.00, "2026-09-28", "gpt-5.6-terra"),
+    // The gpt-3.5-turbo page lists this snapshot. The pricing and
+    // deprecations pages give it a price and a shutdown date of its own.
+    retiring_chat("gpt-3.5-turbo-instruct", 1.50, 2.00, "2026-09-28", "gpt-5.6-terra"),
 ];
 
 const fn transcription(

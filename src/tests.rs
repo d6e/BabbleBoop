@@ -193,6 +193,19 @@ pub(crate) mod regression_tests {
         ] {
             assert!(march.3[0].contains(text), "{:?}", march.3);
         }
+
+        // The gpt-3.5-turbo page lists gpt-3.5-turbo-instruct as a snapshot.
+        // The pricing page gives it a price of its own.
+        let instruct = chat_model_behaviour("gpt-3.5-turbo-instruct", "gpt-3.5-turbo-instruct");
+        assert_eq!(instruct.2, Vec::<String>::new());
+        assert_eq!(instruct.3.len(), 1, "{:?}", instruct.3);
+        for text in [
+            "'gpt-3.5-turbo-instruct'",
+            "2026-09-28",
+            "Use gpt-5.6-terra instead",
+        ] {
+            assert!(instruct.3[0].contains(text), "{:?}", instruct.3);
+        }
     }
 
     #[test]
