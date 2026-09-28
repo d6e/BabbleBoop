@@ -170,6 +170,10 @@ fn draw_recording_duration(ui: &mut egui::Ui, duration: f32, min_duration: f32) 
 
 const MAX_LOG_ENTRIES: usize = 50;
 
+/// Spacing and label column width of the settings grids.
+const GRID_SPACING: [f32; 2] = [10.0, 6.0];
+const LABEL_WIDTH: f32 = 160.0;
+
 #[derive(Clone, Copy, PartialEq)]
 enum StatusType {
     Success,
@@ -444,6 +448,14 @@ impl eframe::App for BabbleBoopApp {
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.ui(ctx);
+    }
+}
+
+impl BabbleBoopApp {
+    /// Show one frame. Separate from `update` so tests can run it without
+    /// an `eframe::Frame`.
+    pub(crate) fn ui(&mut self, ctx: &egui::Context) {
         // Poll for new log entries
         self.poll_log_entries();
 
@@ -554,8 +566,8 @@ impl eframe::App for BabbleBoopApp {
             ui.add_space(10.0);
 
             egui::ScrollArea::vertical().show(ui, |ui| {
-                let grid_spacing = [10.0, 6.0];
-                let label_width = 160.0;
+                let grid_spacing = GRID_SPACING;
+                let label_width = LABEL_WIDTH;
 
                 // OSC Settings
                 egui::CollapsingHeader::new("OSC Settings")
@@ -674,140 +686,7 @@ impl eframe::App for BabbleBoopApp {
 
                 // Audio Settings
                 let audio_header = egui::CollapsingHeader::new("Audio Settings")
-                    .show(ui, |ui| {
-                    // Audio level meter at the top
-                    ui.label("Input Level:");
-                    let level_bits = self.app_state.current_audio_level.load(Ordering::Relaxed);
-                    let current_level = f32::from_bits(level_bits);
-                    draw_audio_level_meter(ui, current_level, &mut self.config_draft.audio.noise_gate_threshold, &colors);
-                    ui.add_space(4.0);
-
-                    // Read audio state from atomics
-                    let is_recording = self.app_state.is_recording.load(Ordering::Relaxed);
-                    let silent_frames = self.app_state.silent_frames.load(Ordering::Relaxed);
-                    let noise_gate_active = self.app_state.noise_gate_active.load(Ordering::Relaxed);
-                    let hold_remaining = f32::from_bits(
-                        self.app_state.noise_gate_hold_remaining.load(Ordering::Relaxed),
-                    );
-                    let recording_duration = f32::from_bits(
-                        self.app_state.recording_duration.load(Ordering::Relaxed),
-                    );
-
-                    // Noise gate state visualization
-                    ui.horizontal(|ui| {
-                        ui.label("Gate:");
-                        let gate_text = if noise_gate_active {
-                            if hold_remaining > 0.0 {
-                                format!("Hold ({:.2}s)", hold_remaining)
-                            } else {
-                                "Open".to_string()
-                            }
-                        } else {
-                            "Closed".to_string()
-                        };
-                        ui.label(egui::RichText::new(gate_text).small());
-                    });
-                    draw_noise_gate_state(
-                        ui,
-                        noise_gate_active,
-                        hold_remaining,
-                        self.config_draft.audio.noise_gate_hold_time,
-                    );
-                    ui.add_space(4.0);
-
-                    // Silence counter (only visible when recording)
-                    if is_recording {
-                        ui.horizontal(|ui| {
-                            ui.label("Silence:");
-                            ui.label(
-                                egui::RichText::new(format!(
-                                    "{}/{}",
-                                    silent_frames, self.config_draft.audio.silence_threshold
-                                ))
-                                .small(),
-                            );
-                        });
-                        draw_silence_counter(
-                            ui,
-                            silent_frames,
-                            self.config_draft.audio.silence_threshold,
-                        );
-                        ui.add_space(4.0);
-
-                        // Recording duration
-                        ui.horizontal(|ui| {
-                            ui.label("Duration:");
-                            let min_dur = self.config_draft.audio.min_transcription_duration;
-                            let status = if recording_duration >= min_dur {
-                                format!("{:.1}s (ready)", recording_duration)
-                            } else {
-                                format!("{:.1}s / {:.1}s", recording_duration, min_dur)
-                            };
-                            ui.label(egui::RichText::new(status).small());
-                        });
-                        draw_recording_duration(
-                            ui,
-                            recording_duration,
-                            self.config_draft.audio.min_transcription_duration,
-                        );
-                        ui.add_space(4.0);
-                    }
-
-                    // Test Microphone button
-                    let is_testing = self.app_state.test_mode_active.load(Ordering::Relaxed);
-                    ui.horizontal(|ui| {
-                        if is_testing {
-                            if ui.button("Stop Recording").on_hover_text("Stop recording and play back").clicked() {
-                                if let Err(e) = self.send_command(AppCommand::StopTestRecording) {
-                                    self.set_status_error(format!("Failed to stop test: {}", e));
-                                }
-                            }
-                        } else if ui.button("Test Microphone").on_hover_text("Record audio and play it back (click again to stop)").clicked() {
-                            if let Err(e) = self.send_command(AppCommand::StartTestRecording) {
-                                self.set_status_error(format!("Failed to start test: {}", e));
-                            }
-                        }
-                    });
-                    ui.add_space(8.0);
-
-                    egui::Grid::new("audio_grid")
-                        .num_columns(2)
-                        .spacing(grid_spacing)
-                        .min_col_width(label_width)
-                        .show(ui, |ui| {
-                            ui.label("Silence Threshold:")
-                                .on_hover_text("Number of consecutive silent samples before stopping recording");
-                            ui.add(egui::DragValue::new(&mut self.config_draft.audio.silence_threshold).range(1..=200));
-                            ui.end_row();
-
-                            ui.label("Noise Gate Threshold:")
-                                .on_hover_text("Audio level below which input is considered silence (0.0-1.0). Drag the line on the meter or use this field.");
-                            ui.add(
-                                egui::DragValue::new(&mut self.config_draft.audio.noise_gate_threshold)
-                                    .speed(0.01)
-                                    .range(0.0..=1.0),
-                            );
-                            ui.end_row();
-
-                            ui.label("Noise Gate Hold (s):")
-                                .on_hover_text("Time to keep gate open after audio drops below threshold");
-                            ui.add(
-                                egui::DragValue::new(&mut self.config_draft.audio.noise_gate_hold_time)
-                                    .speed(0.01)
-                                    .range(0.0..=2.0),
-                            );
-                            ui.end_row();
-
-                            ui.label("Min Duration (s):")
-                                .on_hover_text("Minimum recording length before transcription (filters out noise)");
-                            ui.add(
-                                egui::DragValue::new(&mut self.config_draft.audio.min_transcription_duration)
-                                    .speed(0.1)
-                                    .range(0.0..=10.0),
-                            );
-                            ui.end_row();
-                        });
-                });
+                    .show(ui, |ui| self.audio_settings_ui(ui));
                 // Request repaint when audio settings is open to update the level meter
                 if audio_header.body_returned.is_some() {
                     ctx.request_repaint();
@@ -872,6 +751,154 @@ impl eframe::App for BabbleBoopApp {
         if self.status_message.is_some() || !self.log_entries.is_empty() {
             ctx.request_repaint();
         }
+    }
+
+    /// Body of the Audio Settings section: live meters, the test button and
+    /// the audio settings.
+    fn audio_settings_ui(&mut self, ui: &mut egui::Ui) {
+        let colors = self.colors;
+        // Audio level meter at the top
+        ui.label("Input Level:");
+        let level_bits = self.app_state.current_audio_level.load(Ordering::Relaxed);
+        let current_level = f32::from_bits(level_bits);
+        draw_audio_level_meter(
+            ui,
+            current_level,
+            &mut self.config_draft.audio.noise_gate_threshold,
+            &colors,
+        );
+        ui.add_space(4.0);
+
+        // Read audio state from atomics
+        let is_recording = self.app_state.is_recording.load(Ordering::Relaxed);
+        let silent_frames = self.app_state.silent_frames.load(Ordering::Relaxed);
+        let noise_gate_active = self.app_state.noise_gate_active.load(Ordering::Relaxed);
+        let hold_remaining = f32::from_bits(
+            self.app_state
+                .noise_gate_hold_remaining
+                .load(Ordering::Relaxed),
+        );
+        let recording_duration =
+            f32::from_bits(self.app_state.recording_duration.load(Ordering::Relaxed));
+
+        // Noise gate state visualization
+        ui.horizontal(|ui| {
+            ui.label("Gate:");
+            let gate_text = if noise_gate_active {
+                if hold_remaining > 0.0 {
+                    format!("Hold ({:.2}s)", hold_remaining)
+                } else {
+                    "Open".to_string()
+                }
+            } else {
+                "Closed".to_string()
+            };
+            ui.label(egui::RichText::new(gate_text).small());
+        });
+        draw_noise_gate_state(
+            ui,
+            noise_gate_active,
+            hold_remaining,
+            self.config_draft.audio.noise_gate_hold_time,
+        );
+        ui.add_space(4.0);
+
+        // Silence counter (only visible when recording)
+        if is_recording {
+            ui.horizontal(|ui| {
+                ui.label("Silence:");
+                ui.label(
+                    egui::RichText::new(format!(
+                        "{}/{}",
+                        silent_frames, self.config_draft.audio.silence_threshold
+                    ))
+                    .small(),
+                );
+            });
+            draw_silence_counter(ui, silent_frames, self.config_draft.audio.silence_threshold);
+            ui.add_space(4.0);
+
+            // Recording duration
+            ui.horizontal(|ui| {
+                ui.label("Duration:");
+                let min_dur = self.config_draft.audio.min_transcription_duration;
+                let status = if recording_duration >= min_dur {
+                    format!("{:.1}s (ready)", recording_duration)
+                } else {
+                    format!("{:.1}s / {:.1}s", recording_duration, min_dur)
+                };
+                ui.label(egui::RichText::new(status).small());
+            });
+            draw_recording_duration(
+                ui,
+                recording_duration,
+                self.config_draft.audio.min_transcription_duration,
+            );
+            ui.add_space(4.0);
+        }
+
+        // Test Microphone button
+        let is_testing = self.app_state.test_mode_active.load(Ordering::Relaxed);
+        ui.horizontal(|ui| {
+            if is_testing {
+                if ui
+                    .button("Stop Recording")
+                    .on_hover_text("Stop recording and play back")
+                    .clicked()
+                {
+                    if let Err(e) = self.send_command(AppCommand::StopTestRecording) {
+                        self.set_status_error(format!("Failed to stop test: {}", e));
+                    }
+                }
+            } else if ui
+                .button("Test Microphone")
+                .on_hover_text("Record audio and play it back (click again to stop)")
+                .clicked()
+            {
+                if let Err(e) = self.send_command(AppCommand::StartTestRecording) {
+                    self.set_status_error(format!("Failed to start test: {}", e));
+                }
+            }
+        });
+        ui.add_space(8.0);
+
+        egui::Grid::new("audio_grid")
+            .num_columns(2)
+            .spacing(GRID_SPACING)
+            .min_col_width(LABEL_WIDTH)
+            .show(ui, |ui| {
+                ui.label("Silence Threshold:")
+                    .on_hover_text("Number of consecutive silent samples before stopping recording");
+                ui.add(egui::DragValue::new(&mut self.config_draft.audio.silence_threshold).range(1..=200));
+                ui.end_row();
+
+                ui.label("Noise Gate Threshold:")
+                    .on_hover_text("Audio level below which input is considered silence (0.0-1.0). Drag the line on the meter or use this field.");
+                ui.add(
+                    egui::DragValue::new(&mut self.config_draft.audio.noise_gate_threshold)
+                        .speed(0.01)
+                        .range(0.0..=1.0),
+                );
+                ui.end_row();
+
+                ui.label("Noise Gate Hold (s):")
+                    .on_hover_text("Time to keep gate open after audio drops below threshold");
+                ui.add(
+                    egui::DragValue::new(&mut self.config_draft.audio.noise_gate_hold_time)
+                        .speed(0.01)
+                        .range(0.0..=2.0),
+                );
+                ui.end_row();
+
+                ui.label("Min Duration (s):")
+                    .on_hover_text("Minimum recording length before transcription (filters out noise)");
+                ui.add(
+                    egui::DragValue::new(&mut self.config_draft.audio.min_transcription_duration)
+                        .speed(0.1)
+                        .range(0.0..=10.0),
+                );
+                ui.end_row();
+            });
     }
 }
 
