@@ -426,4 +426,68 @@ requests_per_minute = 50
             error
         );
     }
+
+    // ===========================================================================
+    // Test: Shutdown interrupts in flight work
+    // ===========================================================================
+
+    #[tokio::test(start_paused = true)]
+    async fn test_shutdown_interrupts_chatbox_display_pause() {
+        use crate::chatbox::send_to_chatbox;
+        use crate::shutdown::Shutdown;
+        use std::time::Duration;
+        use tokio::net::UdpSocket;
+        use tokio::time::{sleep, Instant};
+
+        let receiver = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let mut config = Config::default();
+        config.osc.address = "127.0.0.1".to_string();
+        config.osc.output_port = receiver.local_addr().unwrap().port();
+        config.osc.display_time = 30_000;
+        config.osc.max_message_chunks = 10;
+        // Three chunks, so the chatbox pauses 90 s in total.
+        let message = "a".repeat(300);
+
+        let shutdown = Shutdown::new();
+        let requester = shutdown.clone();
+        tokio::spawn(async move {
+            sleep(Duration::from_secs(1)).await;
+            requester.request();
+        });
+
+        let start = Instant::now();
+        let result = shutdown
+            .run_until(send_to_chatbox(&message, &config, &socket))
+            .await;
+
+        assert!(result.is_none(), "shutdown did not stop the chatbox send");
+        assert_eq!(start.elapsed(), Duration::from_secs(1));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_shutdown_requested_before_wait_is_seen() {
+        use crate::shutdown::Shutdown;
+        use std::time::Duration;
+
+        let shutdown = Shutdown::new();
+        shutdown.request();
+
+        assert!(shutdown.is_requested());
+        let result = tokio::time::timeout(
+            Duration::from_secs(1),
+            shutdown.run_until(std::future::pending::<()>()),
+        )
+        .await;
+        assert_eq!(result, Ok(None));
+    }
+
+    #[tokio::test]
+    async fn test_run_until_returns_output_without_shutdown() {
+        use crate::shutdown::Shutdown;
+
+        let shutdown = Shutdown::new();
+        assert_eq!(shutdown.run_until(async { 7 }).await, Some(7));
+        assert!(!shutdown.is_requested());
+    }
 }

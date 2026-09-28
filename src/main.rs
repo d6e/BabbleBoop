@@ -56,6 +56,7 @@ fn main() {
     // Create shared app state
     let app_state = Arc::new(AppState::new(config, cmd_tx, log_tx));
     let app_state_clone = Arc::clone(&app_state);
+    let shutdown = app_state.shutdown.clone();
 
     // Spawn background thread with tokio runtime for audio processing
     let processing_handle = std::thread::spawn(move || {
@@ -65,6 +66,9 @@ fn main() {
                 eprintln!("Processing error: {}", e);
             }
         });
+        // Dropping the runtime waits for blocking tasks without a limit, and
+        // a cancelled request can leave a DNS lookup running on one.
+        rt.shutdown_timeout(Duration::from_secs(1));
     });
 
     // Run GUI on main thread
@@ -74,7 +78,9 @@ fn main() {
         let _ = run_error_dialog("GUI Error", &message);
     }
 
-    // Wait for processing thread to finish
+    // The GUI requests shutdown on exit; request it again in case the GUI
+    // failed to start, so the processing thread does not run forever.
+    shutdown.request();
     let _ = processing_handle.join();
 }
 
@@ -105,7 +111,7 @@ async fn run_processing_loop(
     let audio_level = Arc::clone(&app_state.current_audio_level);
     let test_mode_active = Arc::clone(&app_state.test_mode_active);
     let test_recording_buffer = Arc::clone(&app_state.test_recording_buffer);
-    let shutdown_signal = Arc::clone(&app_state.shutdown);
+    let shutdown_signal = app_state.shutdown.clone();
     let is_recording_state = Arc::clone(&app_state.is_recording);
     let silent_frames_state = Arc::clone(&app_state.silent_frames);
     let noise_gate_active_state = Arc::clone(&app_state.noise_gate_active);
@@ -132,7 +138,7 @@ async fn run_processing_loop(
                 let _ = init_tx.send(Ok(stream_info));
                 let _stream = stream;
                 // Check shutdown signal periodically instead of parking forever
-                while !shutdown_signal.load(Ordering::SeqCst) {
+                while !shutdown_signal.is_requested() {
                     std::thread::sleep(std::time::Duration::from_millis(100));
                 }
                 // Stream is dropped here, stopping audio capture
@@ -190,9 +196,10 @@ async fn run_processing_loop(
 
     loop {
         tokio::select! {
-            // Prioritize command channel to handle Quit promptly
+            // Prioritize shutdown and the command channel to quit promptly
             biased;
 
+            _ = app_state.shutdown.requested() => break,
             cmd = cmd_rx.recv() => {
                 match cmd {
                     Some(AppCommand::SetEnabled(enabled)) => {
@@ -320,7 +327,9 @@ async fn run_processing_loop(
                     AudioEvent::AudioData(audio_data) => {
                         // Read current config for processing
                         let current_config = app_state.config.read().expect("Config lock poisoned").clone();
-                        if let Err(e) = process_audio(
+                        // Shutdown drops the work, including the chatbox
+                        // display pause and rate limiter wait.
+                        let result = app_state.shutdown.run_until(process_audio(
                             &api_client,
                             audio_data,
                             &current_config,
@@ -330,10 +339,12 @@ async fn run_processing_loop(
                             &mut price_estimator,
                             recording_manager.as_ref(),
                             &app_state,
-                        )
-                        .await
-                        {
-                            app_state.logger.error_api(format!("Error: {}", e));
+                        ))
+                        .await;
+                        match result {
+                            Some(Ok(())) => {}
+                            Some(Err(e)) => app_state.logger.error_api(format!("Error: {}", e)),
+                            None => break,
                         }
                     }
                 }

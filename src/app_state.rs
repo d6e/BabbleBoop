@@ -1,4 +1,5 @@
 use crate::config::{AudioConfig, Config};
+use crate::shutdown::Shutdown;
 use serde_json::Value;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, RwLock};
@@ -165,7 +166,7 @@ impl AudioParams {
 pub struct AppState {
     pub config: Arc<RwLock<Config>>,
     pub enabled: Arc<AtomicBool>,
-    pub shutdown: Arc<AtomicBool>,
+    pub shutdown: Shutdown,
     pub command_tx: mpsc::Sender<AppCommand>,
     pub log_tx: mpsc::Sender<LogEntry>,
     pub logger: Logger,
@@ -212,7 +213,7 @@ impl AppState {
         Self {
             config: Arc::new(RwLock::new(config)),
             enabled: Arc::new(AtomicBool::new(true)),
-            shutdown: Arc::new(AtomicBool::new(false)),
+            shutdown: Shutdown::new(),
             command_tx,
             log_tx,
             logger,
@@ -238,10 +239,10 @@ impl AppState {
     }
 
     pub fn request_shutdown(&self) {
-        self.shutdown.store(true, Ordering::SeqCst);
+        self.shutdown.request();
     }
 
     pub fn is_shutdown_requested(&self) -> bool {
-        self.shutdown.load(Ordering::SeqCst)
+        self.shutdown.is_requested()
     }
 }

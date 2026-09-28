@@ -23,3 +23,7 @@ toml = "0.8.19"
 [lints.clippy]
 # Slicing a str by byte range panics inside a multibyte character.
 string_slice = "deny"
+
+[dev-dependencies]
+# Paused clock for timing tests (tokio::test(start_paused = true)).
+tokio = { version = "1.39.2", features = ["test-util"] }
