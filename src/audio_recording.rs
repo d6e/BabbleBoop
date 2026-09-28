@@ -92,9 +92,11 @@ impl EventQueue {
 
 /// Handles the input buffers of one stream, converted to f32.
 ///
-/// This runs on the audio thread, which can be real time. It only updates
-/// atomics, copies samples and queues events with `try_send`. Logging and
-/// encoding happen on the processing side when it receives the events.
+/// This runs on the audio thread, which can be real time. It updates
+/// atomics, copies samples and queues events with `try_send`; it allocates
+/// only when a recording or a part starts. In test mode it also locks the
+/// test buffer. Logging and encoding happen on the processing side when it
+/// receives the events.
 struct InputHandler {
     shared: SharedAudioState,
     recorder: Recorder,
