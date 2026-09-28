@@ -134,7 +134,6 @@ mod regression_tests {
     #[test]
     fn test_config_round_trip() {
         use std::fs;
-        use std::path::PathBuf;
 
         let config = Config {
             osc: OscConfig {
@@ -169,8 +168,12 @@ mod regression_tests {
             theme: ThemeMode::Light,
         };
 
-        // Create a temp file path
-        let temp_path = PathBuf::from("test_config_roundtrip.toml");
+        // A file in the temp directory, named per process, so parallel runs
+        // do not share it and nothing is written into the repo
+        let temp_path = std::env::temp_dir().join(format!(
+            "babble_boop_config_roundtrip_{}.toml",
+            std::process::id()
+        ));
 
         // Save config
         config.save(&temp_path).expect("Failed to save config");
