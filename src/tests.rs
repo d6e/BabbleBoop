@@ -955,6 +955,41 @@ requests_per_minute = 50
         );
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn test_the_end_of_audio_input_is_logged_once() {
+        use crate::app_state::{LogLevel, Logger};
+        use crate::processing_loop::AudioEvents;
+        use crate::types::AudioEvent;
+        use std::time::Duration;
+
+        let (tx, rx) = tokio::sync::mpsc::channel(10);
+        let (log_tx, mut log_rx) = tokio::sync::mpsc::channel(10);
+        let mut events = AudioEvents::new(rx, Logger::new(log_tx, Default::default()));
+        tx.try_send(AudioEvent::StartRecording).unwrap();
+        // The audio thread ends and drops every sender
+        drop(tx);
+
+        assert_eq!(events.recv().await, AudioEvent::StartRecording);
+        // After that, no event comes; the loop waits for its other branches
+        for _ in 0..2 {
+            let next = tokio::time::timeout(Duration::from_secs(60), events.recv()).await;
+            assert!(next.is_err(), "got {:?} after the channel closed", next);
+        }
+        let logged: Vec<(String, LogLevel)> = std::iter::from_fn(|| log_rx.try_recv().ok())
+            .map(|entry| (entry.message, entry.level))
+            .collect();
+        assert_eq!(
+            logged,
+            vec![
+                ("Sound detected, recording...".to_string(), LogLevel::Info),
+                (
+                    "Audio input stopped. Restart BabbleBoop to record again.".to_string(),
+                    LogLevel::Error
+                ),
+            ]
+        );
+    }
+
     #[tokio::test]
     async fn test_recording_is_encoded_for_upload_with_its_duration() {
         use crate::processing_loop::encode_for_upload;

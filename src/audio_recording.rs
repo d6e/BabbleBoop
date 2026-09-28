@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use tokio::sync::mpsc;
+use tokio::sync::mpsc::error::TrySendError;
 
 /// State that the audio callback shares with the GUI and the processing loop.
 pub struct SharedAudioState {
@@ -202,26 +203,48 @@ impl InputSample for i16 {
 struct PanicGuard {
     tx: mpsc::Sender<AudioEvent>,
     failed: bool,
+    /// The crash report while it does not fit in the channel
+    unsent_report: Option<String>,
 }
 
 impl PanicGuard {
     fn new(tx: mpsc::Sender<AudioEvent>) -> Self {
-        Self { tx, failed: false }
+        Self {
+            tx,
+            failed: false,
+            unsent_report: None,
+        }
     }
 
     /// Run `body` unless an earlier run panicked. On a panic, report it
     /// to the processing side; later runs then do nothing, as the state the
-    /// body left can be inconsistent.
+    /// body left can be inconsistent, except to send the report again
+    /// while it does not fit in the channel.
     fn run(&mut self, body: impl FnOnce()) {
         if self.failed {
+            self.send_report();
             return;
         }
         if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(body)) {
             self.failed = true;
-            let _ = self.tx.try_send(AudioEvent::InputError(format!(
+            self.unsent_report = Some(format!(
                 "Audio input crashed: {}. Restart BabbleBoop to record again.",
                 panic_reason(&*payload)
-            )));
+            ));
+            self.send_report();
+        }
+    }
+
+    /// Send the crash report. Keep it if the channel is full; drop it if
+    /// the processing side is gone.
+    fn send_report(&mut self) {
+        let Some(message) = self.unsent_report.take() else {
+            return;
+        };
+        if let Err(TrySendError::Full(AudioEvent::InputError(message))) =
+            self.tx.try_send(AudioEvent::InputError(message))
+        {
+            self.unsent_report = Some(message);
         }
     }
 }
@@ -229,7 +252,10 @@ impl PanicGuard {
 /// Passes stream errors from cpal to the processing side. cpal can call
 /// the error callback in a loop with the same error, for example while a
 /// device is unplugged, so an error is sent again only after a different
-/// one.
+/// one. On WASAPI cpal 0.15.3 calls it once and then ends the stream
+/// thread, which drops this reporter (`run_input` in
+/// `src/host/wasapi/stream.rs`). An error that did not fit is then lost,
+/// and `AudioEvents` in the processing loop reports the closed channel.
 struct StreamErrorReporter {
     tx: mpsc::Sender<AudioEvent>,
     last_sent: Option<String>,
@@ -550,6 +576,28 @@ mod tests {
         let mut guard = PanicGuard::new(tx);
         guard.run(|| panic!("index out of bounds"));
         let mut ran = false;
+        guard.run(|| ran = true);
+
+        assert!(!ran, "the callback ran again after a panic");
+        assert_eq!(
+            std::iter::from_fn(|| rx.try_recv().ok()).collect::<Vec<_>>(),
+            vec![AudioEvent::InputError(
+                "Audio input crashed: index out of bounds. Restart BabbleBoop to record again."
+                    .to_string()
+            )]
+        );
+    }
+
+    #[test]
+    fn test_a_crash_report_that_did_not_fit_is_sent_once_there_is_room() {
+        let (tx, mut rx) = mpsc::channel(1);
+        tx.try_send(AudioEvent::StartRecording).unwrap();
+        let mut guard = PanicGuard::new(tx);
+        guard.run(|| panic!("index out of bounds"));
+        // The processing side takes the event that filled the channel
+        assert_eq!(rx.try_recv().unwrap(), AudioEvent::StartRecording);
+        let mut ran = false;
+        guard.run(|| ran = true);
         guard.run(|| ran = true);
 
         assert!(!ran, "the callback ran again after a panic");

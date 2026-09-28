@@ -164,25 +164,35 @@ pub async fn apply_enabled(enabled: bool, typing_indicator: &TypingIndicator, lo
 /// The events from the audio callback, as the processing loop receives
 /// them.
 pub struct AudioEvents {
-    rx: mpsc::Receiver<AudioEvent>,
+    /// `None` after every sender is gone
+    rx: Option<mpsc::Receiver<AudioEvent>>,
     logger: Logger,
 }
 
 impl AudioEvents {
     pub fn new(rx: mpsc::Receiver<AudioEvent>, logger: Logger) -> Self {
-        Self { rx, logger }
+        Self {
+            rx: Some(rx),
+            logger,
+        }
     }
 
-    /// The next event, after its line in the activity log. Never resolves
-    /// after the audio callback is gone.
+    /// The next event, after its line in the activity log. When every
+    /// sender is gone, logs an error once and then never resolves. The
+    /// senders go when the audio thread of cpal ends, which on WASAPI
+    /// follows the first stream error, possibly before its report fits in
+    /// the channel.
     pub async fn recv(&mut self) -> AudioEvent {
-        match self.rx.recv().await {
-            Some(event) => {
+        if let Some(rx) = &mut self.rx {
+            if let Some(event) = rx.recv().await {
                 log_audio_event(&event, &self.logger);
-                event
+                return event;
             }
-            None => std::future::pending().await,
+            self.rx = None;
+            self.logger
+                .error("Audio input stopped. Restart BabbleBoop to record again.");
         }
+        std::future::pending().await
     }
 }
 
