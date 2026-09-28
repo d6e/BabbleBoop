@@ -528,4 +528,47 @@ requests_per_minute = 50
             100
         );
     }
+
+    // ===========================================================================
+    // Test: Saved settings reach the processing loop
+    // ===========================================================================
+
+    #[test]
+    fn test_config_update_applies_new_model_prices_and_keeps_total() {
+        use crate::processing_loop::ProcessingServices;
+        use std::time::Duration;
+
+        let mut config = Config::default();
+        config.openai.model = "gpt-4o-mini".to_string();
+        config.openai.transcription_model = "whisper-1".to_string();
+        let mut services = ProcessingServices::new(&config);
+        services.price_estimator.total_cost = 1.25;
+
+        config.openai.model = "gpt-4o".to_string();
+        config.openai.transcription_model = "gpt-4o-mini-transcribe".to_string();
+        services.apply_config(&config);
+
+        let expected = PriceEstimator::new("gpt-4o", "gpt-4o-mini-transcribe");
+        let old = PriceEstimator::new("gpt-4o-mini", "whisper-1");
+        let minute = Duration::from_secs(60);
+        let estimator = &services.price_estimator;
+        assert_ne!(
+            expected.estimate_translation_cost(1000, 500),
+            old.estimate_translation_cost(1000, 500)
+        );
+        assert_ne!(
+            expected.estimate_transcription_cost(minute),
+            old.estimate_transcription_cost(minute)
+        );
+        assert_eq!(
+            estimator.estimate_translation_cost(1000, 500),
+            expected.estimate_translation_cost(1000, 500)
+        );
+        assert_eq!(
+            estimator.estimate_transcription_cost(minute),
+            expected.estimate_transcription_cost(minute)
+        );
+        // The running total stays in memory; it is not reloaded from disk.
+        assert_eq!(estimator.total_cost, 1.25);
+    }
 }

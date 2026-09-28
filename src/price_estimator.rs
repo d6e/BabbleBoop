@@ -14,6 +14,19 @@ pub struct PriceEstimator {
 
 impl PriceEstimator {
     pub fn new(model: &str, transcription_model: &str) -> Self {
+        let mut estimator = PriceEstimator {
+            whisper_price_per_minute: 0.0,
+            gpt_input_price_per_million_tokens: 0.0,
+            gpt_output_price_per_million_tokens: 0.0,
+            total_cost: Self::load_total_cost().unwrap_or(0.0),
+        };
+        estimator.set_models(model, transcription_model);
+        estimator
+    }
+
+    /// Use the prices of these models for new estimates. The total cost is
+    /// kept.
+    pub fn set_models(&mut self, model: &str, transcription_model: &str) {
         let (input_price, output_price, known) = Self::get_model_pricing(model);
 
         if !known {
@@ -33,14 +46,9 @@ impl PriceEstimator {
             );
         }
 
-        let total_cost = Self::load_total_cost().unwrap_or(0.0);
-
-        PriceEstimator {
-            whisper_price_per_minute: whisper_price,
-            gpt_input_price_per_million_tokens: input_price,
-            gpt_output_price_per_million_tokens: output_price,
-            total_cost,
-        }
+        self.whisper_price_per_minute = whisper_price;
+        self.gpt_input_price_per_million_tokens = input_price;
+        self.gpt_output_price_per_million_tokens = output_price;
     }
 
     fn get_transcription_pricing(model: &str) -> (f64, bool) {
