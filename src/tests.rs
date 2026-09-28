@@ -274,4 +274,55 @@ requests_per_minute = 50
         );
         // Removed fields (passthrough_enabled, passthrough_port) should be silently ignored
     }
+
+    // ===========================================================================
+    // Test: API error messages are truncated by characters, not bytes
+    // ===========================================================================
+
+    /// Sends `message` as an OpenAI style JSON error through `Logger::error_api`
+    /// and returns the text shown in the activity log.
+    fn displayed_api_error(message: &str) -> String {
+        use crate::app_state::Logger;
+
+        let (log_tx, mut log_rx) = tokio::sync::mpsc::channel(1);
+        let body = serde_json::json!({ "error": { "message": message, "code": "other" } });
+        Logger::new(log_tx).error_api(format!("API error: {}", body));
+        log_rx
+            .try_recv()
+            .expect("error_api sends one log entry")
+            .message
+    }
+
+    #[test]
+    fn test_api_error_truncation_ascii() {
+        let long = "a".repeat(130);
+        assert_eq!(
+            displayed_api_error(&long),
+            format!("{}...", "a".repeat(117))
+        );
+
+        let short = "a".repeat(120);
+        assert_eq!(displayed_api_error(&short), short);
+    }
+
+    #[test]
+    fn test_api_error_truncation_multibyte() {
+        // Byte 117 is inside the two byte 'é'.
+        let accented = format!("{}é{}", "a".repeat(116), "b".repeat(20));
+        assert_eq!(
+            displayed_api_error(&accented),
+            format!("{}é...", "a".repeat(116))
+        );
+
+        // 121 characters of three bytes each.
+        let cjk = "語".repeat(121);
+        assert_eq!(
+            displayed_api_error(&cjk),
+            format!("{}...", "語".repeat(117))
+        );
+
+        // 120 characters is short enough to show in full, even at 360 bytes.
+        let cjk_short = "語".repeat(120);
+        assert_eq!(displayed_api_error(&cjk_short), cjk_short);
+    }
 }

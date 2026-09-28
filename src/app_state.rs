@@ -107,9 +107,11 @@ fn parse_api_error_for_display(error: &str) -> String {
 
                 // Fall back to the message field if no specific code matched
                 if let Some(message) = err_obj.get("message").and_then(|m| m.as_str()) {
-                    // Truncate if too long
-                    if message.len() > 120 {
-                        return format!("{}...", &message[..117]);
+                    // Truncate if too long. Count characters, not bytes, so the
+                    // cut cannot fall inside a multibyte character.
+                    if message.chars().count() > 120 {
+                        let truncated: String = message.chars().take(117).collect();
+                        return format!("{}...", truncated);
                     }
                     return message.to_string();
                 }
