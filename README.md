@@ -35,11 +35,13 @@ I wanted to see if using LLMs like GPT could provide more context-aware translat
 
 ## Where BabbleBoop keeps its files
 
-BabbleBoop keeps `config.toml`, `total_cost.txt` (the estimated API cost of all sessions) and the `recordings` folder (when `keep_audio_files` is on) in one folder:
+BabbleBoop keeps `config.toml`, `total_cost.txt` (the estimated API cost of all sessions) and the `recordings` folder (when `keep_audio_files` is on) in one folder. At startup, it looks for `config.toml` in this order:
 
-- Usually the folder of the executable. If there is no `config.toml` yet, BabbleBoop creates one there when it starts.
-- The working directory (the folder that BabbleBoop was started from), if `config.toml` is there and not next to the executable. Earlier versions always used the working directory, so a setup that relies on it keeps its settings. For example, `cargo run` in the repo folder uses the `config.toml` of the repo folder.
-- If both folders have a `config.toml`, BabbleBoop uses the one next to the executable.
+1. The working directory (the folder that BabbleBoop was started from, for example the "Start in" folder of a shortcut). If `config.toml` is there, BabbleBoop uses this folder, also when there is a `config.toml` next to the executable. The activity log then shows the path of the `config.toml` and `total_cost.txt` next to the executable that BabbleBoop does not use.
+2. The folder of the executable.
+3. If no folder has a `config.toml` yet, BabbleBoop creates one next to the executable. If it cannot write to that folder (for example `C:\Program Files` with another start folder), it creates one in the working directory.
+
+`cargo run` in the repo folder uses the `config.toml` of the repo folder. In a fresh clone without one, it creates the config next to the executable in `target/debug` (`target/release` with `--release`), and `cargo clean` deletes it with your settings and total cost.
 
 At startup, the activity log shows which folder BabbleBoop uses.
 
