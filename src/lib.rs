@@ -5,6 +5,7 @@ pub mod audio_processing;
 pub mod audio_recording;
 pub mod chatbox;
 pub mod config;
+pub mod data_dir;
 pub mod gui;
 pub mod models;
 pub mod price_estimator;

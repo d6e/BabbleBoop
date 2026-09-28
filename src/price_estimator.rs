@@ -5,9 +5,6 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-/// File to persist total API cost across sessions
-const TOTAL_COST_FILE: &str = "total_cost.txt";
-
 /// Tokens of one translation request.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TokenCounts {
@@ -29,16 +26,9 @@ pub struct PriceEstimator {
 }
 
 impl PriceEstimator {
-    pub fn new(model: &str, transcription_model: &str) -> Self {
-        Self::with_cost_file(PathBuf::from(TOTAL_COST_FILE), model, transcription_model)
-    }
-
-    /// An estimator that loads and saves the total cost in `cost_file`.
-    pub(crate) fn with_cost_file(
-        cost_file: PathBuf,
-        model: &str,
-        transcription_model: &str,
-    ) -> Self {
+    /// An estimator that loads and saves the total cost of all sessions
+    /// in `cost_file`.
+    pub fn new(cost_file: PathBuf, model: &str, transcription_model: &str) -> Self {
         let mut estimator = PriceEstimator {
             transcription_price_per_minute: 0.0,
             gpt_input_price_per_million_tokens: 0.0,
@@ -147,8 +137,7 @@ mod tests {
         let file = dir.join("total_cost.txt");
         let (log_tx, mut log_rx) = mpsc::channel(10);
         let logger = Logger::new(log_tx, Default::default());
-        let mut estimator =
-            PriceEstimator::with_cost_file(file.clone(), "gpt-6-luna", "gpt-transcribe");
+        let mut estimator = PriceEstimator::new(file.clone(), "gpt-6-luna", "gpt-transcribe");
         let saves_fail_with = |entries: Vec<(LogLevel, String)>| {
             assert_eq!(entries.len(), 1, "{:?}", entries);
             assert_eq!(entries[0].0, LogLevel::Error, "{:?}", entries);

@@ -27,11 +27,21 @@ I wanted to see if using LLMs like GPT could provide more context-aware translat
 ## Running It
 
 1. Start VRChat and enable OSC
-2. Populate the `config.toml` file with your OpenAI API key and target language. Make sure it's in the same folder as the executable. I left an example config file in the repo.
+2. Populate the `config.toml` file with your OpenAI API key and target language. Put it in the same folder as the executable (see [Where BabbleBoop keeps its files](#where-babbleboop-keeps-its-files)). I left an example config file in the repo.
 3. Run the translator:
    - If using a [pre-built release](https://github.com/d6e/vrchat_osc_llm/releases), just double-click the executable
    - If you've built from source, use `cargo run --release`
 4. Start chatting in VRChat!
+
+## Where BabbleBoop keeps its files
+
+BabbleBoop keeps `config.toml`, `total_cost.txt` (the estimated API cost of all sessions) and the `recordings` folder (when `keep_audio_files` is on) in one folder:
+
+- Usually the folder of the executable. If there is no `config.toml` yet, BabbleBoop creates one there when it starts.
+- The working directory (the folder that BabbleBoop was started from), if `config.toml` is there and not next to the executable. Earlier versions always used the working directory, so a setup that relies on it keeps its settings. For example, `cargo run` in the repo folder uses the `config.toml` of the repo folder.
+- If both folders have a `config.toml`, BabbleBoop uses the one next to the executable.
+
+At startup, the activity log shows which folder BabbleBoop uses.
 
 ## Some Cool Things It Does
 

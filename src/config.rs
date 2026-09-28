@@ -6,9 +6,6 @@ use std::fs;
 use std::ops::RangeInclusive;
 use std::path::Path;
 
-/// Default path to the configuration file
-pub const CONFIG_PATH: &str = "config.toml";
-
 // The values the settings window accepts. `Config::load` moves a number from
 // the file into the same range. A value that does not fit the type of its
 // field, such as a negative count, port 70000 or a decimal number in an

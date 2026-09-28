@@ -1,6 +1,6 @@
 use crate::app_state::{AppCommand, AppState, LogEntry, LogLevel};
 use crate::config::{
-    Config, ConfigWarning, ThemeMode, CONFIG_PATH, DISPLAY_TIME_MS_RANGE, MAX_AUDIO_FILES_RANGE,
+    Config, ConfigWarning, ThemeMode, DISPLAY_TIME_MS_RANGE, MAX_AUDIO_FILES_RANGE,
     MAX_MESSAGE_CHUNKS_RANGE, MIN_TRANSCRIPTION_DURATION_RANGE, NOISE_GATE_HOLD_TIME_RANGE,
     NOISE_GATE_THRESHOLD_RANGE, PORT_RANGE, REQUESTS_PER_MINUTE_RANGE, SILENCE_DURATION_RANGE,
 };
@@ -9,6 +9,7 @@ use crate::processing_loop::TEST_RECORDING_LIMIT;
 use crate::recorder::MAX_RECORDING;
 use crate::theme::{self, AppColors};
 use eframe::egui;
+use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
@@ -267,6 +268,8 @@ fn toggle_switch<'a>(on: &'a mut bool, colors: &'a AppColors) -> impl egui::Widg
 
 pub struct BabbleBoopApp {
     app_state: Arc<AppState>,
+    /// The file that the settings came from. Save writes it.
+    config_file: PathBuf,
     pub(crate) config_draft: Config,
     saved_config: Config,
     /// The config file has values that the loader replaced, so the file
@@ -280,7 +283,11 @@ pub struct BabbleBoopApp {
 }
 
 impl BabbleBoopApp {
-    pub fn new(app_state: Arc<AppState>, log_rx: mpsc::Receiver<LogEntry>) -> Self {
+    pub fn new(
+        app_state: Arc<AppState>,
+        log_rx: mpsc::Receiver<LogEntry>,
+        config_file: PathBuf,
+    ) -> Self {
         let config_draft = app_state
             .config
             .read()
@@ -290,6 +297,7 @@ impl BabbleBoopApp {
         let colors = theme::get_colors(config_draft.theme);
         Self {
             app_state,
+            config_file,
             config_draft,
             saved_config,
             file_differs: false,
@@ -364,7 +372,7 @@ impl BabbleBoopApp {
     /// Write `new_config` to the config file and send it to the processing
     /// loop.
     fn save_config(&mut self, new_config: Config) {
-        if let Err(e) = new_config.save(CONFIG_PATH) {
+        if let Err(e) = new_config.save(&self.config_file) {
             self.set_status_error(format!("Failed to save: {}", e));
             return;
         }
@@ -1018,6 +1026,7 @@ pub fn run_gui(
     log_rx: mpsc::Receiver<LogEntry>,
     first_run: bool,
     config_warnings: Vec<ConfigWarning>,
+    config_file: PathBuf,
 ) -> Result<(), eframe::Error> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -1031,7 +1040,7 @@ pub fn run_gui(
         options,
         Box::new(move |cc| {
             app_state.gui_waker.attach(cc.egui_ctx.clone());
-            let mut app = BabbleBoopApp::new(app_state, log_rx);
+            let mut app = BabbleBoopApp::new(app_state, log_rx, config_file);
             app.note_replaced_values(&config_warnings);
 
             // Apply saved theme on startup

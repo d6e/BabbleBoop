@@ -4,7 +4,8 @@ use babble_boop::audio_playback::AudioOutput;
 use babble_boop::audio_processing::process_audio;
 use babble_boop::audio_recording::{start_audio_recording, SharedAudioState};
 use babble_boop::chatbox::Chatbox;
-use babble_boop::config::{Config, CONFIG_PATH};
+use babble_boop::config::Config;
+use babble_boop::data_dir::{self, DataDir};
 use babble_boop::gui::{run_error_dialog, run_gui};
 use babble_boop::processing_loop::{
     apply_enabled, convert_for_playback, encode_for_upload, hold_audio_stream,
@@ -71,13 +72,16 @@ async fn finish_test_recording(
 }
 
 fn main() {
+    let data = data_dir::locate();
+    let config_file = data.dir.config_file();
     // Load or create config
-    let (loaded, first_run) = match Config::load_or_create(CONFIG_PATH) {
+    let (loaded, first_run) = match Config::load_or_create(&config_file) {
         Ok(result) => result,
         Err(e) => {
             let message = format!(
-                "Failed to load or create config file: {}\n\n\
+                "Failed to load or create config file {}: {}\n\n\
                 Please check file permissions and try again.",
+                config_file.display(),
                 e
             );
             eprintln!("{}", message);
@@ -98,7 +102,13 @@ fn main() {
 
     // Create shared app state
     let app_state = Arc::new(AppState::new(loaded.config, cmd_tx, log_tx));
-    // The logger did not exist when the config was loaded
+    // The logger did not exist when the data folder was selected and the
+    // config was loaded
+    if data.is_error() {
+        app_state.logger.error(data.to_string());
+    } else {
+        app_state.logger.info(data.to_string());
+    }
     for warning in &loaded.warnings {
         app_state.logger.info(warning.to_string());
     }
@@ -119,7 +129,11 @@ fn main() {
             }
         };
         run_logging_failure(&logger, "Processing", || {
-            rt.block_on(run_processing_loop(Arc::clone(&app_state_clone), cmd_rx))
+            rt.block_on(run_processing_loop(
+                Arc::clone(&app_state_clone),
+                cmd_rx,
+                data.dir,
+            ))
         });
         app_state_clone.mark_processing_stopped();
         // Dropping the runtime waits for blocking tasks without a limit, and
@@ -128,7 +142,7 @@ fn main() {
     });
 
     // Run GUI on main thread
-    if let Err(e) = run_gui(app_state, log_rx, first_run, loaded.warnings) {
+    if let Err(e) = run_gui(app_state, log_rx, first_run, loaded.warnings, config_file) {
         let message = format!("Failed to start the application window: {}", e);
         eprintln!("{}", message);
         #[expect(
@@ -151,6 +165,7 @@ fn main() {
 async fn run_processing_loop(
     app_state: Arc<AppState>,
     mut cmd_rx: mpsc::Receiver<AppCommand>,
+    data_dir: DataDir,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Read initial config
     let config = app_state
@@ -225,7 +240,7 @@ async fn run_processing_loop(
         audio_stream_info.channels, audio_stream_info.sample_rate
     ));
 
-    let mut services = ProcessingServices::new(&config, &app_state.logger);
+    let mut services = ProcessingServices::new(&config, &data_dir, &app_state.logger);
     // Initialize the shared cost from the loaded value
     app_state.set_total_cost(services.price_estimator.total_cost);
 

@@ -4,6 +4,7 @@
 use crate::app_state::{AppState, Logger};
 use crate::audio_playback::convert_for_output;
 use crate::config::Config;
+use crate::data_dir::DataDir;
 use crate::models;
 use crate::price_estimator::PriceEstimator;
 use crate::rate_limiter::RateLimiter;
@@ -13,15 +14,12 @@ use crate::shutdown::Shutdown;
 use crate::types::{AudioEvent, CapturedAudio};
 use crate::typing_indicator::TypingIndicator;
 use crate::upload_audio::encode_upload_wav;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::Instant;
-
-/// Directory for saved recordings when `keep_audio_files` is on.
-const RECORDINGS_DIR: &str = "recordings";
 
 /// Longest test recording. The Stop button in the GUI ends it earlier.
 pub const TEST_RECORDING_LIMIT: Duration = Duration::from_secs(30);
@@ -101,18 +99,24 @@ pub struct ProcessingServices {
     pub rate_limiter: RateLimiter,
     pub price_estimator: PriceEstimator,
     pub recording_manager: Option<RecordingManager>,
+    /// Where the recording manager saves recordings
+    recordings_dir: PathBuf,
 }
 
 impl ProcessingServices {
-    pub fn new(config: &Config, logger: &Logger) -> Self {
+    /// Services that keep the total cost and the recordings in `data_dir`.
+    pub fn new(config: &Config, data_dir: &DataDir, logger: &Logger) -> Self {
         log_model_warnings(config, logger);
+        let recordings_dir = data_dir.recordings_dir();
         Self {
             rate_limiter: RateLimiter::new(config.rate_limit.requests_per_minute),
             price_estimator: PriceEstimator::new(
+                data_dir.cost_file(),
                 &config.openai.model,
                 &config.openai.transcription_model,
             ),
-            recording_manager: recording_manager(config),
+            recording_manager: recording_manager(config, &recordings_dir),
+            recordings_dir,
         }
     }
 
@@ -123,7 +127,7 @@ impl ProcessingServices {
             .set_max_requests(config.rate_limit.requests_per_minute);
         self.price_estimator
             .set_models(&config.openai.model, &config.openai.transcription_model);
-        self.recording_manager = recording_manager(config);
+        self.recording_manager = recording_manager(config, &self.recordings_dir);
         log_model_warnings(config, logger);
     }
 }
@@ -140,10 +144,10 @@ fn log_model_warnings(config: &Config, logger: &Logger) {
     }
 }
 
-fn recording_manager(config: &Config) -> Option<RecordingManager> {
+fn recording_manager(config: &Config, recordings_dir: &Path) -> Option<RecordingManager> {
     config
         .keep_audio_files
-        .then(|| RecordingManager::new(PathBuf::from(RECORDINGS_DIR), config.max_audio_files))
+        .then(|| RecordingManager::new(recordings_dir.to_path_buf(), config.max_audio_files))
 }
 
 /// Handle the translation toggle from the GUI.

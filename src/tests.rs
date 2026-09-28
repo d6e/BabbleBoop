@@ -7,6 +7,7 @@ pub(crate) mod regression_tests {
     use crate::config::{
         AudioConfig, Config, OpenAiConfig, OscConfig, RateLimitConfig, ThemeMode, TranslationConfig,
     };
+    use crate::data_dir::DataDir;
     use crate::price_estimator::{PriceEstimator, TokenCounts};
     use crate::rate_limiter::RateLimiter;
 
@@ -15,6 +16,20 @@ pub(crate) mod regression_tests {
         input: 1000,
         output: 500,
     };
+
+    /// A data folder that does not exist, for tests that save no cost and
+    /// no recordings. A save there fails instead of writing to the working
+    /// directory.
+    fn missing_data_dir() -> DataDir {
+        DataDir::new(
+            std::env::temp_dir().join(format!("babble_boop_no_data_dir_{}", std::process::id())),
+        )
+    }
+
+    /// An estimator for the prices of these models.
+    fn price_estimator(model: &str, transcription_model: &str) -> PriceEstimator {
+        PriceEstimator::new(missing_data_dir().cost_file(), model, transcription_model)
+    }
 
     // ===========================================================================
     // Regression test: Model pricing now covers common models
@@ -81,7 +96,7 @@ pub(crate) mod regression_tests {
             serde_json::to_value(ChatGptRequest::translation(model, "Japanese", "Hello")).unwrap();
         (
             shown_as.to_string(),
-            PriceEstimator::new(model, "gpt-transcribe").estimate_translation_cost(TOKENS),
+            price_estimator(model, "gpt-transcribe").estimate_translation_cost(TOKENS),
             rename(PriceEstimator::unknown_pricing(model, "gpt-transcribe")),
             rename(crate::models::shutdown_warnings(model, "gpt-transcribe")),
             body["messages"][0]["role"].as_str().unwrap().to_string(),
@@ -103,7 +118,7 @@ pub(crate) mod regression_tests {
         };
         (
             shown_as.to_string(),
-            PriceEstimator::new("gpt-6-luna", model)
+            price_estimator("gpt-6-luna", model)
                 .estimate_transcription_cost(std::time::Duration::from_secs(60)),
             rename(PriceEstimator::unknown_pricing("gpt-6-luna", model)),
             rename(crate::models::shutdown_warnings("gpt-6-luna", model)),
@@ -213,8 +228,8 @@ pub(crate) mod regression_tests {
         use std::time::Duration;
 
         let defaults = Config::default().openai;
-        let unknown = PriceEstimator::new("unknown-model-xyz", "unknown-transcriber");
-        let default = PriceEstimator::new(&defaults.model, &defaults.transcription_model);
+        let unknown = price_estimator("unknown-model-xyz", "unknown-transcriber");
+        let default = price_estimator(&defaults.model, &defaults.transcription_model);
         assert_eq!(
             unknown.estimate_translation_cost(TOKENS),
             default.estimate_translation_cost(TOKENS)
@@ -970,7 +985,7 @@ requests_per_minute = 50
     fn test_translation_cost_counts_reported_reasoning_tokens() {
         use crate::translation::ChatGptRequest;
 
-        let estimator = PriceEstimator::new("gpt-5.6-sol", "gpt-transcribe");
+        let estimator = price_estimator("gpt-5.6-sol", "gpt-transcribe");
         let request = ChatGptRequest::translation("gpt-5.6-sol", "French", "What time is it?");
         let text = "Quelle heure est-il ?";
         let reported = request
@@ -1057,7 +1072,7 @@ requests_per_minute = 50
             if cost_file.exists() {
                 std::fs::remove_file(&cost_file).unwrap();
             }
-            let price_estimator = PriceEstimator::with_cost_file(
+            let price_estimator = PriceEstimator::new(
                 cost_file.clone(),
                 &config.openai.model,
                 &config.openai.transcription_model,
@@ -1152,7 +1167,7 @@ requests_per_minute = 50
     /// The cost of a response that reports `SHORT_USAGE`.
     fn short_usage_cost() -> f64 {
         let config = Config::default();
-        PriceEstimator::new(&config.openai.model, &config.openai.transcription_model)
+        price_estimator(&config.openai.model, &config.openai.transcription_model)
             .estimate_translation_cost(TokenCounts {
                 input: 58,
                 output: 12,
@@ -1395,7 +1410,7 @@ requests_per_minute = 50
     /// The cost of transcribing one second of audio.
     fn one_second_transcription_cost() -> f64 {
         let config = Config::default();
-        PriceEstimator::new(&config.openai.model, &config.openai.transcription_model)
+        price_estimator(&config.openai.model, &config.openai.transcription_model)
             .estimate_transcription_cost(std::time::Duration::from_secs(1))
     }
 
@@ -1483,15 +1498,15 @@ requests_per_minute = 50
         let mut config = Config::default();
         config.openai.model = "gpt-4o-mini".to_string();
         config.openai.transcription_model = "whisper-1".to_string();
-        let mut services = ProcessingServices::new(&config, &test_logger());
+        let mut services = ProcessingServices::new(&config, &missing_data_dir(), &test_logger());
         services.price_estimator.total_cost = 1.25;
 
         config.openai.model = "gpt-4o".to_string();
         config.openai.transcription_model = "gpt-4o-mini-transcribe".to_string();
         services.apply_config(&config, &test_logger());
 
-        let expected = PriceEstimator::new("gpt-4o", "gpt-4o-mini-transcribe");
-        let old = PriceEstimator::new("gpt-4o-mini", "whisper-1");
+        let expected = price_estimator("gpt-4o", "gpt-4o-mini-transcribe");
+        let old = price_estimator("gpt-4o-mini", "whisper-1");
         let minute = Duration::from_secs(60);
         let estimator = &services.price_estimator;
         assert_ne!(
@@ -1512,6 +1527,66 @@ requests_per_minute = 50
         );
         // The running total stays in memory; it is not reloaded from disk.
         assert_eq!(estimator.total_cost, 1.25);
+    }
+
+    #[tokio::test]
+    async fn test_cost_and_recordings_are_saved_in_the_data_folder() {
+        use crate::processing_loop::ProcessingServices;
+        use std::fs;
+
+        let dir =
+            std::env::temp_dir().join(format!("babble_boop_data_folder_{}", std::process::id()));
+        if dir.exists() {
+            fs::remove_dir_all(&dir).unwrap();
+        }
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("total_cost.txt"), "1.5").unwrap();
+        let data_dir = DataDir::new(dir.clone());
+        let config = Config {
+            keep_audio_files: true,
+            ..Config::default()
+        };
+        let logger = test_logger();
+
+        let mut services = ProcessingServices::new(&config, &data_dir, &logger);
+        let loaded_cost = services.price_estimator.total_cost;
+        services.price_estimator.add_cost(0.5, &logger);
+        let first = services
+            .recording_manager
+            .as_ref()
+            .expect("keep_audio_files is on")
+            .save_recording(vec![0u8; 4], "first")
+            .await
+            .map_err(|e| e.to_string());
+        // Saved settings make a new recording manager
+        services.apply_config(&config, &logger);
+        let second = services
+            .recording_manager
+            .as_ref()
+            .expect("keep_audio_files is on")
+            .save_recording(vec![0u8; 4], "second")
+            .await
+            .map_err(|e| e.to_string());
+        let saved_cost = fs::read_to_string(dir.join("total_cost.txt")).ok();
+        let mut recordings: Vec<String> = fs::read_dir(dir.join("recordings"))
+            .map(|entries| {
+                entries
+                    .filter_map(|entry| entry.ok())
+                    .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                    .collect()
+            })
+            .unwrap_or_default();
+        recordings.sort();
+        // Clean up before asserting, so a failure does not leave files behind
+        fs::remove_dir_all(&dir).unwrap();
+
+        assert_eq!(loaded_cost, 1.5);
+        assert_eq!(saved_cost.as_deref(), Some("2"));
+        assert_eq!(first, Ok(()));
+        assert_eq!(second, Ok(()));
+        assert_eq!(recordings.len(), 2, "{:?}", recordings);
+        assert!(recordings[0].ends_with("_first.wav"), "{:?}", recordings);
+        assert!(recordings[1].ends_with("_second.wav"), "{:?}", recordings);
     }
 
     /// Logger whose entries nobody reads.
@@ -1536,12 +1611,13 @@ requests_per_minute = 50
         let mut config = Config::default();
         config.openai.model = "my-finetuned-model".to_string();
         let entries = entries_logged_by(|logger| {
-            ProcessingServices::new(&config, logger);
+            ProcessingServices::new(&config, &missing_data_dir(), logger);
         });
         assert_eq!(entries.len(), 1, "{:?}", entries);
         assert!(entries[0].message.contains("'my-finetuned-model'"));
 
-        let mut services = ProcessingServices::new(&Config::default(), &test_logger());
+        let mut services =
+            ProcessingServices::new(&Config::default(), &missing_data_dir(), &test_logger());
         config.openai.model = "gpt-4o".to_string();
         config.openai.transcription_model = "my-transcriber".to_string();
         let entries = entries_logged_by(|logger| services.apply_config(&config, logger));
@@ -1556,14 +1632,15 @@ requests_per_minute = 50
         let mut config = Config::default();
         config.openai.model = "gpt-3.5-turbo".to_string();
         let entries = entries_logged_by(|logger| {
-            ProcessingServices::new(&config, logger);
+            ProcessingServices::new(&config, &missing_data_dir(), logger);
         });
         assert_eq!(entries.len(), 1, "{:?}", entries);
         for text in ["'gpt-3.5-turbo'", "2026-10-23", "gpt-5.6-terra"] {
             assert!(entries[0].message.contains(text), "{:?}", entries[0]);
         }
 
-        let mut services = ProcessingServices::new(&Config::default(), &test_logger());
+        let mut services =
+            ProcessingServices::new(&Config::default(), &missing_data_dir(), &test_logger());
         config.openai.model = Config::default().openai.model;
         config.openai.transcription_model = "whisper-1".to_string();
         let entries = entries_logged_by(|logger| services.apply_config(&config, logger));
@@ -1583,7 +1660,7 @@ requests_per_minute = 50
                 config.openai.model = model.to_string();
                 config.openai.transcription_model = transcription_model.to_string();
                 let entries = entries_logged_by(|logger| {
-                    ProcessingServices::new(&config, logger);
+                    ProcessingServices::new(&config, &missing_data_dir(), logger);
                 });
                 assert!(entries.is_empty(), "{:?}", entries);
             }
@@ -1596,7 +1673,8 @@ requests_per_minute = 50
 
         let config = Config::default();
         let entries = entries_logged_by(|logger| {
-            ProcessingServices::new(&config, logger).apply_config(&config, logger);
+            ProcessingServices::new(&config, &missing_data_dir(), logger)
+                .apply_config(&config, logger);
         });
         assert!(entries.is_empty(), "{:?}", entries);
     }
@@ -1609,7 +1687,7 @@ requests_per_minute = 50
 
         let mut config = Config::default();
         config.rate_limit.requests_per_minute = 2;
-        let mut services = ProcessingServices::new(&config, &test_logger());
+        let mut services = ProcessingServices::new(&config, &missing_data_dir(), &test_logger());
         services.rate_limiter.wait().await;
         services.rate_limiter.wait().await;
 
@@ -1974,7 +2052,7 @@ requests_per_minute = 50
                 &mut Chatbox::new(socket),
                 &mut RateLimiter::new(50),
                 &typing_indicator,
-                &mut PriceEstimator::new(&config.openai.model, &config.openai.transcription_model),
+                &mut price_estimator(&config.openai.model, &config.openai.transcription_model),
                 None,
                 &app_state,
             ),
@@ -2496,15 +2574,24 @@ mod gui_tests {
     use crate::config::Config;
     use crate::gui::BabbleBoopApp;
     use eframe::egui;
+    use std::path::PathBuf;
     use std::sync::Arc;
     use std::time::{Duration, Instant};
+
+    /// A config file in a folder that does not exist, so a click on Save
+    /// fails instead of writing a file.
+    fn unused_config_file() -> PathBuf {
+        std::env::temp_dir()
+            .join(format!("babble_boop_no_config_dir_{}", std::process::id()))
+            .join("config.toml")
+    }
 
     fn test_app_with_state() -> (BabbleBoopApp, Arc<AppState>) {
         let (cmd_tx, _cmd_rx) = tokio::sync::mpsc::channel(10);
         let (log_tx, log_rx) = tokio::sync::mpsc::channel(100);
         let app_state = Arc::new(AppState::new(Config::default(), cmd_tx, log_tx));
         (
-            BabbleBoopApp::new(Arc::clone(&app_state), log_rx),
+            BabbleBoopApp::new(Arc::clone(&app_state), log_rx, unused_config_file()),
             app_state,
         )
     }
@@ -2665,7 +2752,7 @@ mod gui_tests {
         };
         let app_state = Arc::new(AppState::new(config, cmd_tx, log_tx));
         (
-            BabbleBoopApp::new(Arc::clone(&app_state), log_rx),
+            BabbleBoopApp::new(Arc::clone(&app_state), log_rx, unused_config_file()),
             app_state,
         )
     }
@@ -3107,7 +3194,7 @@ mod gui_tests {
             ..Config::default()
         };
         let app_state = Arc::new(AppState::new(config.clone(), cmd_tx, log_tx));
-        let mut app = BabbleBoopApp::new(app_state, log_rx);
+        let mut app = BabbleBoopApp::new(app_state, log_rx, unused_config_file());
         // Tall enough that the settings below the log are not scrolled away
         let tall = |events| egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(
@@ -3205,12 +3292,12 @@ mod gui_tests {
         let loaded = Config::from_toml(&toml::to_string(&file).unwrap()).unwrap();
         assert_eq!(
             loaded.config.openai.api_key, "",
-            "a click on Save must not write config.toml"
+            "a click on Save must fail the validation"
         );
         let (cmd_tx, _cmd_rx) = tokio::sync::mpsc::channel(10);
         let (log_tx, log_rx) = tokio::sync::mpsc::channel(100);
         let app_state = Arc::new(AppState::new(loaded.config, cmd_tx, log_tx));
-        let mut app = BabbleBoopApp::new(app_state, log_rx);
+        let mut app = BabbleBoopApp::new(app_state, log_rx, unused_config_file());
         app.note_replaced_values(&loaded.warnings);
         app
     }
@@ -3286,5 +3373,54 @@ mod gui_tests {
             "{:?}",
             text
         );
+    }
+
+    // ===========================================================================
+    // Test: Save writes the config file that the settings came from
+    // ===========================================================================
+
+    #[test]
+    fn test_save_writes_the_config_file_that_was_loaded() {
+        use std::fs;
+
+        let dir = std::env::temp_dir().join(format!("babble_boop_gui_save_{}", std::process::id()));
+        if dir.exists() {
+            fs::remove_dir_all(&dir).unwrap();
+        }
+        fs::create_dir_all(&dir).unwrap();
+        let config_file = dir.join("config.toml");
+        let mut file_config = Config::default();
+        file_config.openai.api_key = "sk-test".to_string();
+        file_config.save(&config_file).unwrap();
+        let loaded = Config::load(&config_file).unwrap();
+        let (cmd_tx, _cmd_rx) = tokio::sync::mpsc::channel(10);
+        let (log_tx, log_rx) = tokio::sync::mpsc::channel(100);
+        let app_state = Arc::new(AppState::new(loaded.config, cmd_tx, log_tx));
+        let mut app = BabbleBoopApp::new(app_state, log_rx, config_file.clone());
+        app.config_draft.translation.target_language = "German".to_string();
+        let ctx = egui::Context::default();
+        let output = run_until_idle(&ctx, &mut app);
+
+        click(&ctx, &mut app, text_center(&output, "Save Settings"));
+
+        let text = painted_text(&run_until_idle(&ctx, &mut app));
+        let saved = Config::load(&config_file).map_err(|e| e.to_string());
+        let files: Vec<_> = fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.file_name())
+            .collect();
+        // Clean up before asserting, so a failure does not leave files behind
+        fs::remove_dir_all(&dir).unwrap();
+
+        assert!(
+            text.contains(&"Settings saved successfully".to_string()),
+            "{:?}",
+            text
+        );
+        let saved = saved.unwrap().config;
+        assert_eq!(saved.translation.target_language, "German");
+        assert_eq!(saved.openai.api_key, "sk-test");
+        assert_eq!(files, ["config.toml"]);
     }
 }
