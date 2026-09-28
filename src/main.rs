@@ -64,12 +64,14 @@ fn main() {
             Ok(rt) => rt,
             Err(e) => {
                 logger.error(format!("Processing stopped: cannot start tokio: {}", e));
+                app_state_clone.mark_processing_stopped();
                 return;
             }
         };
         run_logging_failure(&logger, "Processing", || {
-            rt.block_on(run_processing_loop(app_state_clone, cmd_rx))
+            rt.block_on(run_processing_loop(Arc::clone(&app_state_clone), cmd_rx))
         });
+        app_state_clone.mark_processing_stopped();
         // Dropping the runtime waits for blocking tasks without a limit, and
         // a cancelled request can leave a DNS lookup running on one.
         rt.shutdown_timeout(Duration::from_secs(1));

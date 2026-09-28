@@ -1152,4 +1152,30 @@ mod gui_tests {
         );
         let _ = ctx.run(with_events(vec![button(false)]), |ctx| app.ui(ctx));
     }
+
+    // ===========================================================================
+    // Test: The GUI shows that processing stopped
+    // ===========================================================================
+
+    #[test]
+    fn test_stopped_processing_is_shown_instead_of_enabled() {
+        let (mut app, app_state) = test_app_with_state();
+        let ctx = egui::Context::default();
+        app_state.gui_waker.attach(ctx.clone());
+        let output = run_until_idle(&ctx, &mut app);
+        assert!(painted_text(&output).contains(&"Enabled".to_string()));
+        assert!(!ctx.has_requested_repaint());
+
+        app_state.mark_processing_stopped();
+        assert!(ctx.has_requested_repaint());
+        let output = ctx.run(raw_input(), |ctx| app.ui(ctx));
+
+        let text = painted_text(&output);
+        assert!(
+            text.contains(&"Processing stopped".to_string()),
+            "{:?}",
+            text
+        );
+        assert!(!text.contains(&"Enabled".to_string()), "{:?}", text);
+    }
 }

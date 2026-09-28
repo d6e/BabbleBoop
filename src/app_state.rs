@@ -231,6 +231,8 @@ pub struct AppState {
     pub noise_gate_hold_remaining: Arc<AtomicU32>,
     /// Current recording duration in seconds (f32 stored as bits)
     pub recording_duration: Arc<AtomicU32>,
+    /// Set when the processing thread ends
+    processing_stopped: AtomicBool,
 }
 
 #[derive(Debug)]
@@ -270,6 +272,7 @@ impl AppState {
             noise_gate_active: Arc::new(AtomicBool::new(false)),
             noise_gate_hold_remaining: Arc::new(AtomicU32::new(0)),
             recording_duration: Arc::new(AtomicU32::new(0)),
+            processing_stopped: AtomicBool::new(false),
         }
     }
 
@@ -280,6 +283,17 @@ impl AppState {
 
     pub fn get_total_cost(&self) -> f64 {
         f64::from_bits(self.total_cost.load(Ordering::Relaxed))
+    }
+
+    /// Record that the processing thread ended, so the GUI stops showing
+    /// translation as enabled.
+    pub fn mark_processing_stopped(&self) {
+        self.processing_stopped.store(true, Ordering::Relaxed);
+        self.gui_waker.wake();
+    }
+
+    pub fn is_processing_stopped(&self) -> bool {
+        self.processing_stopped.load(Ordering::Relaxed)
     }
 
     pub fn request_shutdown(&self) {

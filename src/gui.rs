@@ -530,12 +530,17 @@ impl BabbleBoopApp {
                 }
 
                 // Status text
-                let (status_text, status_color) = if enabled {
-                    ("Enabled", colors.enabled_text)
+                if self.app_state.is_processing_stopped() {
+                    ui.label(egui::RichText::new("Processing stopped").color(colors.error))
+                        .on_hover_text("Translation does not work until you restart BabbleBoop. The activity log shows the cause.");
                 } else {
-                    ("Disabled", colors.disabled_text)
-                };
-                ui.label(egui::RichText::new(status_text).color(status_color));
+                    let (status_text, status_color) = if enabled {
+                        ("Enabled", colors.enabled_text)
+                    } else {
+                        ("Disabled", colors.disabled_text)
+                    };
+                    ui.label(egui::RichText::new(status_text).color(status_color));
+                }
 
                 // Cost display on the right
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
