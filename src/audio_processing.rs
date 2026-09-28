@@ -1,5 +1,5 @@
 use crate::app_state::AppState;
-use crate::chatbox::send_to_chatbox;
+use crate::chatbox::Chatbox;
 use crate::config::Config;
 use crate::price_estimator::PriceEstimator;
 use crate::rate_limiter::RateLimiter;
@@ -12,7 +12,6 @@ use crate::typing_indicator::TypingIndicator;
 use std::error::Error;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::net::UdpSocket;
 
 #[allow(clippy::too_many_arguments)]
 pub async fn process_audio(
@@ -20,7 +19,7 @@ pub async fn process_audio(
     audio_data: Vec<u8>,
     extent: Extent,
     config: &Config,
-    socket: &UdpSocket,
+    chatbox: &mut Chatbox,
     rate_limiter: &mut RateLimiter,
     typing_indicator: &TypingIndicator,
     price_estimator: &mut PriceEstimator,
@@ -69,7 +68,7 @@ pub async fn process_audio(
         translation,
         &transcription,
         config,
-        socket,
+        chatbox,
         typing_indicator,
         price_estimator,
         app_state,
@@ -115,7 +114,7 @@ pub(crate) async fn deliver_translation(
     translation: Translation,
     transcription: &str,
     config: &Config,
-    socket: &UdpSocket,
+    chatbox: &mut Chatbox,
     typing_indicator: &TypingIndicator,
     price_estimator: &mut PriceEstimator,
     app_state: &AppState,
@@ -138,7 +137,7 @@ pub(crate) async fn deliver_translation(
     if config.translation.include_original_message {
         final_response = final_response + "\n" + transcription;
     }
-    send_to_chatbox(&final_response, config, socket).await?;
+    chatbox.send(&final_response, config).await?;
 
     typing_indicator.stop_typing().await;
 

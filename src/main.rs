@@ -3,6 +3,7 @@ use babble_boop::app_state::{run_logging_failure, AppCommand, AppState, LogEntry
 use babble_boop::audio_playback::AudioOutput;
 use babble_boop::audio_processing::process_audio;
 use babble_boop::audio_recording::{start_audio_recording, SharedAudioState};
+use babble_boop::chatbox::Chatbox;
 use babble_boop::config::{Config, CONFIG_PATH};
 use babble_boop::gui::{run_error_dialog, run_gui};
 use babble_boop::processing_loop::{
@@ -234,6 +235,8 @@ async fn run_processing_loop(
         app_state.logger.clone(),
     );
 
+    let mut chatbox = Chatbox::new(Arc::clone(&socket));
+
     let mut test_recording = TestRecording::new(
         &app_state,
         audio_stream_info.channels,
@@ -328,7 +331,7 @@ async fn run_processing_loop(
                     audio_data,
                     extent,
                     &current_config,
-                    &socket,
+                    &mut chatbox,
                     &mut services.rate_limiter,
                     &typing_indicator,
                     &mut services.price_estimator,
