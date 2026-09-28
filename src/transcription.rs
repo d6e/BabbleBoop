@@ -35,16 +35,18 @@ pub async fn transcribe_audio(
         return Err(format!("API request failed: {}", error_text).into());
     }
 
+    parse_transcription(&res.text().await?)
+}
+
+/// Reads the text of a transcription response body. The text can be empty
+/// or blank; `audio_processing::accept_transcription` decides what to do
+/// with it, after it adds the cost.
+pub(crate) fn parse_transcription(body: &str) -> Result<String, Box<dyn Error>> {
     #[derive(Deserialize)]
     struct TranscriptionResponse {
         text: String,
     }
 
-    let transcription: TranscriptionResponse = res.json().await?;
-
-    if transcription.text.is_empty() {
-        return Err("Received empty transcription from API".into());
-    }
-
+    let transcription: TranscriptionResponse = serde_json::from_str(body)?;
     Ok(transcription.text)
 }

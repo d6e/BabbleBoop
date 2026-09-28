@@ -40,17 +40,18 @@ pub async fn process_audio(
         return Ok(());
     }
 
-    let transcription =
-        transcribe_audio(client, audio_data.clone(), &config.openai, rate_limiter).await?;
-    app_state
-        .logger
-        .info(format!("Transcription: {}", transcription));
-    // The transcription is paid for even when a later step fails.
-    price_estimator.add_cost(
-        price_estimator.estimate_transcription_cost(audio_duration),
-        &app_state.logger,
-    );
-    app_state.set_total_cost(price_estimator.total_cost);
+    let text = transcribe_audio(client, audio_data.clone(), &config.openai, rate_limiter).await?;
+    let Some(transcription) = accept_transcription(
+        text,
+        audio_duration,
+        typing_indicator,
+        price_estimator,
+        app_state,
+    )
+    .await
+    else {
+        return Ok(());
+    };
 
     // Save the audio recording if debug mode is enabled
     if let Some(manager) = recording_manager {
@@ -74,6 +75,36 @@ pub async fn process_audio(
         app_state,
     )
     .await
+}
+
+/// Add the cost of the transcription request to the total and return the
+/// text to translate. The cost is added before the later steps, so it
+/// stays in the total when one of them fails. The estimate depends only on
+/// the audio duration, so an empty or blank text costs as much as speech.
+/// Such a text goes to the activity log, turns the typing indicator off,
+/// and returns `None`.
+pub(crate) async fn accept_transcription(
+    text: String,
+    audio_duration: Duration,
+    typing_indicator: &TypingIndicator,
+    price_estimator: &mut PriceEstimator,
+    app_state: &AppState,
+) -> Option<String> {
+    price_estimator.add_cost(
+        price_estimator.estimate_transcription_cost(audio_duration),
+        &app_state.logger,
+    );
+    app_state.set_total_cost(price_estimator.total_cost);
+
+    if text.trim().is_empty() {
+        app_state
+            .logger
+            .error("The transcription is empty, so nothing was translated");
+        typing_indicator.stop_typing().await;
+        return None;
+    }
+    app_state.logger.info(format!("Transcription: {}", text));
+    Some(text)
 }
 
 /// Add the cost of the translation request to the total and send the

@@ -804,8 +804,8 @@ requests_per_minute = 50
         "total_tokens": 70
     }"#;
 
-    /// What happened when the processing loop received a Chat Completions
-    /// response.
+    /// What happened when the processing loop received a response of the
+    /// API.
     #[derive(Debug)]
     struct Delivery {
         /// Level and text of the activity log entries.
@@ -816,90 +816,129 @@ requests_per_minute = 50
         total_cost: f64,
     }
 
+    /// A chatbox on a local UDP socket, the activity log, and a total cost
+    /// that starts at zero, in a file of its own named after the test.
+    struct DeliveryFixture {
+        config: Config,
+        chatbox: tokio::net::UdpSocket,
+        socket: std::sync::Arc<tokio::net::UdpSocket>,
+        app_state: std::sync::Arc<crate::app_state::AppState>,
+        log_rx: tokio::sync::mpsc::Receiver<crate::app_state::LogEntry>,
+        typing_indicator: crate::typing_indicator::TypingIndicator,
+        price_estimator: PriceEstimator,
+        cost_file: std::path::PathBuf,
+    }
+
+    impl DeliveryFixture {
+        async fn new(test_name: &str) -> Self {
+            use crate::app_state::AppState;
+            use crate::typing_indicator::TypingIndicator;
+            use std::sync::{Arc, RwLock};
+            use tokio::net::UdpSocket;
+
+            let chatbox = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            let socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+            let mut config = Config::default();
+            config.osc.address = "127.0.0.1".to_string();
+            config.osc.output_port = chatbox.local_addr().unwrap().port();
+            config.osc.display_time = 0;
+            let (cmd_tx, _cmd_rx) = tokio::sync::mpsc::channel(10);
+            let (log_tx, log_rx) = tokio::sync::mpsc::channel(10);
+            let app_state = Arc::new(AppState::new(config.clone(), cmd_tx, log_tx));
+            let typing_indicator = TypingIndicator::new(
+                socket.clone(),
+                Arc::new(RwLock::new(config.clone())),
+                app_state.logger.clone(),
+            );
+            let cost_file = std::env::temp_dir().join(format!(
+                "babble_boop_{}_{}_total_cost.txt",
+                test_name,
+                std::process::id()
+            ));
+            if cost_file.exists() {
+                std::fs::remove_file(&cost_file).unwrap();
+            }
+            let price_estimator = PriceEstimator::with_cost_file(
+                cost_file.clone(),
+                &config.openai.model,
+                &config.openai.transcription_model,
+            );
+            DeliveryFixture {
+                config,
+                chatbox,
+                socket,
+                app_state,
+                log_rx,
+                typing_indicator,
+                price_estimator,
+                cost_file,
+            }
+        }
+
+        /// Log an error as the processing loop logs an error of
+        /// `process_audio`, then collect what reached the activity log and
+        /// the chatbox.
+        async fn finish(mut self, result: Result<(), Box<dyn std::error::Error>>) -> Delivery {
+            use std::time::Duration;
+
+            if let Err(e) = result {
+                self.app_state.logger.error_api(format!("Error: {}", e));
+            }
+            if self.cost_file.exists() {
+                std::fs::remove_file(&self.cost_file).unwrap();
+            }
+            assert_eq!(
+                self.app_state.get_total_cost(),
+                self.price_estimator.total_cost
+            );
+
+            let mut chatbox_messages = Vec::new();
+            let mut buf = [0u8; 1024];
+            while let Ok(received) =
+                tokio::time::timeout(Duration::from_millis(200), self.chatbox.recv_from(&mut buf))
+                    .await
+            {
+                let (len, _) = received.unwrap();
+                match rosc::decoder::decode_udp(&buf[..len]).unwrap().1 {
+                    rosc::OscPacket::Message(message) => chatbox_messages.push(message),
+                    bundle => panic!("unexpected OSC bundle {:?}", bundle),
+                }
+            }
+            Delivery {
+                log: std::iter::from_fn(|| self.log_rx.try_recv().ok())
+                    .map(|entry| (entry.level, entry.message))
+                    .collect(),
+                chatbox: chatbox_messages,
+                total_cost: self.price_estimator.total_cost,
+            }
+        }
+    }
+
     /// Give the Chat Completions response `body` to `parse_response` and
-    /// `deliver_translation`, with a local UDP socket as the chatbox. An
-    /// error is logged as the processing loop logs an error of
-    /// `process_audio`. The total cost starts at zero, in a file of its
-    /// own named after `test_name`.
+    /// `deliver_translation` in a `DeliveryFixture`.
     async fn deliver_response(test_name: &str, body: &str) -> Delivery {
-        use crate::app_state::AppState;
         use crate::audio_processing::deliver_translation;
         use crate::translation::ChatGptRequest;
-        use crate::typing_indicator::TypingIndicator;
-        use std::sync::{Arc, RwLock};
-        use std::time::Duration;
-        use tokio::net::UdpSocket;
 
-        let chatbox = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-        let socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
-        let mut config = Config::default();
-        config.osc.address = "127.0.0.1".to_string();
-        config.osc.output_port = chatbox.local_addr().unwrap().port();
-        config.osc.display_time = 0;
-        let (cmd_tx, _cmd_rx) = tokio::sync::mpsc::channel(10);
-        let (log_tx, mut log_rx) = tokio::sync::mpsc::channel(10);
-        let app_state = Arc::new(AppState::new(config.clone(), cmd_tx, log_tx));
-        let typing_indicator = TypingIndicator::new(
-            socket.clone(),
-            Arc::new(RwLock::new(config.clone())),
-            app_state.logger.clone(),
-        );
-        let cost_file = std::env::temp_dir().join(format!(
-            "babble_boop_{}_{}_total_cost.txt",
-            test_name,
-            std::process::id()
-        ));
-        if cost_file.exists() {
-            std::fs::remove_file(&cost_file).unwrap();
-        }
-        let mut price_estimator = PriceEstimator::with_cost_file(
-            cost_file.clone(),
-            &config.openai.model,
-            &config.openai.transcription_model,
-        );
-        let request = ChatGptRequest::translation(&config.openai.model, "French", "Hello");
+        let mut fixture = DeliveryFixture::new(test_name).await;
+        let request = ChatGptRequest::translation(&fixture.config.openai.model, "French", "Hello");
 
         let result = match request.parse_response(body) {
             Ok(translation) => {
                 deliver_translation(
                     translation,
                     "Hello",
-                    &config,
-                    &socket,
-                    &typing_indicator,
-                    &mut price_estimator,
-                    &app_state,
+                    &fixture.config,
+                    &fixture.socket,
+                    &fixture.typing_indicator,
+                    &mut fixture.price_estimator,
+                    &fixture.app_state,
                 )
                 .await
             }
             Err(e) => Err(e),
         };
-        if let Err(e) = result {
-            app_state.logger.error_api(format!("Error: {}", e));
-        }
-        if cost_file.exists() {
-            std::fs::remove_file(&cost_file).unwrap();
-        }
-        assert_eq!(app_state.get_total_cost(), price_estimator.total_cost);
-
-        let mut chatbox_messages = Vec::new();
-        let mut buf = [0u8; 1024];
-        while let Ok(received) =
-            tokio::time::timeout(Duration::from_millis(200), chatbox.recv_from(&mut buf)).await
-        {
-            let (len, _) = received.unwrap();
-            match rosc::decoder::decode_udp(&buf[..len]).unwrap().1 {
-                rosc::OscPacket::Message(message) => chatbox_messages.push(message),
-                bundle => panic!("unexpected OSC bundle {:?}", bundle),
-            }
-        }
-        Delivery {
-            log: std::iter::from_fn(|| log_rx.try_recv().ok())
-                .map(|entry| (entry.level, entry.message))
-                .collect(),
-            chatbox: chatbox_messages,
-            total_cost: price_estimator.total_cost,
-        }
+        fixture.finish(result).await
     }
 
     /// The only OSC message that a response without a translation sends:
@@ -1074,6 +1113,136 @@ requests_per_minute = 50
             "The translation reached the output token limit and was cut off, \
              so it was not sent (finish_reason: length)",
         );
+    }
+
+    // ===========================================================================
+    // Test: A transcription response is costed
+    // ===========================================================================
+
+    /// The body of a transcription response with `text_json` as its text.
+    fn transcription_body(text_json: &str) -> String {
+        format!(
+            r#"{{
+                "text": {},
+                "usage": {{
+                    "type": "tokens",
+                    "input_tokens": 14,
+                    "input_token_details": {{"text_tokens": 0, "audio_tokens": 14}},
+                    "output_tokens": 2,
+                    "total_tokens": 16
+                }}
+            }}"#,
+            text_json
+        )
+    }
+
+    /// Give the transcription response `body` for one second of audio to
+    /// `parse_transcription` and `accept_transcription` in a
+    /// `DeliveryFixture`. Returns the text to translate, if any, and what
+    /// happened.
+    async fn accept_transcription_response(
+        test_name: &str,
+        body: &str,
+    ) -> (Option<String>, Delivery) {
+        use crate::audio_processing::accept_transcription;
+        use crate::transcription::parse_transcription;
+        use std::time::Duration;
+
+        let mut fixture = DeliveryFixture::new(test_name).await;
+        let (text, result) = match parse_transcription(body) {
+            Ok(text) => (
+                accept_transcription(
+                    text,
+                    Duration::from_secs(1),
+                    &fixture.typing_indicator,
+                    &mut fixture.price_estimator,
+                    &fixture.app_state,
+                )
+                .await,
+                Ok(()),
+            ),
+            Err(e) => (None, Err(e)),
+        };
+        (text, fixture.finish(result).await)
+    }
+
+    /// The cost of transcribing one second of audio.
+    fn one_second_transcription_cost() -> f64 {
+        let config = Config::default();
+        PriceEstimator::new(&config.openai.model, &config.openai.transcription_model)
+            .estimate_transcription_cost(std::time::Duration::from_secs(1))
+    }
+
+    #[tokio::test]
+    async fn test_transcription_is_costed_and_translated() {
+        use crate::app_state::LogLevel;
+
+        let (text, delivery) =
+            accept_transcription_response("transcribed", &transcription_body(r#""Hello""#)).await;
+
+        assert_eq!(text, Some("Hello".to_string()));
+        assert_eq!(
+            delivery.log,
+            [(LogLevel::Info, "Transcription: Hello".to_string())]
+        );
+        assert!(delivery.chatbox.is_empty(), "{:?}", delivery);
+        assert_eq!(delivery.total_cost, one_second_transcription_cost());
+    }
+
+    /// A response with an empty or blank text costs as much as any other
+    /// response for the same audio, but there is nothing to translate.
+    #[tokio::test]
+    async fn test_empty_transcription_is_costed_and_not_translated() {
+        use crate::app_state::LogLevel;
+
+        for (name, text_json) in [
+            ("transcription_empty", r#""""#),
+            ("transcription_blank", r#"" \n ""#),
+        ] {
+            let (text, delivery) =
+                accept_transcription_response(name, &transcription_body(text_json)).await;
+
+            assert_eq!(text, None, "{}", name);
+            assert_eq!(
+                delivery.log,
+                [(
+                    LogLevel::Error,
+                    "The transcription is empty, so nothing was translated".to_string()
+                )],
+                "{}",
+                name
+            );
+            assert_eq!(delivery.chatbox, [typing_off()], "{}", name);
+            assert!(one_second_transcription_cost() > 0.0);
+            assert_eq!(
+                delivery.total_cost,
+                one_second_transcription_cost(),
+                "{}",
+                name
+            );
+        }
+    }
+
+    /// A body without a text is an error of `process_audio`, and there is
+    /// no transcription to cost.
+    #[tokio::test]
+    async fn test_transcription_body_without_text_is_an_error() {
+        use crate::app_state::LogLevel;
+
+        let (text, delivery) =
+            accept_transcription_response("transcription_null", &transcription_body("null")).await;
+
+        assert_eq!(text, None);
+        assert!(
+            matches!(
+                delivery.log.as_slice(),
+                [(LogLevel::Error, message)] if message.starts_with("Error: ")
+            ),
+            "{:?}",
+            delivery
+        );
+        assert!(delivery.chatbox.is_empty(), "{:?}", delivery);
+        assert_eq!(delivery.total_cost, 0.0);
     }
 
     // ===========================================================================
