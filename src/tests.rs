@@ -937,9 +937,13 @@ requests_per_minute = 50
         };
         let wav = encode_for_upload(audio).await.unwrap();
 
-        let reader = hound::WavReader::new(std::io::Cursor::new(wav)).unwrap();
-        let seconds = reader.duration() as f32 / reader.spec().sample_rate as f32;
-        assert!((seconds - 0.5).abs() < 1e-3, "duration {}", seconds);
+        // The minimum duration check reads the duration from the WAV
+        let duration = crate::audio_processing::calculate_audio_duration(&wav).unwrap();
+        assert!(
+            (duration.as_secs_f32() - 0.5).abs() < 1e-3,
+            "duration {:?}",
+            duration
+        );
     }
 
     // ===========================================================================
