@@ -5,7 +5,7 @@ use babble_boop::audio_processing::process_audio;
 use babble_boop::audio_recording::start_audio_recording;
 use babble_boop::config::{Config, CONFIG_PATH};
 use babble_boop::gui::{run_error_dialog, run_gui};
-use babble_boop::processing_loop::ProcessingServices;
+use babble_boop::processing_loop::{apply_enabled, ProcessingServices};
 use babble_boop::types::AudioEvent;
 use babble_boop::typing_indicator::TypingIndicator;
 
@@ -202,9 +202,7 @@ async fn run_processing_loop(
             cmd = cmd_rx.recv() => {
                 match cmd {
                     Some(AppCommand::SetEnabled(enabled)) => {
-                        app_state.logger.info(
-                            if enabled { "Translation enabled" } else { "Translation disabled" }
-                        );
+                        apply_enabled(enabled, &typing_indicator, &app_state.logger).await;
                     }
                     Some(AppCommand::UpdateConfig(new_config)) => {
                         app_state.logger.info("Config updated");
@@ -294,18 +292,9 @@ async fn run_processing_loop(
                     }
                 }
 
-                // Check if enabled
+                // Ignore speech while translation is off. SetEnabled(false)
+                // turns off a typing indicator that is still on.
                 if !app_state.enabled.load(Ordering::Relaxed) {
-                    // Still handle typing indicator but skip processing
-                    match &event {
-                        AudioEvent::StartRecording | AudioEvent::StopRecording => {
-                            // Skip typing indicator when disabled
-                        }
-                        AudioEvent::AudioData(_) => {
-                            // Skip processing when disabled
-                            continue;
-                        }
-                    }
                     continue;
                 }
 

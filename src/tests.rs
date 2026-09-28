@@ -656,4 +656,43 @@ requests_per_minute = 50
     fn test_processing_normal_exit_is_not_logged() {
         assert!(logged_entries(|| Ok(())).is_empty());
     }
+
+    // ===========================================================================
+    // Test: Disabling translation clears the typing indicator
+    // ===========================================================================
+
+    #[tokio::test]
+    async fn test_disabling_translation_turns_typing_indicator_off() {
+        use crate::app_state::Logger;
+        use crate::processing_loop::apply_enabled;
+        use crate::typing_indicator::TypingIndicator;
+        use rosc::{OscMessage, OscPacket, OscType};
+        use std::sync::{Arc, RwLock};
+        use std::time::Duration;
+        use tokio::net::UdpSocket;
+
+        let receiver = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let mut config = Config::default();
+        config.osc.address = "127.0.0.1".to_string();
+        config.osc.output_port = receiver.local_addr().unwrap().port();
+        let indicator = TypingIndicator::new(socket, Arc::new(RwLock::new(config)));
+        let (log_tx, _log_rx) = tokio::sync::mpsc::channel(10);
+
+        apply_enabled(false, &indicator, &Logger::new(log_tx)).await;
+
+        let mut buf = [0u8; 256];
+        let (len, _) = tokio::time::timeout(Duration::from_secs(1), receiver.recv_from(&mut buf))
+            .await
+            .expect("no typing indicator message was sent")
+            .unwrap();
+        let (_, packet) = rosc::decoder::decode_udp(&buf[..len]).unwrap();
+        assert_eq!(
+            packet,
+            OscPacket::Message(OscMessage {
+                addr: "/chatbox/typing".to_string(),
+                args: vec![OscType::Bool(false)],
+            })
+        );
+    }
 }

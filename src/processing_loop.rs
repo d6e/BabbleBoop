@@ -1,10 +1,12 @@
 //! Parts of the processing loop in `main.rs` that can be tested without an
 //! audio device.
 
+use crate::app_state::Logger;
 use crate::config::Config;
 use crate::price_estimator::PriceEstimator;
 use crate::rate_limiter::RateLimiter;
 use crate::recording_manager::RecordingManager;
+use crate::typing_indicator::TypingIndicator;
 use std::path::PathBuf;
 
 /// Directory for saved recordings when `keep_audio_files` is on.
@@ -44,4 +46,20 @@ fn recording_manager(config: &Config) -> Option<RecordingManager> {
     config
         .keep_audio_files
         .then(|| RecordingManager::new(PathBuf::from(RECORDINGS_DIR), config.max_audio_files))
+}
+
+/// Handle the translation toggle from the GUI.
+///
+/// Disabling turns the typing indicator off. While translation is off the
+/// loop ignores audio events, so the StopRecording of an utterance that
+/// started before would not turn it off. The GUI stores `enabled` before it
+/// sends this command, so no StartRecording handled after this can turn the
+/// indicator on again.
+pub async fn apply_enabled(enabled: bool, typing_indicator: &TypingIndicator, logger: &Logger) {
+    if enabled {
+        logger.info("Translation enabled");
+    } else {
+        typing_indicator.stop_typing().await;
+        logger.info("Translation disabled");
+    }
 }
