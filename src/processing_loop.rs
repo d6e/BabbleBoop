@@ -246,9 +246,9 @@ pub fn log_audio_event(event: &AudioEvent, logger: &Logger) {
     }
 }
 
-/// Encode a recording for upload on a blocking thread, so that a long
-/// recording does not hold a runtime worker and shutdown does not wait for
-/// it.
+/// Encode a recording for upload on a blocking thread. The processing loop
+/// runs in `block_on` on the processing thread, so encoding in the loop
+/// would stop the loop, and its check for shutdown, until the encoding ends.
 pub async fn encode_for_upload(audio: CapturedAudio) -> Result<Vec<u8>, String> {
     match tokio::task::spawn_blocking(move || encode_upload_wav(&audio)).await {
         Ok(Ok(wav)) => Ok(wav),

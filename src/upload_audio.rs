@@ -37,8 +37,9 @@ pub fn encode_upload_wav(audio: &CapturedAudio) -> Result<Vec<u8>, hound::Error>
     Ok(wav_buffer)
 }
 
-/// Convert to 16 bit, clipping values outside [-1, 1] instead of letting
-/// them wrap around.
+/// Convert to 16 bit. Values outside [-1, 1] are clamped, so the result is
+/// in [-i16::MAX, i16::MAX]. Without the clamp, `as i16` saturates and -2.0
+/// gives i16::MIN (see "Numeric cast" in the Rust Reference).
 fn to_i16(sample: f32) -> i16 {
     (sample.clamp(-1.0, 1.0) * i16::MAX as f32).round() as i16
 }
@@ -167,7 +168,7 @@ mod tests {
     }
 
     #[test]
-    fn test_samples_outside_the_range_clip_instead_of_wrapping() {
+    fn test_samples_outside_the_range_clamp_to_plus_or_minus_i16_max() {
         let (_, samples) = encode(vec![1.5, -2.0, 1.0, -1.0, 0.5], 1, UPLOAD_SAMPLE_RATE);
         assert_eq!(
             samples,

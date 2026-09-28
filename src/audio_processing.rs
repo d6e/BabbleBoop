@@ -87,8 +87,8 @@ pub async fn process_audio(
 /// minimum means no minimum. A minimum too large for `Duration`, such as
 /// `inf`, skips every whole recording. The minimum does not apply to the
 /// parts of a recording that reached the length limit: `process_audio`
-/// checks it only when `extent == Extent::Whole`, so those parts are sent
-/// whatever the minimum is.
+/// checks it only when `extent == Extent::Whole`, so the minimum never
+/// stops those parts.
 fn min_transcription_duration(seconds: f32) -> Duration {
     match Duration::try_from_secs_f32(seconds) {
         Ok(duration) => duration,

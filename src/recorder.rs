@@ -54,7 +54,8 @@ pub struct RecorderStatus {
     pub gate_open: bool,
     /// Seconds until the gate closes if the level stays low
     pub hold_remaining: f32,
-    /// Seconds since the recording started, 0 when not recording
+    /// Seconds since the recording started or since its last split, 0 when
+    /// not recording
     pub recording_duration: f32,
     /// Whether the recording reached the length limit. The minimum
     /// transcription duration then does not apply to its last part.

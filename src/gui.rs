@@ -972,8 +972,8 @@ impl BabbleBoopApp {
 
                 ui.label("Min Duration (s):").on_hover_text(format!(
                     "Recordings shorter than this are not transcribed (filters out noise). \
-                    A recording that reaches {} s is split into parts, and every part is \
-                    transcribed, whatever its length.",
+                    A recording that reaches {} s is split into parts. The minimum does not \
+                    apply to these parts.",
                     MAX_RECORDING.as_secs()
                 ));
                 ui.add(
