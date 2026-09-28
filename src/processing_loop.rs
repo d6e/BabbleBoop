@@ -176,11 +176,11 @@ pub async fn apply_enabled(enabled: bool, typing_indicator: &TypingIndicator, lo
 ///   and then reports the error (`src/host/coreaudio/macos/mod.rs` lines
 ///   465 to 468).
 /// - On ALSA, cpal reports an error and polls the device again
-///   (`src/host/alsa/mod.rs` lines 586 to 596), so an unplugged device
-///   gives errors and no data.
+///   (`src/host/alsa/mod.rs` lines 586 to 596), so while the error does
+///   not clear, cpal calls the error callback and not the data callback.
 ///
-/// If the input goes on after a stream error, the indicator is off until
-/// the next recording starts.
+/// If the input goes on after a stream error, the indicator is off for the
+/// rest of the recording, or until a part of it is processed.
 pub struct AudioEvents {
     /// `None` after every sender is gone
     rx: Option<mpsc::Receiver<AudioEvent>>,
