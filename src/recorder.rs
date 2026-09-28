@@ -34,10 +34,13 @@ pub struct RecorderSettings {
 pub enum RecorderEvent {
     /// The gate opened and a recording started.
     Started,
-    /// Silence ended the recording. Holds its samples, interleaved.
+    /// Silence ended the recording. Holds its samples since the last part,
+    /// interleaved. Holds no samples if none of them is above the gate
+    /// threshold.
     Ended(Vec<f32>),
     /// The recording reached the maximum length. Holds its samples so far;
-    /// the recording goes on with a new part.
+    /// the recording goes on with a new part. A part with no sample above
+    /// the gate threshold is not sent.
     LimitReached(Vec<f32>),
 }
 
@@ -100,6 +103,8 @@ pub struct Recorder {
     silent_frames: u32,
     recording_start: Option<Instant>,
     samples: Vec<f32>,
+    /// Whether `samples` holds a sample above the gate threshold
+    has_sound: bool,
     max_samples: usize,
 }
 
@@ -114,23 +119,41 @@ impl Recorder {
             silent_frames: 0,
             recording_start: None,
             samples: Vec::new(),
+            has_sound: false,
             max_samples: max_samples.max(1),
         }
     }
 
     /// Add samples to the recording, and send a part each time it reaches
-    /// the maximum length.
-    fn record(&mut self, mut data: &[f32], now: Instant, emit: &mut impl FnMut(RecorderEvent)) {
+    /// the maximum length. `loud` tells whether `data` holds a sample above
+    /// `threshold`.
+    fn record(
+        &mut self,
+        mut data: &[f32],
+        loud: bool,
+        threshold: f32,
+        now: Instant,
+        emit: &mut impl FnMut(RecorderEvent),
+    ) {
         while !data.is_empty() {
             let room = self.max_samples - self.samples.len();
             let (part, rest) = data.split_at(room.min(data.len()));
             self.samples.extend_from_slice(part);
+            // A split can leave all the loud samples of a buffer in one part
+            if loud && !self.has_sound {
+                self.has_sound = peak_level(part) > threshold;
+            }
             data = rest;
             if self.samples.len() == self.max_samples {
                 self.recording_start = Some(now);
-                let next = self.new_buffer();
-                let samples = std::mem::replace(&mut self.samples, next);
-                emit(RecorderEvent::LimitReached(samples));
+                if self.has_sound {
+                    self.has_sound = false;
+                    let next = self.new_buffer();
+                    let samples = std::mem::replace(&mut self.samples, next);
+                    emit(RecorderEvent::LimitReached(samples));
+                } else {
+                    self.samples.clear();
+                }
             }
         }
     }
@@ -150,14 +173,20 @@ impl Recorder {
         now: Instant,
         mut emit: impl FnMut(RecorderEvent),
     ) {
-        if self.gate.process(peak_level(data), settings, now) {
+        let level = peak_level(data);
+        let loud = level > settings.noise_gate_threshold;
+        let threshold = settings.noise_gate_threshold;
+        if self.gate.process(level, settings, now) {
             if !self.is_recording {
                 self.is_recording = true;
                 self.recording_start = Some(now);
-                self.samples = self.new_buffer();
+                // A recording that ended without sound keeps its buffer
+                if self.samples.capacity() == 0 {
+                    self.samples = self.new_buffer();
+                }
                 emit(RecorderEvent::Started);
             }
-            self.record(data, now, &mut emit);
+            self.record(data, loud, threshold, now, &mut emit);
             self.silent_frames = 0;
         } else if self.is_recording {
             self.silent_frames += 1;
@@ -165,10 +194,16 @@ impl Recorder {
                 self.is_recording = false;
                 self.silent_frames = 0;
                 self.recording_start = None;
-                emit(RecorderEvent::Ended(std::mem::take(&mut self.samples)));
+                if self.has_sound {
+                    self.has_sound = false;
+                    emit(RecorderEvent::Ended(std::mem::take(&mut self.samples)));
+                } else {
+                    self.samples.clear();
+                    emit(RecorderEvent::Ended(Vec::new()));
+                }
             } else {
                 // Keep recording during short pauses
-                self.record(data, now, &mut emit);
+                self.record(data, loud, threshold, now, &mut emit);
             }
         }
     }
@@ -410,7 +445,87 @@ mod tests {
             vec![
                 RecorderEvent::Started,
                 RecorderEvent::LimitReached([LOUD, QUIET].concat()),
-                RecorderEvent::Ended(QUIET.to_vec()),
+                // The rest holds no sound above the threshold: not sent
+                RecorderEvent::Ended(Vec::new()),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_the_quiet_rest_after_a_split_is_not_sent() {
+        // The split falls at the end of the last loud buffer
+        let mut h = Harness::with_limit(3 * LOUD.len());
+        for _ in 0..3 {
+            h.feed(&LOUD);
+        }
+        h.wait_past_hold();
+        for _ in 0..SETTINGS.silence_threshold {
+            h.feed(&QUIET);
+        }
+        assert_eq!(
+            h.events,
+            vec![
+                RecorderEvent::Started,
+                RecorderEvent::LimitReached([LOUD, LOUD, LOUD].concat()),
+                RecorderEvent::Ended(Vec::new()),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_the_quiet_samples_of_a_loud_buffer_after_a_split_are_not_sent() {
+        // Stereo: the limit of 7 frames falls after the loud samples of
+        // the fourth buffer
+        let loud_start = [0.5, -0.5, 0.0, 0.0];
+        let mut h = Harness::with_limit(14);
+        for _ in 0..3 {
+            h.feed(&LOUD);
+        }
+        h.feed(&loud_start);
+        h.wait_past_hold();
+        for _ in 0..SETTINGS.silence_threshold {
+            h.feed(&QUIET);
+        }
+        let first: Vec<f32> = [&LOUD[..], &LOUD, &LOUD, &loud_start[..2]].concat();
+        assert_eq!(
+            h.events,
+            vec![
+                RecorderEvent::Started,
+                RecorderEvent::LimitReached(first),
+                RecorderEvent::Ended(Vec::new()),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_a_quiet_part_of_a_long_pause_is_not_sent() {
+        // A pause longer than a part
+        let patient = RecorderSettings {
+            silence_threshold: 10,
+            ..SETTINGS
+        };
+        let mut h = Harness::with_limit(2 * LOUD.len());
+        h.feed_with(&LOUD, &patient);
+        h.feed_with(&LOUD, &patient);
+        h.wait_past_hold();
+        h.feed_with(&QUIET, &patient);
+        let status = h.feed_with(&QUIET, &patient);
+        // The recording goes on, and its duration counts from the end of
+        // the quiet part
+        assert!(status.is_recording);
+        assert_eq!(status.recording_duration, 0.0);
+        h.feed_with(&LOUD, &patient);
+        h.wait_past_hold();
+        for _ in 0..patient.silence_threshold {
+            h.feed_with(&QUIET, &patient);
+        }
+        assert_eq!(
+            h.events,
+            vec![
+                RecorderEvent::Started,
+                RecorderEvent::LimitReached([LOUD, LOUD].concat()),
+                RecorderEvent::LimitReached([LOUD, QUIET].concat()),
+                RecorderEvent::Ended(Vec::new()),
             ]
         );
     }
