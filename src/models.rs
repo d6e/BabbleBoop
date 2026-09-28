@@ -96,6 +96,9 @@ use InstructionsRole::{Developer, System};
 pub const DEFAULT_CHAT_MODEL: ChatModel =
     chat("gpt-6-luna", 0.10, 0.50, Developer, Some("none"), true);
 
+// A dated snapshot or alias that a model page names has a row of its own
+// with the values of its model, unless the pricing or deprecations page
+// gives it other values. Lookup is by exact name.
 #[rustfmt::skip]
 pub const CHAT_MODELS: &[ChatModel] = &[
     // GPT-6 Luna (the default) and Sol support reasoning effort `none`.
@@ -103,7 +106,9 @@ pub const CHAT_MODELS: &[ChatModel] = &[
     chat("gpt-6-sol", 2.00, 10.00, Developer, Some("none"), true),
     // GPT-5.4 nano and mini use reasoning effort `none` by default.
     chat("gpt-5.4-nano", 0.20, 1.25, Developer, None, true),
+    chat("gpt-5.4-nano-2026-03-17", 0.20, 1.25, Developer, None, false),
     chat("gpt-5.4-mini", 0.75, 4.50, Developer, None, true),
+    chat("gpt-5.4-mini-2026-03-17", 0.75, 4.50, Developer, None, false),
     // GPT-5.6 models use reasoning effort `medium` by default and support
     // `none`. The shutdown warnings recommend them.
     chat("gpt-5.6-luna", 0.20, 1.20, Developer, Some("none"), false),
@@ -111,9 +116,15 @@ pub const CHAT_MODELS: &[ChatModel] = &[
     // Promotional price, available at least through 2026-11-21
     // (/api/docs/pricing, note below the Standard table).
     chat("gpt-5.6-sol", 4.00, 20.00, Developer, Some("none"), false),
+    // The page /api/docs/models/gpt-5.6-sol says: "The `gpt-5.6` alias
+    // routes requests to GPT-5.6 Sol."
+    chat("gpt-5.6", 4.00, 20.00, Developer, Some("none"), false),
     chat("gpt-4.1", 2.00, 8.00, System, None, false),
+    chat("gpt-4.1-2025-04-14", 2.00, 8.00, System, None, false),
     chat("gpt-4.1-mini", 0.40, 1.60, System, None, true),
+    chat("gpt-4.1-mini-2025-04-14", 0.40, 1.60, System, None, false),
     retiring_chat("gpt-4.1-nano", 0.10, 0.40, "2026-10-23", "gpt-5.6-luna"),
+    retiring_chat("gpt-4.1-nano-2025-04-14", 0.10, 0.40, "2026-10-23", "gpt-5.6-luna"),
     chat("gpt-4o", 2.50, 10.00, System, None, false),
     // Snapshots of gpt-4o. The page /api/docs/models/gpt-4o lists them as
     // available and gives only the gpt-4o prices. The pricing page does
@@ -130,6 +141,11 @@ pub const CHAT_MODELS: &[ChatModel] = &[
     retiring_chat("gpt-4-turbo-2024-04-09", 10.00, 30.00, "2026-10-23", "gpt-5.6-sol"),
     retiring_chat("gpt-4", 30.00, 60.00, "2026-10-23", "gpt-5.6-sol"),
     retiring_chat("gpt-4-0613", 30.00, 60.00, "2026-10-23", "gpt-5.6-sol"),
+    // Shut down on 2026-03-26. The deprecations page recommends "`gpt-5` or
+    // `gpt-4.1*`" for it, and gives shutdown dates for gpt-5-2025-08-07 and
+    // gpt-4.1-nano but not for gpt-4.1. The gpt-4 page lists this snapshot
+    // and gives only the gpt-4 prices.
+    retiring_chat("gpt-4-0314", 30.00, 60.00, "2026-03-26", "gpt-4.1"),
     retiring_chat("gpt-3.5-turbo", 0.50, 1.50, "2026-10-23", "gpt-5.6-terra"),
     retiring_chat("gpt-3.5-turbo-0125", 0.50, 1.50, "2026-10-23", "gpt-5.6-terra"),
     retiring_chat("gpt-3.5-turbo-1106", 1.00, 2.00, "2026-09-28", "gpt-5.6-terra"),
@@ -167,6 +183,18 @@ const fn retiring_transcription(name: &'static str, price_per_minute: f64) -> Tr
 pub const TRANSCRIPTION_MODELS: &[TranscriptionModel] = &[
     DEFAULT_TRANSCRIPTION_MODEL,
     retiring_transcription("gpt-4o-mini-transcribe", 0.003),
+    // Snapshots of gpt-4o-mini-transcribe. The pricing page gives only the
+    // gpt-4o-mini-transcribe price. The deprecations page gives the
+    // 2025-12-15 snapshot, which is the default snapshot, no date of its
+    // own, and the 2025-03-20 snapshot an earlier date.
+    retiring_transcription("gpt-4o-mini-transcribe-2025-12-15", 0.003),
+    TranscriptionModel {
+        shutdown: Some(Shutdown {
+            date: "2027-01-20",
+            replacement: "gpt-4o-mini-transcribe-2025-12-15",
+        }),
+        ..transcription("gpt-4o-mini-transcribe-2025-03-20", 0.003, false)
+    },
     retiring_transcription("gpt-4o-transcribe", 0.006),
     retiring_transcription("whisper-1", 0.006),
 ];

@@ -53,27 +53,145 @@ pub(crate) mod regression_tests {
         }
     }
 
+    /// What a config that names `model` as the translation model gets: the
+    /// translation cost, the price and shutdown warnings, and the
+    /// instructions role and reasoning effort of the request. Warnings name
+    /// the model as `shown_as`, so that a snapshot and its model compare
+    /// equal.
+    fn chat_model_behaviour(
+        model: &str,
+        shown_as: &str,
+    ) -> (
+        String,
+        f64,
+        Vec<String>,
+        Vec<String>,
+        String,
+        Option<String>,
+    ) {
+        use crate::translation::ChatGptRequest;
+
+        let rename = |warnings: Vec<String>| -> Vec<String> {
+            warnings
+                .into_iter()
+                .map(|warning| warning.replace(&format!("'{}'", model), &format!("'{}'", shown_as)))
+                .collect()
+        };
+        let body =
+            serde_json::to_value(ChatGptRequest::translation(model, "Japanese", "Hello")).unwrap();
+        (
+            shown_as.to_string(),
+            PriceEstimator::new(model, "gpt-transcribe").estimate_translation_cost(TOKENS),
+            rename(PriceEstimator::unknown_pricing(model, "gpt-transcribe")),
+            rename(crate::models::shutdown_warnings(model, "gpt-transcribe")),
+            body["messages"][0]["role"].as_str().unwrap().to_string(),
+            body.get("reasoning_effort")
+                .map(|effort| effort.as_str().unwrap().to_string()),
+        )
+    }
+
+    /// Like `chat_model_behaviour`, for the transcription model.
+    fn transcription_model_behaviour(
+        model: &str,
+        shown_as: &str,
+    ) -> (String, f64, Vec<String>, Vec<String>) {
+        let rename = |warnings: Vec<String>| -> Vec<String> {
+            warnings
+                .into_iter()
+                .map(|warning| warning.replace(&format!("'{}'", model), &format!("'{}'", shown_as)))
+                .collect()
+        };
+        (
+            shown_as.to_string(),
+            PriceEstimator::new("gpt-6-luna", model)
+                .estimate_transcription_cost(std::time::Duration::from_secs(60)),
+            rename(PriceEstimator::unknown_pricing("gpt-6-luna", model)),
+            rename(crate::models::shutdown_warnings("gpt-6-luna", model)),
+        )
+    }
+
     #[test]
-    fn test_dated_snapshots_cost_the_same_as_their_model() {
-        // The gpt-4o and gpt-4o-mini model pages list these snapshots as
-        // available and give no other price for them.
-        for (snapshot, model) in [
+    fn test_dated_snapshots_behave_as_their_model() {
+        // Each model page lists these snapshots under "Snapshots". The
+        // pricing and deprecations pages give no other price or shutdown
+        // date for them than for their model. gpt-5.6 is an alias: the
+        // gpt-5.6-sol page says it routes requests to GPT-5.6 Sol.
+        let chat = [
+            ("gpt-4.1-nano-2025-04-14", "gpt-4.1-nano"),
+            ("gpt-4.1-mini-2025-04-14", "gpt-4.1-mini"),
+            ("gpt-4.1-2025-04-14", "gpt-4.1"),
+            ("gpt-5.4-mini-2026-03-17", "gpt-5.4-mini"),
+            ("gpt-5.4-nano-2026-03-17", "gpt-5.4-nano"),
+            ("gpt-5.6", "gpt-5.6-sol"),
             ("gpt-4o-2024-11-20", "gpt-4o"),
             ("gpt-4o-2024-08-06", "gpt-4o"),
             ("gpt-4o-mini-2024-07-18", "gpt-4o-mini"),
+            ("gpt-4-turbo-2024-04-09", "gpt-4-turbo"),
+            ("gpt-4-0613", "gpt-4"),
+            ("gpt-3.5-turbo-0125", "gpt-3.5-turbo"),
+        ];
+        let chat_snapshots: Vec<_> = chat
+            .iter()
+            .map(|(snapshot, _)| chat_model_behaviour(snapshot, snapshot))
+            .collect();
+        let chat_models: Vec<_> = chat
+            .iter()
+            .map(|(snapshot, model)| chat_model_behaviour(model, snapshot))
+            .collect();
+
+        // The deprecations page gives the shutdown date of
+        // gpt-4o-mini-transcribe and does not list this snapshot on its own.
+        let transcription = [(
+            "gpt-4o-mini-transcribe-2025-12-15",
+            "gpt-4o-mini-transcribe",
+        )];
+        let transcription_snapshots: Vec<_> = transcription
+            .iter()
+            .map(|(snapshot, _)| transcription_model_behaviour(snapshot, snapshot))
+            .collect();
+        let transcription_models: Vec<_> = transcription
+            .iter()
+            .map(|(snapshot, model)| transcription_model_behaviour(model, snapshot))
+            .collect();
+
+        assert_eq!(
+            (chat_snapshots, transcription_snapshots),
+            (chat_models, transcription_models)
+        );
+    }
+
+    #[test]
+    fn test_dated_snapshots_with_their_own_shutdown_date_are_warned() {
+        // The deprecations page gives these snapshots a shutdown date of
+        // their own. Their model pages give no other price than for their
+        // model.
+        let gpt_4_0314 = chat_model_behaviour("gpt-4-0314", "gpt-4-0314");
+        let gpt_4 = chat_model_behaviour("gpt-4", "gpt-4-0314");
+        assert_eq!(
+            (gpt_4_0314.1, &gpt_4_0314.2),
+            (gpt_4.1, &Vec::<String>::new())
+        );
+        assert_eq!(gpt_4_0314.3.len(), 1, "{:?}", gpt_4_0314.3);
+        for text in ["'gpt-4-0314'", "2026-03-26", "Use gpt-4.1 instead"] {
+            assert!(gpt_4_0314.3[0].contains(text), "{:?}", gpt_4_0314.3);
+        }
+
+        let march = transcription_model_behaviour(
+            "gpt-4o-mini-transcribe-2025-03-20",
+            "gpt-4o-mini-transcribe-2025-03-20",
+        );
+        let model = transcription_model_behaviour(
+            "gpt-4o-mini-transcribe",
+            "gpt-4o-mini-transcribe-2025-03-20",
+        );
+        assert_eq!((march.1, &march.2), (model.1, &Vec::<String>::new()));
+        assert_eq!(march.3.len(), 1, "{:?}", march.3);
+        for text in [
+            "'gpt-4o-mini-transcribe-2025-03-20'",
+            "2027-01-20",
+            "Use gpt-4o-mini-transcribe-2025-12-15 instead",
         ] {
-            let snapshot_cost =
-                PriceEstimator::new(snapshot, "gpt-transcribe").estimate_translation_cost(TOKENS);
-            let model_cost =
-                PriceEstimator::new(model, "gpt-transcribe").estimate_translation_cost(TOKENS);
-            assert_eq!(
-                (
-                    snapshot,
-                    snapshot_cost,
-                    PriceEstimator::unknown_pricing(snapshot, "gpt-transcribe")
-                ),
-                (snapshot, model_cost, Vec::<String>::new())
-            );
+            assert!(march.3[0].contains(text), "{:?}", march.3);
         }
     }
 
