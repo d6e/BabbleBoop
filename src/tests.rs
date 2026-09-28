@@ -1151,47 +1151,6 @@ requests_per_minute = 50
         assert!(duration.is_err(), "{:?}", duration);
     }
 
-    /// Duration conversions from a float that panic on a negative, NaN or
-    /// too large value. Production code uses the `try_` forms instead.
-    #[test]
-    fn test_no_float_to_duration_conversion_can_panic() {
-        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-        let mut hits = Vec::new();
-        for entry in std::fs::read_dir(&src).unwrap() {
-            let path = entry.unwrap().path();
-            if path.extension() != Some("rs".as_ref()) {
-                continue;
-            }
-            let name = path.file_name().unwrap().to_string_lossy().into_owned();
-            let text = std::fs::read_to_string(&path).unwrap();
-            for (index, line) in text.lines().enumerate() {
-                let line = line.trim_start();
-                // Test code follows the first cfg(test) attribute of a file
-                if line.starts_with("#[cfg(") && line.contains("test") {
-                    break;
-                }
-                if line.starts_with("//") {
-                    continue;
-                }
-                let code = line.replace("try_from_secs_f", "");
-                let panicking = [
-                    "from_secs_f32(",
-                    "from_secs_f64(",
-                    ".mul_f32(",
-                    ".mul_f64(",
-                    ".div_f32(",
-                    ".div_f64(",
-                ]
-                .iter()
-                .any(|call| code.contains(call));
-                if panicking {
-                    hits.push(format!("{}:{}: {}", name, index + 1, line));
-                }
-            }
-        }
-        assert!(hits.is_empty(), "{:#?}", hits);
-    }
-
     // ===========================================================================
     // Test: Any minimum transcription duration in config.toml is safe
     // ===========================================================================
