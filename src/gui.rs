@@ -2,6 +2,7 @@ use crate::app_state::{AppCommand, AppState, LogEntry, LogLevel};
 use crate::config::{Config, ThemeMode, CONFIG_PATH};
 use crate::models;
 use crate::processing_loop::TEST_RECORDING_LIMIT;
+use crate::recorder::MAX_RECORDING;
 use crate::theme::{self, AppColors};
 use eframe::egui;
 use std::sync::atomic::Ordering;
@@ -969,8 +970,12 @@ impl BabbleBoopApp {
                 );
                 ui.end_row();
 
-                ui.label("Min Duration (s):")
-                    .on_hover_text("Minimum recording length before transcription (filters out noise)");
+                ui.label("Min Duration (s):").on_hover_text(format!(
+                    "Recordings shorter than this are not transcribed (filters out noise). \
+                    A recording that reaches {} s is split into parts, and every part is \
+                    transcribed, whatever its length.",
+                    MAX_RECORDING.as_secs()
+                ));
                 ui.add(
                     egui::DragValue::new(&mut self.config_draft.audio.min_transcription_duration)
                         .speed(0.1)

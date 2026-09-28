@@ -19,7 +19,8 @@ pub struct Shutdown {
 /// Message role for the translation instructions.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum InstructionsRole {
-    /// GPT-4o and GPT-4.1 models, and model names that are not known.
+    /// GPT-4.1, GPT-4o, GPT-4 Turbo, GPT-4 and GPT-3.5 Turbo models, and
+    /// model names that are not known.
     System,
     /// Reasoning models. The Chat Completions reference says: "With o1
     /// models and newer, `developer` messages replace the previous `system`
