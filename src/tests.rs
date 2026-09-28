@@ -1216,11 +1216,14 @@ requests_per_minute = 50
         config.osc.address = "127.0.0.1".to_string();
         config.osc.output_port = chatbox.local_addr().unwrap().port();
         config.audio.min_transcription_duration = min_seconds;
-        let typing_indicator =
-            TypingIndicator::new(socket.clone(), Arc::new(RwLock::new(config.clone())));
         let (cmd_tx, _cmd_rx) = tokio::sync::mpsc::channel(10);
         let (log_tx, _log_rx) = tokio::sync::mpsc::channel(10);
         let app_state = Arc::new(AppState::new(config.clone(), cmd_tx, log_tx));
+        let typing_indicator = TypingIndicator::new(
+            socket.clone(),
+            Arc::new(RwLock::new(config.clone())),
+            app_state.logger.clone(),
+        );
         let wav = encode_for_upload(audio).await.unwrap();
 
         let result = tokio::time::timeout(
@@ -1727,10 +1730,11 @@ requests_per_minute = 50
         let mut config = Config::default();
         config.osc.address = "127.0.0.1".to_string();
         config.osc.output_port = receiver.local_addr().unwrap().port();
-        let indicator = TypingIndicator::new(socket, Arc::new(RwLock::new(config)));
         let (log_tx, _log_rx) = tokio::sync::mpsc::channel(10);
+        let logger = Logger::new(log_tx, Default::default());
+        let indicator = TypingIndicator::new(socket, Arc::new(RwLock::new(config)), logger.clone());
 
-        apply_enabled(false, &indicator, &Logger::new(log_tx, Default::default())).await;
+        apply_enabled(false, &indicator, &logger).await;
 
         let mut buf = [0u8; 256];
         let (len, _) = tokio::time::timeout(Duration::from_secs(1), receiver.recv_from(&mut buf))

@@ -227,7 +227,11 @@ async fn run_processing_loop(
     // Initialize the shared cost from the loaded value
     app_state.set_total_cost(services.price_estimator.total_cost);
 
-    let typing_indicator = TypingIndicator::new(Arc::clone(&socket), Arc::clone(&app_state.config));
+    let typing_indicator = TypingIndicator::new(
+        Arc::clone(&socket),
+        Arc::clone(&app_state.config),
+        app_state.logger.clone(),
+    );
 
     let mut test_recording = TestRecording::new(
         &app_state,
