@@ -325,4 +325,68 @@ requests_per_minute = 50
         let cjk_short = "語".repeat(120);
         assert_eq!(displayed_api_error(&cjk_short), cjk_short);
     }
+
+    // ===========================================================================
+    // Test: Recording file names cut the transcription by characters
+    // ===========================================================================
+
+    /// Saves one recording with `transcription` into a fresh directory and
+    /// returns the file name without the timestamp prefix.
+    async fn saved_recording_name(test_name: &str, transcription: &str) -> String {
+        use crate::recording_manager::RecordingManager;
+        use std::fs;
+
+        let dir =
+            std::env::temp_dir().join(format!("babble_boop_{}_{}", test_name, std::process::id()));
+        fs::remove_dir_all(&dir).ok();
+
+        let result = RecordingManager::new(dir.clone(), 10)
+            .save_recording(vec![0u8; 4], transcription)
+            .await;
+        let names: Vec<String> = fs::read_dir(&dir)
+            .map(|entries| {
+                entries
+                    .filter_map(|entry| entry.ok())
+                    .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        // Clean up before asserting, so a failure does not leave files behind
+        fs::remove_dir_all(&dir).ok();
+
+        result.expect("save_recording should succeed");
+        assert_eq!(names.len(), 1, "expected one recording, found {:?}", names);
+        let (_timestamp, rest) = names[0]
+            .split_once('_')
+            .expect("file name has a timestamp prefix");
+        rest.to_string()
+    }
+
+    #[tokio::test]
+    async fn test_recording_name_ascii() {
+        // The first 50 characters are kept, so " cut" is dropped.
+        let transcription = "Hello, World! This is a test of the recording name cut";
+        assert_eq!(
+            saved_recording_name("ascii", transcription).await,
+            "hello-world-this-is-a-test-of-the-recording-name.wav"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_recording_name_multibyte() {
+        // Byte 50 is inside the two byte 'é'.
+        let accented = format!("{}é{}", "a".repeat(49), "b".repeat(20));
+        assert_eq!(
+            saved_recording_name("accented", &accented).await,
+            format!("{}é.wav", "a".repeat(49))
+        );
+
+        // 60 characters of three bytes each; byte 50 is inside the 17th.
+        let cjk = "日本語".repeat(20);
+        assert_eq!(
+            saved_recording_name("cjk", &cjk).await,
+            format!("{}.wav", cjk.chars().take(50).collect::<String>())
+        );
+    }
 }

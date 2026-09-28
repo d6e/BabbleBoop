@@ -26,8 +26,9 @@ impl RecordingManager {
         fs::create_dir_all(&self.recordings_dir)?;
 
         let timestamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
-        let slugified_transcription =
-            self.slugify(&transcription[..std::cmp::min(50, transcription.len())]);
+        // Take characters, not bytes, so the cut cannot fall inside a multibyte character
+        let prefix: String = transcription.chars().take(50).collect();
+        let slugified_transcription = self.slugify(&prefix);
         let filename = format!("{}_{}.wav", timestamp, slugified_transcription);
         let file_path = self.recordings_dir.join(filename);
 
