@@ -82,8 +82,8 @@ impl Logger {
 /// Parse an API error message and extract a user-friendly version for display.
 fn parse_api_error_for_display(error: &str) -> String {
     // Try to find JSON in the error message
-    if let Some(json_start) = error.find('{') {
-        if let Ok(parsed) = serde_json::from_str::<Value>(&error[json_start..]) {
+    if let Some(json) = error.find('{').and_then(|start| error.get(start..)) {
+        if let Ok(parsed) = serde_json::from_str::<Value>(json) {
             if let Some(err_obj) = parsed.get("error") {
                 // Extract the error code if available
                 let code = err_obj.get("code").and_then(|c| c.as_str()).unwrap_or("");
