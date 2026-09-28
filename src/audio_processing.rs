@@ -15,6 +15,7 @@ use tokio::net::UdpSocket;
 
 #[allow(clippy::too_many_arguments)]
 pub async fn process_audio(
+    client: &reqwest::Client,
     audio_data: Vec<u8>,
     config: &Config,
     socket: &UdpSocket,
@@ -37,7 +38,8 @@ pub async fn process_audio(
         return Ok(());
     }
 
-    let transcription = transcribe_audio(audio_data.clone(), &config.openai, rate_limiter).await?;
+    let transcription =
+        transcribe_audio(client, audio_data.clone(), &config.openai, rate_limiter).await?;
     app_state
         .logger
         .info(format!("Transcription: {}", transcription));
@@ -52,7 +54,7 @@ pub async fn process_audio(
         config.translation.target_language, transcription
     );
 
-    let response = ask_chatgpt(&translation_prompt, &config.openai, rate_limiter).await?;
+    let response = ask_chatgpt(client, &translation_prompt, &config.openai, rate_limiter).await?;
     app_state
         .logger
         .success(format!("Translation: {}", response));

@@ -26,13 +26,12 @@ struct ChatGptChoice {
 }
 
 pub async fn ask_chatgpt(
+    client: &reqwest::Client,
     prompt: &str,
     config: &OpenAiConfig,
     rate_limiter: &mut RateLimiter,
 ) -> Result<String, Box<dyn Error>> {
     rate_limiter.wait().await;
-
-    let client = reqwest::Client::new();
 
     let request_body = ChatGptRequest {
         model: config.model.clone(),

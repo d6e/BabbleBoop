@@ -4,6 +4,7 @@ use serde::Deserialize;
 use std::error::Error;
 
 pub async fn transcribe_audio(
+    client: &reqwest::Client,
     audio_data: Vec<u8>,
     config: &OpenAiConfig,
     rate_limiter: &mut RateLimiter,
@@ -14,7 +15,6 @@ pub async fn transcribe_audio(
 
     rate_limiter.wait().await;
 
-    let client = reqwest::Client::new();
     let part = reqwest::multipart::Part::bytes(audio_data)
         .file_name("audio.wav")
         .mime_str("audio/wav")?;

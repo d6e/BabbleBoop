@@ -1,3 +1,4 @@
+use babble_boop::api_client::build_api_client;
 use babble_boop::app_state::{AppCommand, AppState, LogEntry};
 use babble_boop::audio_playback::play_wav_buffer;
 use babble_boop::audio_processing::process_audio;
@@ -168,6 +169,8 @@ async fn run_processing_loop(
         None
     };
 
+    let api_client = build_api_client()?;
+
     let typing_indicator = TypingIndicator::new(Arc::clone(&socket), Arc::clone(&app_state.config));
 
     // Test recording state
@@ -318,6 +321,7 @@ async fn run_processing_loop(
                         // Read current config for processing
                         let current_config = app_state.config.read().expect("Config lock poisoned").clone();
                         if let Err(e) = process_audio(
+                            &api_client,
                             audio_data,
                             &current_config,
                             &socket,

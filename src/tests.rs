@@ -389,4 +389,41 @@ requests_per_minute = 50
             format!("{}.wav", cjk.chars().take(50).collect::<String>())
         );
     }
+
+    // ===========================================================================
+    // Test: API client timeouts
+    // ===========================================================================
+
+    #[tokio::test]
+    async fn test_api_client_times_out_when_server_never_responds() {
+        use crate::api_client::client_with_timeouts;
+        use std::time::Duration;
+        use tokio::net::TcpListener;
+
+        // Accept the connection and keep it open without sending a response.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (_socket, _) = listener.accept().await.unwrap();
+            std::future::pending::<()>().await;
+        });
+
+        let client =
+            client_with_timeouts(Duration::from_secs(5), Duration::from_millis(200)).unwrap();
+        let result = tokio::time::timeout(
+            Duration::from_secs(10),
+            client.get(format!("http://{}/", addr)).send(),
+        )
+        .await;
+        server.abort();
+
+        let error = result
+            .expect("request was not stopped by the client timeout")
+            .expect_err("server never responds");
+        assert!(
+            error.is_timeout(),
+            "expected a timeout error, got {}",
+            error
+        );
+    }
 }
