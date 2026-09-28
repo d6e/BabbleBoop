@@ -221,7 +221,8 @@ pub struct AppState {
     pub audio_params: Arc<AudioParams>,
     /// Flag indicating test recording mode is active
     pub test_mode_active: Arc<AtomicBool>,
-    /// Buffer for test recording samples (written by audio thread, read by main thread)
+    /// Buffer for test recording samples. The audio callback writes it; the
+    /// processing thread swaps it at start and stop (`TestRecording`).
     pub test_recording_buffer: Arc<std::sync::Mutex<Vec<f32>>>,
     /// Total API cost (f64 stored as bits) for display in GUI
     pub total_cost: Arc<std::sync::atomic::AtomicU64>,

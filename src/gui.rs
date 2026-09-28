@@ -798,7 +798,20 @@ impl BabbleBoopApp {
     pub(crate) fn audio_settings_ui(&mut self, ui: &mut egui::Ui) {
         // The meters show state of the audio thread, which does not wake the
         // GUI. Not while minimized: nothing is visible, and eframe still runs
-        // a frame for each request.
+        // a frame for each request (eframe 0.29.1
+        // src/native/glow_integration.rs:484-730 does not skip a minimized
+        // window, it only sleeps 10 ms after the frame).
+        //
+        // Only Windows and X11 report the minimized state, so on macOS and
+        // Wayland the refresh continues while minimized. egui-winit 0.29.1
+        // reads the state after window creation only when not on macOS
+        // (src/lib.rs:987-993). winit 0.30.12 `is_minimized` always returns
+        // `None` on Wayland
+        // (src/platform_impl/linux/wayland/window/mod.rs:355-357), and
+        // egui-winit reads `None` as not minimized. egui 0.29.1
+        // `ViewportInfo` has no occlusion field (src/data/input.rs:224-236).
+        // Its `focused` field is not usable here: the user can look at the
+        // meters while another application has focus.
         let minimized = ui.ctx().input(|i| i.viewport().minimized == Some(true));
         if !minimized {
             ui.ctx().request_repaint_after(METER_REFRESH_INTERVAL);
