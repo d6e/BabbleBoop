@@ -519,6 +519,32 @@ mod tests {
     }
 
     #[test]
+    fn test_silence_after_a_part_ends_the_recording_without_audio() {
+        let mut s = Setup::new(10);
+        // One second of stereo audio at 48 kHz
+        let second = vec![0.5; 2 * 48_000];
+        for _ in 0..30 {
+            s.feed(&second);
+        }
+        s.feed(&QUIET);
+        s.feed(&QUIET);
+        let events = s.events();
+        assert!(
+            matches!(
+                events.as_slice(),
+                [
+                    AudioEvent::StartRecording,
+                    AudioEvent::AudioPart(_),
+                    AudioEvent::StopRecording
+                ]
+            ),
+            "{:?}",
+            events.get(2..)
+        );
+        assert!(!s.app_state.is_recording.load(Ordering::Relaxed));
+    }
+
+    #[test]
     fn test_a_panic_in_the_callback_is_reported_once_and_stops_processing() {
         let (tx, mut rx) = mpsc::channel(10);
         let mut guard = PanicGuard::new(tx);
