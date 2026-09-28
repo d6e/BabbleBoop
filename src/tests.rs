@@ -733,6 +733,153 @@ requests_per_minute = 50
     }
 
     // ===========================================================================
+    // Test: Translation switched off before the chatbox send
+    // ===========================================================================
+
+    /// The first chunk of `text` as the chatbox receives it.
+    fn chatbox_input(text: &str) -> rosc::OscMessage {
+        rosc::OscMessage {
+            addr: "/chatbox/input".to_string(),
+            args: vec![
+                rosc::OscType::String(text.to_string()),
+                rosc::OscType::Bool(true),
+                rosc::OscType::Bool(true),
+            ],
+        }
+    }
+
+    /// A `DeliveryFixture` whose chatbox shows "first" for 10 s from now.
+    async fn fixture_showing_first(test_name: &str) -> DeliveryFixture {
+        let mut fixture = DeliveryFixture::new(test_name).await;
+        fixture.config.osc.display_time = 10_000;
+        fixture.sender.send("first", &fixture.config).await.unwrap();
+        fixture
+    }
+
+    /// Set the translation toggle to `enabled` after `delay`, as the GUI
+    /// does: it stores the value at once, and the processing loop handles
+    /// the `SetEnabled` command only after `process_audio` returns.
+    fn toggle_after(
+        app_state: &std::sync::Arc<crate::app_state::AppState>,
+        delay: std::time::Duration,
+        enabled: bool,
+    ) {
+        let app_state = std::sync::Arc::clone(app_state);
+        tokio::spawn(async move {
+            tokio::time::sleep(delay).await;
+            app_state
+                .enabled
+                .store(enabled, std::sync::atomic::Ordering::Relaxed);
+        });
+    }
+
+    /// Give the translation "Bonjour" of "Hello" to `deliver_translation`
+    /// in `fixture`.
+    async fn deliver_bonjour(
+        fixture: &mut DeliveryFixture,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let body = chat_completion_body("Bonjour", Some(SHORT_USAGE));
+        let translation = crate::translation::ChatGptRequest::translation(
+            &fixture.config.openai.model,
+            "French",
+            "Hello",
+        )
+        .parse_response(&body)
+        .unwrap();
+        crate::audio_processing::deliver_translation(
+            translation,
+            "Hello",
+            &fixture.config,
+            &mut fixture.sender,
+            &fixture.typing_indicator,
+            &mut fixture.price_estimator,
+            &fixture.app_state,
+        )
+        .await
+    }
+
+    /// The log lines of a translation that was not sent because
+    /// translation was switched off.
+    fn not_sent_log() -> Vec<(crate::app_state::LogLevel, String)> {
+        use crate::app_state::LogLevel;
+        vec![
+            (LogLevel::Success, "Translation: Bonjour".to_string()),
+            (
+                LogLevel::Info,
+                "Translation is off, so the translation was not sent to the chatbox".to_string(),
+            ),
+        ]
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_translation_switched_off_during_the_display_wait_is_not_sent() {
+        use std::time::Duration;
+
+        let mut fixture = fixture_showing_first("off_during_display_wait").await;
+        toggle_after(&fixture.app_state, Duration::from_secs(1), false);
+
+        let result = deliver_bonjour(&mut fixture).await;
+
+        let delivery = fixture.finish(result).await;
+        assert_eq!(
+            delivery.chatbox,
+            [chatbox_input("first"), typing_off()],
+            "{:?}",
+            delivery
+        );
+        assert_eq!(delivery.log, not_sent_log());
+        assert_eq!(delivery.total_cost, short_usage_cost());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_translation_switched_off_during_the_api_calls_is_not_sent() {
+        let mut fixture = DeliveryFixture::new("off_during_api_calls").await;
+        // No display wait: the toggle came while the requests ran.
+        fixture
+            .app_state
+            .enabled
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+
+        let result = deliver_bonjour(&mut fixture).await;
+
+        let delivery = fixture.finish(result).await;
+        assert_eq!(delivery.chatbox, [typing_off()], "{:?}", delivery);
+        assert_eq!(delivery.log, not_sent_log());
+        assert_eq!(delivery.total_cost, short_usage_cost());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_translation_switched_off_and_on_during_the_display_wait_is_sent() {
+        use crate::app_state::LogLevel;
+        use std::time::Duration;
+        use tokio::time::Instant;
+
+        let mut fixture = fixture_showing_first("off_and_on_during_display_wait").await;
+        toggle_after(&fixture.app_state, Duration::from_secs(1), false);
+        toggle_after(&fixture.app_state, Duration::from_secs(2), true);
+
+        let start = Instant::now();
+        let result = deliver_bonjour(&mut fixture).await;
+
+        assert_eq!(start.elapsed(), Duration::from_secs(10));
+        let delivery = fixture.finish(result).await;
+        assert_eq!(
+            delivery.chatbox,
+            [
+                chatbox_input("first"),
+                chatbox_input("Bonjour"),
+                typing_off()
+            ],
+            "{:?}",
+            delivery
+        );
+        assert_eq!(
+            delivery.log,
+            [(LogLevel::Success, "Translation: Bonjour".to_string())]
+        );
+    }
+
+    // ===========================================================================
     // Test: Shutdown interrupts in flight work
     // ===========================================================================
 

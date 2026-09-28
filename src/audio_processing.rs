@@ -10,6 +10,7 @@ use crate::types::Extent;
 use crate::typing_indicator::TypingIndicator;
 
 use std::error::Error;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -109,7 +110,9 @@ pub(crate) async fn accept_transcription(
 /// Add the cost of the translation request to the total and send the
 /// translation to the chatbox. A response without a translation, such as
 /// a refusal, costs its tokens too; it goes to the activity log, not to the
-/// chatbox.
+/// chatbox. The translation waits for the display time of the previous
+/// message, and is not sent if translation is off after that wait. A
+/// message that has started to go out is sent to its last chunk.
 pub(crate) async fn deliver_translation(
     translation: Translation,
     transcription: &str,
@@ -136,6 +139,17 @@ pub(crate) async fn deliver_translation(
     let mut final_response = text;
     if config.translation.include_original_message {
         final_response = final_response + "\n" + transcription;
+    }
+    // Translation can be switched off while this message waits for the
+    // previous one or for the API. The processing loop checks the toggle
+    // only when it takes the audio event, so check it again here.
+    chatbox.wait_for_display(config).await;
+    if !app_state.enabled.load(Ordering::Relaxed) {
+        app_state
+            .logger
+            .info("Translation is off, so the translation was not sent to the chatbox");
+        typing_indicator.stop_typing().await;
+        return Ok(());
     }
     chatbox.send(&final_response, config).await?;
 

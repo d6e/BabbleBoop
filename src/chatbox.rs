@@ -29,6 +29,17 @@ impl Chatbox {
         }
     }
 
+    /// Wait until the last chunk that went out was on screen for the
+    /// `display_time` of `config`. `send` does this wait before each chunk.
+    /// A caller can do it first, to check after the wait that the message
+    /// is still to go out.
+    pub async fn wait_for_display(&self, config: &Config) {
+        if let Some(last_sent) = self.last_sent {
+            let display_time = Duration::from_millis(config.osc.display_time);
+            sleep(display_time.saturating_sub(last_sent.elapsed())).await;
+        }
+    }
+
     /// Send `message` in chunks of up to `VRCHAT_CHATBOX_CHAR_LIMIT`
     /// characters, at most `max_message_chunks` of them. Before each chunk,
     /// wait until the chunk before it, of this message or the one before,
@@ -49,10 +60,7 @@ impl Chatbox {
             .enumerate()
             .take(config.osc.max_message_chunks)
         {
-            if let Some(last_sent) = self.last_sent {
-                let display_time = Duration::from_millis(config.osc.display_time);
-                sleep(display_time.saturating_sub(last_sent.elapsed())).await;
-            }
+            self.wait_for_display(config).await;
 
             let osc_message = OscMessage {
                 addr: "/chatbox/input".to_string(),
