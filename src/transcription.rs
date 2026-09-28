@@ -25,7 +25,7 @@ pub async fn transcribe_audio(
 
     let res = client
         .post("https://api.openai.com/v1/audio/transcriptions")
-        .header("Authorization", format!("Bearer {}", &config.api_key))
+        .header("Authorization", format!("Bearer {}", config.api_key))
         .multipart(form)
         .send()
         .await?;

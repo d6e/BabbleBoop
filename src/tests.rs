@@ -5,7 +5,7 @@
 #[cfg(test)]
 mod regression_tests {
     use crate::config::{
-        AudioConfig, Config, OpenAiConfig, OscConfig, RateLimitConfig, TranslationConfig,
+        AudioConfig, Config, OpenAiConfig, OscConfig, RateLimitConfig, ThemeMode, TranslationConfig,
     };
     use crate::price_estimator::PriceEstimator;
     use crate::rate_limiter::RateLimiter;
@@ -195,8 +195,11 @@ mod regression_tests {
             rate_limit: RateLimitConfig {
                 requests_per_minute: 50,
             },
-            keep_audio_files: false,
-            max_audio_files: 10,
+            // Fields with a serde default use non default values, so a field
+            // that fails to save cannot pass by falling back to its default.
+            keep_audio_files: true,
+            max_audio_files: 25,
+            theme: ThemeMode::Light,
         };
 
         // Create a temp file path
@@ -208,36 +211,11 @@ mod regression_tests {
         // Load it back
         let loaded = Config::load(&temp_path).expect("Failed to load config");
 
-        // Verify all fields match
-        assert_eq!(loaded.osc.address, config.osc.address);
-        assert_eq!(loaded.osc.input_port, config.osc.input_port);
-        assert_eq!(loaded.osc.output_port, config.osc.output_port);
-        assert_eq!(loaded.openai.api_key, config.openai.api_key);
-        assert_eq!(loaded.openai.model, config.openai.model);
-        assert_eq!(
-            loaded.translation.target_language,
-            config.translation.target_language
-        );
-        assert_eq!(
-            loaded.translation.include_original_message,
-            config.translation.include_original_message
-        );
-        assert_eq!(
-            loaded.audio.silence_threshold,
-            config.audio.silence_threshold
-        );
-        assert!(
-            (loaded.audio.noise_gate_threshold - config.audio.noise_gate_threshold).abs() < 0.001
-        );
-        assert_eq!(
-            loaded.rate_limit.requests_per_minute,
-            config.rate_limit.requests_per_minute
-        );
-        assert_eq!(loaded.keep_audio_files, config.keep_audio_files);
-        assert_eq!(loaded.max_audio_files, config.max_audio_files);
-
-        // Clean up
+        // Clean up before asserting, so a failure does not leave the file behind
         fs::remove_file(&temp_path).ok();
+
+        // Compare the whole struct, so every field is checked
+        assert_eq!(loaded, config);
     }
 
     #[test]

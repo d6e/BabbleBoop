@@ -60,7 +60,7 @@ fn draw_audio_level_meter(
         painter.vline(
             threshold_x,
             rect.y_range(),
-            egui::Stroke::new(2.0, line_color),
+            egui::Stroke::new(2.0f32, line_color),
         );
     }
 }
@@ -373,8 +373,7 @@ impl BabbleBoopApp {
                 // Unsaved changes indicator
                 if self.has_unsaved_changes() {
                     ui.label(
-                        egui::RichText::new("● Unsaved changes")
-                            .color(colors.unsaved_indicator),
+                        egui::RichText::new("● Unsaved changes").color(colors.unsaved_indicator),
                     );
                     ui.separator();
                 }

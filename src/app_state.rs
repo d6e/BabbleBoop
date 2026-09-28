@@ -86,10 +86,7 @@ fn parse_api_error_for_display(error: &str) -> String {
         if let Ok(parsed) = serde_json::from_str::<Value>(&error[json_start..]) {
             if let Some(err_obj) = parsed.get("error") {
                 // Extract the error code if available
-                let code = err_obj
-                    .get("code")
-                    .and_then(|c| c.as_str())
-                    .unwrap_or("");
+                let code = err_obj.get("code").and_then(|c| c.as_str()).unwrap_or("");
 
                 // Map common error codes to user-friendly messages
                 match code {
@@ -231,8 +228,7 @@ impl AppState {
     }
 
     pub fn set_total_cost(&self, cost: f64) {
-        self.total_cost
-            .store(cost.to_bits(), Ordering::Relaxed);
+        self.total_cost.store(cost.to_bits(), Ordering::Relaxed);
     }
 
     pub fn get_total_cost(&self) -> f64 {

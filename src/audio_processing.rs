@@ -38,7 +38,9 @@ pub async fn process_audio(
     }
 
     let transcription = transcribe_audio(audio_data.clone(), &config.openai, rate_limiter).await?;
-    app_state.logger.info(format!("Transcription: {}", transcription));
+    app_state
+        .logger
+        .info(format!("Transcription: {}", transcription));
 
     // Save the audio recording if debug mode is enabled
     if let Some(manager) = recording_manager {
@@ -51,7 +53,9 @@ pub async fn process_audio(
     );
 
     let response = ask_chatgpt(&translation_prompt, &config.openai, rate_limiter).await?;
-    app_state.logger.success(format!("Translation: {}", response));
+    app_state
+        .logger
+        .success(format!("Translation: {}", response));
 
     let transcription_cost = price_estimator.estimate_transcription_cost(audio_duration);
     let input_tokens = translation_prompt.len() / 4;
