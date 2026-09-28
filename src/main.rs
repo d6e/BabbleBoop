@@ -13,7 +13,7 @@ use babble_boop::types::AudioEvent;
 use babble_boop::typing_indicator::TypingIndicator;
 
 use std::io::Cursor;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::UdpSocket;
@@ -210,7 +210,6 @@ async fn run_processing_loop(
     );
     // Keep playback stream alive until playback completes
     let mut _playback_stream: Option<cpal::Stream> = None;
-    let playback_active = Arc::new(AtomicBool::new(false));
 
     loop {
         tokio::select! {
@@ -238,7 +237,7 @@ async fn run_processing_loop(
                     }
                     Some(AppCommand::TestRecordingComplete(wav_data)) => {
                         app_state.logger.info("Playing back test recording...");
-                        match play_wav_buffer(wav_data, Arc::clone(&playback_active)) {
+                        match play_wav_buffer(wav_data) {
                             Ok(stream) => {
                                 _playback_stream = Some(stream);
                             }
@@ -246,7 +245,6 @@ async fn run_processing_loop(
                                 app_state.logger.error(format!(
                                     "Failed to play test recording: {}", e
                                 ));
-                                playback_active.store(false, Ordering::SeqCst);
                             }
                         }
                     }

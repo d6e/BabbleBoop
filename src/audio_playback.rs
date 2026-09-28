@@ -2,16 +2,12 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{SampleFormat, Stream};
 use std::error::Error;
 use std::io::Cursor;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 /// Plays a WAV buffer through the default output device.
 /// Returns a Stream that must be kept alive until playback is complete.
-/// The `is_playing` flag will be set to false when playback finishes.
-pub fn play_wav_buffer(
-    wav_data: Vec<u8>,
-    is_playing: Arc<AtomicBool>,
-) -> Result<Stream, Box<dyn Error + Send + Sync>> {
+pub fn play_wav_buffer(wav_data: Vec<u8>) -> Result<Stream, Box<dyn Error + Send + Sync>> {
     let host = cpal::default_host();
     let device = host
         .default_output_device()
@@ -43,13 +39,10 @@ pub fn play_wav_buffer(
     let position = Arc::new(AtomicUsize::new(0));
     let output_channels = config.channels as usize;
 
-    is_playing.store(true, Ordering::SeqCst);
-
     let stream = match sample_format {
         SampleFormat::F32 => {
             let samples_clone = Arc::clone(&samples);
             let position_clone = Arc::clone(&position);
-            let is_playing_clone = Arc::clone(&is_playing);
 
             device.build_output_stream(
                 &config,
@@ -58,7 +51,6 @@ pub fn play_wav_buffer(
                         output,
                         &samples_clone,
                         &position_clone,
-                        &is_playing_clone,
                         wav_channels,
                         output_channels,
                     );
@@ -70,7 +62,6 @@ pub fn play_wav_buffer(
         SampleFormat::I16 => {
             let samples_clone = Arc::clone(&samples);
             let position_clone = Arc::clone(&position);
-            let is_playing_clone = Arc::clone(&is_playing);
 
             device.build_output_stream(
                 &config,
@@ -80,7 +71,6 @@ pub fn play_wav_buffer(
                         &mut temp,
                         &samples_clone,
                         &position_clone,
-                        &is_playing_clone,
                         wav_channels,
                         output_channels,
                     );
@@ -103,7 +93,6 @@ fn write_samples(
     output: &mut [f32],
     samples: &Arc<Vec<f32>>,
     position: &Arc<AtomicUsize>,
-    is_playing: &Arc<AtomicBool>,
     wav_channels: usize,
     output_channels: usize,
 ) {
@@ -132,9 +121,4 @@ fn write_samples(
     }
 
     position.store(pos, Ordering::Relaxed);
-
-    // Signal playback complete when we've played all samples
-    if pos >= samples_len {
-        is_playing.store(false, Ordering::SeqCst);
-    }
 }
