@@ -7,8 +7,8 @@ use babble_boop::config::{Config, CONFIG_PATH};
 use babble_boop::gui::{run_error_dialog, run_gui};
 use babble_boop::processing_loop::{
     apply_enabled, convert_for_playback, encode_for_upload, hold_audio_stream,
-    wait_for_audio_start, AudioEvents, ProcessingServices, TestRecording, AUDIO_START_TIMEOUT,
-    TEST_RECORDING_LIMIT,
+    wait_for_audio_start, AudioEvents, PlaybackErrors, ProcessingServices, TestRecording,
+    AUDIO_START_TIMEOUT, TEST_RECORDING_LIMIT,
 };
 use babble_boop::types::{AudioEvent, Extent};
 use babble_boop::typing_indicator::TypingIndicator;
@@ -21,11 +21,12 @@ use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 
 /// Stop the test recording and play it back. The stream is kept in
-/// `playback` until the next playback or the end of the loop. Breaks if
-/// shutdown stopped the work.
+/// `playback` until the next playback or the end of the loop, and reports
+/// its errors to `playback_errors`. Breaks if shutdown stopped the work.
 async fn finish_test_recording(
     test_recording: &mut TestRecording,
     playback: &mut Option<cpal::Stream>,
+    playback_errors: &PlaybackErrors,
     app_state: &AppState,
 ) -> ControlFlow<()> {
     let logger = &app_state.logger;
@@ -61,7 +62,7 @@ async fn finish_test_recording(
         None => return ControlFlow::Break(()),
     };
     logger.info("Playing back test recording...");
-    match output.play(samples) {
+    match output.play(samples, playback_errors.sender()) {
         Ok(stream) => *playback = Some(stream),
         Err(e) => logger.error(format!("Failed to play test recording: {}", e)),
     }
@@ -240,6 +241,7 @@ async fn run_processing_loop(
     );
     // Keep playback stream alive until playback completes
     let mut playback_stream: Option<cpal::Stream> = None;
+    let mut playback_errors = PlaybackErrors::default();
 
     loop {
         tokio::select! {
@@ -263,7 +265,7 @@ async fn run_processing_loop(
                         test_recording.start();
                     }
                     Some(AppCommand::StopTestRecording) => {
-                        if finish_test_recording(&mut test_recording, &mut playback_stream, &app_state).await.is_break() {
+                        if finish_test_recording(&mut test_recording, &mut playback_stream, &playback_errors, &app_state).await.is_break() {
                             break;
                         }
                     }
@@ -278,10 +280,12 @@ async fn run_processing_loop(
                     "Test recording reached {} s",
                     TEST_RECORDING_LIMIT.as_secs()
                 ));
-                if finish_test_recording(&mut test_recording, &mut playback_stream, &app_state).await.is_break() {
+                if finish_test_recording(&mut test_recording, &mut playback_stream, &playback_errors, &app_state).await.is_break() {
                     break;
                 }
             }
+            // Errors of the playback stream, reported on the audio thread
+            _ = playback_errors.log_next(&app_state.logger) => {}
             event = audio_events.recv() => {
                 // Ignore speech while translation is off. SetEnabled(false)
                 // turns off a typing indicator that is still on.

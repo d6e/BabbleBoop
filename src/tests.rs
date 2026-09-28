@@ -1019,6 +1019,63 @@ requests_per_minute = 50
         received
     }
 
+    /// cpal reports playback stream errors on an audio thread, which does
+    /// not log. They reach the activity log through the processing loop,
+    /// and an error that cpal repeats is logged once.
+    #[tokio::test(start_paused = true)]
+    async fn test_playback_errors_reach_the_activity_log_once_per_distinct_error() {
+        use crate::app_state::{LogLevel, Logger};
+        use crate::audio_playback::playback_error_reporter;
+        use crate::processing_loop::PlaybackErrors;
+        use std::time::Duration;
+
+        /// Log the errors that came, and return the new activity log entries.
+        async fn logged(
+            errors: &mut PlaybackErrors,
+            logger: &Logger,
+            log_rx: &mut tokio::sync::mpsc::Receiver<crate::app_state::LogEntry>,
+        ) -> Vec<(String, LogLevel)> {
+            while tokio::time::timeout(Duration::from_secs(60), errors.log_next(logger))
+                .await
+                .is_ok()
+            {}
+            std::iter::from_fn(|| log_rx.try_recv().ok())
+                .map(|entry| (entry.message, entry.level))
+                .collect()
+        }
+        let (log_tx, mut log_rx) = tokio::sync::mpsc::channel(10);
+        let logger = Logger::new(log_tx, Default::default());
+        let mut errors = PlaybackErrors::default();
+
+        // cpal calls the error callback in a loop while the device is gone
+        let mut first_stream = playback_error_reporter(errors.sender());
+        for error in [
+            "device unplugged",
+            "device unplugged",
+            "underrun",
+            "device unplugged",
+        ] {
+            first_stream.report(error);
+        }
+        assert_eq!(
+            logged(&mut errors, &logger, &mut log_rx).await,
+            ["device unplugged", "underrun", "device unplugged"]
+                .map(|e| (format!("Playback error: {}", e), LogLevel::Error))
+        );
+
+        // The next playback has a new stream, which reports its first error
+        let mut second_stream = playback_error_reporter(errors.sender());
+        second_stream.report("device unplugged");
+        second_stream.report("device unplugged");
+        assert_eq!(
+            logged(&mut errors, &logger, &mut log_rx).await,
+            [(
+                "Playback error: device unplugged".to_string(),
+                LogLevel::Error
+            )]
+        );
+    }
+
     /// When the audio input ends in a recording, no StopRecording comes from
     /// the callback. The processing loop turns the typing indicator off only
     /// on StopRecording, so it would stay on in VRChat.

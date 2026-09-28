@@ -1,8 +1,10 @@
 use crate::resample::resample;
+use crate::stream_errors::StreamErrorReporter;
 use crate::types::CapturedAudio;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{SampleFormat, Stream};
 use std::error::Error;
+use tokio::sync::mpsc;
 
 /// The default output device and the stream format it plays.
 pub struct AudioOutput {
@@ -35,11 +37,18 @@ impl AudioOutput {
 
     /// Play interleaved samples in the channels and rate of this output
     /// (see `convert_for_output`). Returns a Stream that must be kept alive
-    /// until playback is complete.
-    pub fn play(&self, samples: Vec<f32>) -> Result<Stream, Box<dyn Error + Send + Sync>> {
+    /// until playback is complete. Stream errors go to `errors` as
+    /// messages for the activity log (see `PlaybackErrors` in the
+    /// processing loop).
+    pub fn play(
+        &self,
+        samples: Vec<f32>,
+        errors: mpsc::Sender<String>,
+    ) -> Result<Stream, Box<dyn Error + Send + Sync>> {
+        let (device, config) = (&self.device, &self.config);
         let stream = match self.sample_format {
-            SampleFormat::F32 => build_output_stream::<f32>(&self.device, &self.config, samples)?,
-            SampleFormat::I16 => build_output_stream::<i16>(&self.device, &self.config, samples)?,
+            SampleFormat::F32 => build_output_stream::<f32>(device, config, samples, errors)?,
+            SampleFormat::I16 => build_output_stream::<i16>(device, config, samples, errors)?,
             format => return Err(format!("Unsupported sample format: {:?}", format).into()),
         };
         stream.play()?;
@@ -92,18 +101,26 @@ impl OutputSample for i16 {
     }
 }
 
+/// Reports the stream errors of a playback stream as messages for the
+/// activity log.
+pub(crate) fn playback_error_reporter(tx: mpsc::Sender<String>) -> StreamErrorReporter<String> {
+    StreamErrorReporter::new(tx, "Playback error", std::convert::identity)
+}
+
 fn build_output_stream<T: OutputSample>(
     device: &cpal::Device,
     config: &cpal::StreamConfig,
     samples: Vec<f32>,
+    errors: mpsc::Sender<String>,
 ) -> Result<Stream, cpal::BuildStreamError> {
     let mut position = 0;
+    let mut errors = playback_error_reporter(errors);
     device.build_output_stream(
         config,
         move |output: &mut [T], _: &cpal::OutputCallbackInfo| {
             write_samples(output, &samples, &mut position);
         },
-        |err| eprintln!("Playback error: {}", err),
+        move |err| errors.report(err),
         None,
     )
 }

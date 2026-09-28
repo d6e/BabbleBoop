@@ -303,6 +303,40 @@ pub fn hold_audio_stream<S>(stream: S, app_state: &AppState) {
     drop(stream);
 }
 
+/// Room for playback errors that the processing loop did not log yet. The
+/// reporter sends only an error that differs from the last one.
+const PLAYBACK_ERROR_QUEUE: usize = 16;
+
+/// Stream errors of the test playback. cpal reports them on an audio
+/// thread, which does not log (see `StreamErrorReporter`); the processing
+/// loop receives them here and logs them.
+pub struct PlaybackErrors {
+    tx: mpsc::Sender<String>,
+    rx: mpsc::Receiver<String>,
+}
+
+impl Default for PlaybackErrors {
+    fn default() -> Self {
+        let (tx, rx) = mpsc::channel(PLAYBACK_ERROR_QUEUE);
+        Self { tx, rx }
+    }
+}
+
+impl PlaybackErrors {
+    /// Where a new playback stream sends its errors.
+    pub fn sender(&self) -> mpsc::Sender<String> {
+        self.tx.clone()
+    }
+
+    /// Log the next playback error. Does not resolve while no error comes,
+    /// as this holds a sender. Cancel safe: `mpsc::Receiver::recv` is.
+    pub async fn log_next(&mut self, logger: &Logger) {
+        if let Some(message) = self.rx.recv().await {
+            logger.error(message);
+        }
+    }
+}
+
 /// Convert a test recording for the output device on a blocking thread.
 /// Resampling 30 s of 48 kHz stereo to 44.1 kHz takes about 0.1 s in a
 /// release build and 3 s in a debug build.
