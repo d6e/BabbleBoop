@@ -1,5 +1,6 @@
 use crate::app_state::{AppCommand, AppState, LogEntry, LogLevel};
 use crate::config::{Config, ThemeMode, CONFIG_PATH};
+use crate::models;
 use crate::theme::{self, AppColors};
 use eframe::egui;
 use std::sync::atomic::Ordering;
@@ -197,16 +198,6 @@ enum StatusType {
     Error,
     Info,
 }
-
-const OPENAI_MODELS: &[&str] = &[
-    "gpt-4o",
-    "gpt-4o-mini",
-    "gpt-4-turbo",
-    "gpt-4",
-    "gpt-3.5-turbo",
-];
-
-const TRANSCRIPTION_MODELS: &[&str] = &["whisper-1", "gpt-4o-transcribe", "gpt-4o-mini-transcribe"];
 
 /// Text field for a model name, with a list of suggested models next to it.
 /// The config takes any model name, for example a new or fine-tuned model.
@@ -665,23 +656,19 @@ impl BabbleBoopApp {
                                 ui,
                                 "model_presets",
                                 &mut self.config_draft.openai.model,
-                                OPENAI_MODELS,
+                                &models::suggested_chat_models(),
                             );
                             ui.end_row();
 
-                            ui.label("Transcription:")
-                                .on_hover_text("Model for speech-to-text (gpt-4o-mini-transcribe is cheapest)");
-                            egui::ComboBox::from_id_salt("transcription_model_combo")
-                                .selected_text(&self.config_draft.openai.transcription_model)
-                                .show_ui(ui, |ui| {
-                                    for model in TRANSCRIPTION_MODELS {
-                                        ui.selectable_value(
-                                            &mut self.config_draft.openai.transcription_model,
-                                            model.to_string(),
-                                            *model,
-                                        );
-                                    }
-                                });
+                            ui.label("Transcription:").on_hover_text(
+                                "OpenAI model for speech to text. Type a model name, or select one from the list.",
+                            );
+                            model_name_edit(
+                                ui,
+                                "transcription_model_presets",
+                                &mut self.config_draft.openai.transcription_model,
+                                &models::suggested_transcription_models(),
+                            );
                             ui.end_row();
                         });
                 });

@@ -296,10 +296,10 @@ requests_per_minute = 50
             config.max_audio_files, 10,
             "max_audio_files should default to 10"
         );
-        // transcription_model should default to whisper-1
+        // A missing transcription_model gets the default of a new config
         assert_eq!(
-            config.openai.transcription_model, "whisper-1",
-            "transcription_model should default to whisper-1"
+            config.openai.transcription_model,
+            Config::default().openai.transcription_model
         );
         // Removed fields (passthrough_enabled, passthrough_port) should be silently ignored
     }
@@ -1159,6 +1159,33 @@ mod gui_tests {
     }
 
     #[test]
+    fn test_custom_transcription_model_can_be_typed() {
+        let (mut app, _log_tx) = test_app();
+        let ctx = egui::Context::default();
+        let mut output = ctx.run(raw_input(), |ctx| app.ui(ctx));
+        for _ in 0..2 {
+            output = ctx.run(raw_input(), |ctx| app.ui(ctx));
+        }
+        let model = text_center(&output, &Config::default().openai.transcription_model);
+
+        click(&ctx, &mut app, model);
+        let select_all = egui::Event::Key {
+            key: egui::Key::A,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::COMMAND,
+        };
+        let typed = egui::Event::Text("my-transcriber".to_string());
+        let _ = ctx.run(with_events(vec![select_all, typed]), |ctx| app.ui(ctx));
+
+        assert_eq!(
+            app.config_draft.openai.transcription_model,
+            "my-transcriber"
+        );
+    }
+
+    #[test]
     fn test_translation_model_preset_can_be_selected() {
         let (mut app, _log_tx) = test_app();
         app.config_draft.openai.model = "my-finetuned-model".to_string();
@@ -1187,9 +1214,9 @@ mod gui_tests {
 
         click(&ctx, &mut app, list_button);
         let output = ctx.run(raw_input(), |ctx| app.ui(ctx));
-        click(&ctx, &mut app, text_center(&output, "gpt-4o"));
+        click(&ctx, &mut app, text_center(&output, "gpt-6-sol"));
 
-        assert_eq!(app.config_draft.openai.model, "gpt-4o");
+        assert_eq!(app.config_draft.openai.model, "gpt-6-sol");
     }
 
     /// Press and release the primary button at `pos`, in two frames.

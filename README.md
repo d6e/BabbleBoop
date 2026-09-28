@@ -7,8 +7,8 @@ The fun thing about LLMs is that they can translate to anything! English -> Japa
 ## What It Does
 
 - Listens to your speech in VRChat
-- Transcribes what you say using OpenAI's Whisper
-- Translates the text using GPT models
+- Transcribes what you say using an OpenAI speech to text model (gpt-transcribe by default)
+- Translates the text using a GPT model (gpt-6-luna by default)
 - Sends the translation to VRChat's chat box via OSC
 
 ## Why LLMs?
