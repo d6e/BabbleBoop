@@ -6,7 +6,7 @@ use babble_boop::audio_recording::{start_audio_recording, SharedAudioState};
 use babble_boop::config::{Config, CONFIG_PATH};
 use babble_boop::gui::{run_error_dialog, run_gui};
 use babble_boop::processing_loop::{
-    apply_enabled, convert_for_playback, encode_for_upload, log_audio_event, ProcessingServices,
+    apply_enabled, convert_for_playback, encode_for_upload, AudioEvents, ProcessingServices,
     TestRecording, TEST_RECORDING_LIMIT,
 };
 use babble_boop::types::AudioEvent;
@@ -157,7 +157,8 @@ async fn run_processing_loop(
         config.translation.target_language
     ));
 
-    let (tx, mut rx) = mpsc::channel::<AudioEvent>(100);
+    let (tx, rx) = mpsc::channel::<AudioEvent>(100);
+    let mut audio_events = AudioEvents::new(rx, app_state.logger.clone());
 
     // Start the audio recording in a separate thread
     let shared_audio = SharedAudioState::new(&app_state);
@@ -255,9 +256,7 @@ async fn run_processing_loop(
                     break;
                 }
             }
-            Some(event) = rx.recv() => {
-                log_audio_event(&event, &app_state.logger);
-
+            event = audio_events.recv() => {
                 // Ignore speech while translation is off. SetEnabled(false)
                 // turns off a typing indicator that is still on.
                 if !app_state.enabled.load(Ordering::Relaxed) {

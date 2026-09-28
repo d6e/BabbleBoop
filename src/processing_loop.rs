@@ -16,6 +16,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
+use tokio::sync::mpsc;
 use tokio::time::Instant;
 
 /// Directory for saved recordings when `keep_audio_files` is on.
@@ -157,6 +158,31 @@ pub async fn apply_enabled(enabled: bool, typing_indicator: &TypingIndicator, lo
     } else {
         typing_indicator.stop_typing().await;
         logger.info("Translation disabled");
+    }
+}
+
+/// The events from the audio callback, as the processing loop receives
+/// them.
+pub struct AudioEvents {
+    rx: mpsc::Receiver<AudioEvent>,
+    logger: Logger,
+}
+
+impl AudioEvents {
+    pub fn new(rx: mpsc::Receiver<AudioEvent>, logger: Logger) -> Self {
+        Self { rx, logger }
+    }
+
+    /// The next event, after its line in the activity log. Never resolves
+    /// after the audio callback is gone.
+    pub async fn recv(&mut self) -> AudioEvent {
+        match self.rx.recv().await {
+            Some(event) => {
+                log_audio_event(&event, &self.logger);
+                event
+            }
+            None => std::future::pending().await,
+        }
     }
 }
 
