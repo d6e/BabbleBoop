@@ -5,14 +5,11 @@ use babble_boop::audio_processing::process_audio;
 use babble_boop::audio_recording::start_audio_recording;
 use babble_boop::config::{Config, CONFIG_PATH};
 use babble_boop::gui::{run_error_dialog, run_gui};
-use babble_boop::price_estimator::PriceEstimator;
-use babble_boop::rate_limiter::RateLimiter;
-use babble_boop::recording_manager::RecordingManager;
+use babble_boop::processing_loop::ProcessingServices;
 use babble_boop::types::AudioEvent;
 use babble_boop::typing_indicator::TypingIndicator;
 
 use std::io::Cursor;
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -160,20 +157,9 @@ async fn run_processing_loop(
         audio_stream_info.channels, audio_stream_info.sample_rate
     ));
 
-    let mut rate_limiter = RateLimiter::new(config.rate_limit.requests_per_minute);
-    let mut price_estimator =
-        PriceEstimator::new(&config.openai.model, &config.openai.transcription_model);
+    let mut services = ProcessingServices::new(&config);
     // Initialize the shared cost from the loaded value
-    app_state.set_total_cost(price_estimator.total_cost);
-
-    let mut recording_manager = if config.keep_audio_files {
-        Some(RecordingManager::new(
-            PathBuf::from("recordings"),
-            config.max_audio_files,
-        ))
-    } else {
-        None
-    };
+    app_state.set_total_cost(services.price_estimator.total_cost);
 
     let api_client = build_api_client()?;
 
@@ -211,14 +197,7 @@ async fn run_processing_loop(
                         app_state.logger.info("Config updated");
                         // Update hot-reloadable audio params
                         app_state.audio_params.update(&new_config.audio);
-                        // Update rate limiter if needed
-                        rate_limiter = RateLimiter::new(new_config.rate_limit.requests_per_minute);
-                        // Update recording manager if keep_audio_files changed
-                        recording_manager = if new_config.keep_audio_files {
-                            Some(RecordingManager::new(PathBuf::from("recordings"), new_config.max_audio_files))
-                        } else {
-                            None
-                        };
+                        services.apply_config(&new_config);
                     }
                     Some(AppCommand::StartTestRecording) => {
                         app_state.logger.info("Test recording started...");
@@ -334,10 +313,10 @@ async fn run_processing_loop(
                             audio_data,
                             &current_config,
                             &socket,
-                            &mut rate_limiter,
+                            &mut services.rate_limiter,
                             &typing_indicator,
-                            &mut price_estimator,
-                            recording_manager.as_ref(),
+                            &mut services.price_estimator,
+                            services.recording_manager.as_ref(),
                             &app_state,
                         ))
                         .await;

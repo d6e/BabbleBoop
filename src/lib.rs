@@ -7,6 +7,7 @@ pub mod chatbox;
 pub mod config;
 pub mod gui;
 pub mod price_estimator;
+pub mod processing_loop;
 pub mod rate_limiter;
 pub mod recording_manager;
 pub mod shutdown;
