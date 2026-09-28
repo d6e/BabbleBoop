@@ -1,5 +1,9 @@
 use crate::app_state::{AppCommand, AppState, LogEntry, LogLevel};
-use crate::config::{Config, ThemeMode, CONFIG_PATH};
+use crate::config::{
+    Config, ThemeMode, CONFIG_PATH, DISPLAY_TIME_MS_RANGE, MAX_AUDIO_FILES_RANGE,
+    MAX_MESSAGE_CHUNKS_RANGE, MIN_TRANSCRIPTION_DURATION_RANGE, NOISE_GATE_HOLD_TIME_RANGE,
+    NOISE_GATE_THRESHOLD_RANGE, PORT_RANGE, REQUESTS_PER_MINUTE_RANGE, SILENCE_THRESHOLD_RANGE,
+};
 use crate::models;
 use crate::processing_loop::TEST_RECORDING_LIMIT;
 use crate::recorder::MAX_RECORDING;
@@ -636,22 +640,22 @@ impl BabbleBoopApp {
 
                             ui.label("Input Port:")
                                 .on_hover_text("Port to receive OSC messages from VRChat");
-                            ui.add(egui::DragValue::new(&mut self.config_draft.osc.input_port).range(1..=65535));
+                            ui.add(egui::DragValue::new(&mut self.config_draft.osc.input_port).range(PORT_RANGE));
                             ui.end_row();
 
                             ui.label("Output Port:")
                                 .on_hover_text("Port to send OSC messages to VRChat");
-                            ui.add(egui::DragValue::new(&mut self.config_draft.osc.output_port).range(1..=65535));
+                            ui.add(egui::DragValue::new(&mut self.config_draft.osc.output_port).range(PORT_RANGE));
                             ui.end_row();
 
                             ui.label("Display Time (ms):")
                                 .on_hover_text("How long messages stay visible in VRChat");
-                            ui.add(egui::DragValue::new(&mut self.config_draft.osc.display_time).range(1000..=30000));
+                            ui.add(egui::DragValue::new(&mut self.config_draft.osc.display_time).range(DISPLAY_TIME_MS_RANGE));
                             ui.end_row();
 
                             ui.label("Max Message Chunks:")
                                 .on_hover_text("Maximum number of message parts for long text");
-                            ui.add(egui::DragValue::new(&mut self.config_draft.osc.max_message_chunks).range(1..=10));
+                            ui.add(egui::DragValue::new(&mut self.config_draft.osc.max_message_chunks).range(MAX_MESSAGE_CHUNKS_RANGE));
                             ui.end_row();
                         });
                 });
@@ -745,7 +749,7 @@ impl BabbleBoopApp {
                                 .on_hover_text("Maximum API requests per minute to avoid rate limiting");
                             ui.add(egui::DragValue::new(
                                 &mut self.config_draft.rate_limit.requests_per_minute,
-                            ).range(1..=120));
+                            ).range(REQUESTS_PER_MINUTE_RANGE));
                             ui.end_row();
                         });
                 });
@@ -770,7 +774,7 @@ impl BabbleBoopApp {
                                     .on_hover_text("Maximum number of audio files to keep");
                             });
                             ui.add_enabled_ui(self.config_draft.keep_audio_files, |ui| {
-                                ui.add(egui::DragValue::new(&mut self.config_draft.max_audio_files).range(1..=100));
+                                ui.add(egui::DragValue::new(&mut self.config_draft.max_audio_files).range(MAX_AUDIO_FILES_RANGE));
                             });
                             ui.end_row();
                         });
@@ -949,7 +953,7 @@ impl BabbleBoopApp {
                         length. On most Windows devices one buffer is about 10 ms, so 100 is about \
                         1 second.",
                     );
-                ui.add(egui::DragValue::new(&mut self.config_draft.audio.silence_threshold).range(1..=200));
+                ui.add(egui::DragValue::new(&mut self.config_draft.audio.silence_threshold).range(SILENCE_THRESHOLD_RANGE));
                 ui.end_row();
 
                 ui.label("Noise Gate Threshold:")
@@ -957,7 +961,7 @@ impl BabbleBoopApp {
                 ui.add(
                     egui::DragValue::new(&mut self.config_draft.audio.noise_gate_threshold)
                         .speed(0.01)
-                        .range(0.0..=1.0),
+                        .range(NOISE_GATE_THRESHOLD_RANGE),
                 );
                 ui.end_row();
 
@@ -966,7 +970,7 @@ impl BabbleBoopApp {
                 ui.add(
                     egui::DragValue::new(&mut self.config_draft.audio.noise_gate_hold_time)
                         .speed(0.01)
-                        .range(0.0..=2.0),
+                        .range(NOISE_GATE_HOLD_TIME_RANGE),
                 );
                 ui.end_row();
 
@@ -979,7 +983,7 @@ impl BabbleBoopApp {
                 ui.add(
                     egui::DragValue::new(&mut self.config_draft.audio.min_transcription_duration)
                         .speed(0.1)
-                        .range(0.0..=10.0),
+                        .range(MIN_TRANSCRIPTION_DURATION_RANGE),
                 );
                 ui.end_row();
             });

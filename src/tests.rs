@@ -316,7 +316,8 @@ pub(crate) mod regression_tests {
         fs::remove_file(&temp_path).unwrap();
 
         // Compare the whole struct, so every field is checked
-        assert_eq!(loaded, config);
+        assert_eq!(loaded.config, config);
+        assert_eq!(loaded.warnings, []);
     }
 
     #[test]

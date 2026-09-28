@@ -69,7 +69,7 @@ async fn finish_test_recording(
 
 fn main() {
     // Load or create config
-    let (config, first_run) = match Config::load_or_create(CONFIG_PATH) {
+    let (loaded, first_run) = match Config::load_or_create(CONFIG_PATH) {
         Ok(result) => result,
         Err(e) => {
             let message = format!(
@@ -94,7 +94,11 @@ fn main() {
     let (log_tx, log_rx) = mpsc::channel::<LogEntry>(100);
 
     // Create shared app state
-    let app_state = Arc::new(AppState::new(config, cmd_tx, log_tx));
+    let app_state = Arc::new(AppState::new(loaded.config, cmd_tx, log_tx));
+    // The logger did not exist when the config was loaded
+    for warning in &loaded.warnings {
+        app_state.logger.info(warning.to_string());
+    }
     let app_state_clone = Arc::clone(&app_state);
     let shutdown = app_state.shutdown.clone();
 
