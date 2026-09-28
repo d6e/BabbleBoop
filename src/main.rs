@@ -127,7 +127,7 @@ fn main() {
     });
 
     // Run GUI on main thread
-    if let Err(e) = run_gui(app_state, log_rx, first_run) {
+    if let Err(e) = run_gui(app_state, log_rx, first_run, loaded.warnings) {
         let message = format!("Failed to start the application window: {}", e);
         eprintln!("{}", message);
         #[expect(

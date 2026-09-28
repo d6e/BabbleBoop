@@ -94,7 +94,7 @@ impl fmt::Display for ConfigWarning {
         write!(
             f,
             "Config file: {} = {}: {}. BabbleBoop uses {}. \
-            The file changes only when you save the settings.",
+            Click Save Settings to write it to the file.",
             self.field, self.found, self.reason, self.used
         )
     }

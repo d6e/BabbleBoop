@@ -2754,4 +2754,102 @@ mod gui_tests {
         );
         assert!(!text.contains(&"Enabled".to_string()), "{:?}", text);
     }
+
+    // ===========================================================================
+    // Test: A value that the loader replaced can be saved to the file
+    // ===========================================================================
+
+    const UNSAVED: &str = "● Unsaved changes";
+
+    /// The app after a start with the default config file, but with
+    /// `osc.display_time` set to `display_time` in the file. The API key is
+    /// blank, so a click on Save fails the validation and writes no file.
+    fn app_from_file_with_display_time(display_time: i64) -> BabbleBoopApp {
+        let mut file = toml::Value::try_from(Config::default()).unwrap();
+        file["osc"]["display_time"] = toml::Value::Integer(display_time);
+        let loaded = Config::from_toml(&toml::to_string(&file).unwrap()).unwrap();
+        assert_eq!(
+            loaded.config.openai.api_key, "",
+            "a click on Save must not write config.toml"
+        );
+        let (cmd_tx, _cmd_rx) = tokio::sync::mpsc::channel(10);
+        let (log_tx, log_rx) = tokio::sync::mpsc::channel(100);
+        let app_state = Arc::new(AppState::new(loaded.config, cmd_tx, log_tx));
+        let mut app = BabbleBoopApp::new(app_state, log_rx);
+        app.note_replaced_values(&loaded.warnings);
+        app
+    }
+
+    /// 999999 is above the maximum, so the loader uses 30000.
+    fn app_with_replaced_display_time() -> BabbleBoopApp {
+        app_from_file_with_display_time(999_999)
+    }
+
+    #[test]
+    fn test_replaced_config_value_shows_unsaved_changes() {
+        let mut app = app_with_replaced_display_time();
+
+        let text = painted_text(&run_until_idle(&egui::Context::default(), &mut app));
+
+        assert!(text.contains(&UNSAVED.to_string()), "{:?}", text);
+        // Reset has nothing to discard, as the draft has the values in use
+        assert!(!text.contains(&"Reset".to_string()), "{:?}", text);
+    }
+
+    #[test]
+    fn test_replaced_config_value_can_be_saved() {
+        let mut app = app_with_replaced_display_time();
+        let ctx = egui::Context::default();
+        let output = run_until_idle(&ctx, &mut app);
+
+        click(&ctx, &mut app, text_center(&output, "Save Settings"));
+
+        // The click reached the save handler, which refused the blank key
+        let text = painted_text(&run_until_idle(&ctx, &mut app));
+        assert!(
+            text.contains(&"OpenAI API key is required".to_string()),
+            "{:?}",
+            text
+        );
+    }
+
+    #[test]
+    fn test_reset_keeps_the_replaced_value_and_the_unsaved_changes() {
+        let mut app = app_with_replaced_display_time();
+        let ctx = egui::Context::default();
+        app.config_draft.osc.display_time = 5000;
+        let output = run_until_idle(&ctx, &mut app);
+
+        click(&ctx, &mut app, text_center(&output, "Reset"));
+
+        let text = painted_text(&run_until_idle(&ctx, &mut app));
+        assert!(
+            text.contains(&"Changes discarded".to_string()),
+            "{:?}",
+            text
+        );
+        assert_eq!(app.config_draft.osc.display_time, 30000);
+        assert!(text.contains(&UNSAVED.to_string()), "{:?}", text);
+    }
+
+    #[test]
+    fn test_config_file_without_replaced_values_has_nothing_to_save() {
+        let mut app = app_from_file_with_display_time(5000);
+        let ctx = egui::Context::default();
+        let output = run_until_idle(&ctx, &mut app);
+        assert!(
+            !painted_text(&output).contains(&UNSAVED.to_string()),
+            "{:?}",
+            painted_text(&output)
+        );
+
+        click(&ctx, &mut app, text_center(&output, "Save Settings"));
+
+        let text = painted_text(&run_until_idle(&ctx, &mut app));
+        assert!(
+            !text.contains(&"OpenAI API key is required".to_string()),
+            "{:?}",
+            text
+        );
+    }
 }

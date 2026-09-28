@@ -1,6 +1,6 @@
 use crate::app_state::{AppCommand, AppState, LogEntry, LogLevel};
 use crate::config::{
-    Config, ThemeMode, CONFIG_PATH, DISPLAY_TIME_MS_RANGE, MAX_AUDIO_FILES_RANGE,
+    Config, ConfigWarning, ThemeMode, CONFIG_PATH, DISPLAY_TIME_MS_RANGE, MAX_AUDIO_FILES_RANGE,
     MAX_MESSAGE_CHUNKS_RANGE, MIN_TRANSCRIPTION_DURATION_RANGE, NOISE_GATE_HOLD_TIME_RANGE,
     NOISE_GATE_THRESHOLD_RANGE, PORT_RANGE, REQUESTS_PER_MINUTE_RANGE, SILENCE_THRESHOLD_RANGE,
 };
@@ -263,6 +263,9 @@ pub struct BabbleBoopApp {
     app_state: Arc<AppState>,
     pub(crate) config_draft: Config,
     saved_config: Config,
+    /// The config file has values that the loader replaced, so the file
+    /// differs from `saved_config` until the next save.
+    file_differs: bool,
     status_message: Option<(String, StatusType, std::time::Instant)>,
     log_rx: mpsc::Receiver<LogEntry>,
     log_entries: Vec<LogEntry>,
@@ -283,6 +286,7 @@ impl BabbleBoopApp {
             app_state,
             config_draft,
             saved_config,
+            file_differs: false,
             status_message: None,
             log_rx,
             log_entries: Vec::new(),
@@ -309,8 +313,19 @@ impl BabbleBoopApp {
         format!("{:02}:{:02}:{:02}", hours, mins, secs)
     }
 
-    fn has_unsaved_changes(&self) -> bool {
+    /// Show the settings as unsaved until the next save if the loader
+    /// replaced values of the config file, so that Save can write the
+    /// values in use to the file.
+    pub(crate) fn note_replaced_values(&mut self, warnings: &[ConfigWarning]) {
+        self.file_differs = !warnings.is_empty();
+    }
+
+    fn draft_changed(&self) -> bool {
         self.config_draft != self.saved_config
+    }
+
+    fn has_unsaved_changes(&self) -> bool {
+        self.file_differs || self.draft_changed()
     }
 
     fn reload_config(&mut self, ctx: &egui::Context) {
@@ -352,6 +367,7 @@ impl BabbleBoopApp {
             *config = new_config.clone();
         }
         self.saved_config = new_config.clone();
+        self.file_differs = false;
         match self.send_command(AppCommand::UpdateConfig(new_config)) {
             Ok(()) => self.set_status_success("Settings saved successfully"),
             Err(e) => self.set_status_error(format!("Settings saved to file, but {}", e)),
@@ -459,8 +475,8 @@ impl BabbleBoopApp {
                     ui.separator();
                 }
 
-                // Reset button (only show if there are changes)
-                if self.has_unsaved_changes()
+                // Reset button (only show if the draft has changes)
+                if self.draft_changed()
                     && ui
                         .button("Reset")
                         .on_hover_text("Discard changes and reload saved settings")
@@ -998,6 +1014,7 @@ pub fn run_gui(
     app_state: Arc<AppState>,
     log_rx: mpsc::Receiver<LogEntry>,
     first_run: bool,
+    config_warnings: Vec<ConfigWarning>,
 ) -> Result<(), eframe::Error> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -1012,6 +1029,7 @@ pub fn run_gui(
         Box::new(move |cc| {
             app_state.gui_waker.attach(cc.egui_ctx.clone());
             let mut app = BabbleBoopApp::new(app_state, log_rx);
+            app.note_replaced_values(&config_warnings);
 
             // Apply saved theme on startup
             let theme_mode = app.config_draft.theme;
