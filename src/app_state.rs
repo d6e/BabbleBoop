@@ -80,6 +80,28 @@ impl Logger {
     }
 }
 
+/// Run the body of a background thread and log in the activity log if it
+/// returns an error or panics, so that the thread does not stop with a
+/// message on stderr only. The panic does not propagate.
+pub fn run_logging_failure<E: std::fmt::Display>(
+    logger: &Logger,
+    name: &str,
+    body: impl FnOnce() -> Result<(), E>,
+) {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(body)) {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => logger.error(format!("{} stopped: {}", name, e)),
+        Err(payload) => {
+            let reason = payload
+                .downcast_ref::<&str>()
+                .copied()
+                .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+                .unwrap_or("unknown panic");
+            logger.error(format!("{} crashed: {}", name, reason));
+        }
+    }
+}
+
 /// Parse an API error message and extract a user-friendly version for display.
 fn parse_api_error_for_display(error: &str) -> String {
     // Try to find JSON in the error message

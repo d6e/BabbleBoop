@@ -606,4 +606,54 @@ requests_per_minute = 50
 
         assert_eq!(wait_after_saving_limit(3).await, Duration::ZERO);
     }
+
+    // ===========================================================================
+    // Test: Processing thread failures reach the activity log
+    // ===========================================================================
+
+    fn logged_entries(
+        body: impl FnOnce() -> Result<(), String>,
+    ) -> Vec<crate::app_state::LogEntry> {
+        use crate::app_state::{run_logging_failure, Logger};
+
+        let (log_tx, mut log_rx) = tokio::sync::mpsc::channel(10);
+        run_logging_failure(&Logger::new(log_tx), "Processing", body);
+        std::iter::from_fn(|| log_rx.try_recv().ok()).collect()
+    }
+
+    #[test]
+    fn test_processing_error_is_logged() {
+        use crate::app_state::LogLevel;
+
+        let entries = logged_entries(|| Err("Address already in use".to_string()));
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].level, LogLevel::Error);
+        assert_eq!(
+            entries[0].message,
+            "Processing stopped: Address already in use"
+        );
+    }
+
+    #[test]
+    fn test_processing_panic_is_logged() {
+        use crate::app_state::LogLevel;
+
+        // A message formatted at run time is a String payload, a literal is
+        // a &str.
+        let what = String::from("poisoned");
+        let entries = logged_entries(move || panic!("lock {}", what));
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].level, LogLevel::Error);
+        assert_eq!(entries[0].message, "Processing crashed: lock poisoned");
+
+        let entries = logged_entries(|| panic!("no runtime"));
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].message, "Processing crashed: no runtime");
+    }
+
+    #[test]
+    fn test_processing_normal_exit_is_not_logged() {
+        assert!(logged_entries(|| Ok(())).is_empty());
+    }
 }

@@ -1,5 +1,5 @@
 use babble_boop::api_client::build_api_client;
-use babble_boop::app_state::{AppCommand, AppState, LogEntry};
+use babble_boop::app_state::{run_logging_failure, AppCommand, AppState, LogEntry};
 use babble_boop::audio_playback::play_wav_buffer;
 use babble_boop::audio_processing::process_audio;
 use babble_boop::audio_recording::start_audio_recording;
@@ -55,13 +55,20 @@ fn main() {
     let app_state_clone = Arc::clone(&app_state);
     let shutdown = app_state.shutdown.clone();
 
-    // Spawn background thread with tokio runtime for audio processing
+    // Spawn background thread with tokio runtime for audio processing.
+    // Errors and panics go to the activity log, as the GUI shows no other
+    // sign that processing stopped.
     let processing_handle = std::thread::spawn(move || {
-        let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
-        rt.block_on(async {
-            if let Err(e) = run_processing_loop(app_state_clone, cmd_rx).await {
-                eprintln!("Processing error: {}", e);
+        let logger = app_state_clone.logger.clone();
+        let rt = match tokio::runtime::Runtime::new() {
+            Ok(rt) => rt,
+            Err(e) => {
+                logger.error(format!("Processing stopped: cannot start tokio: {}", e));
+                return;
             }
+        };
+        run_logging_failure(&logger, "Processing", || {
+            rt.block_on(run_processing_loop(app_state_clone, cmd_rx))
         });
         // Dropping the runtime waits for blocking tasks without a limit, and
         // a cancelled request can leave a DNS lookup running on one.
@@ -93,7 +100,15 @@ async fn run_processing_loop(
         .clone();
 
     let socket_address = format!("{}:{}", config.osc.address, config.osc.input_port);
-    let socket = Arc::new(UdpSocket::bind(&socket_address).await?);
+    let socket = UdpSocket::bind(&socket_address)
+        .await
+        .map_err(|e| format!("cannot open OSC port {}: {}", socket_address, e))?;
+    let socket = Arc::new(socket);
+
+    // Before the audio thread starts, so a failure here does not leave
+    // audio capture running with nothing to receive it.
+    let api_client =
+        build_api_client().map_err(|e| format!("cannot create the HTTP client: {}", e))?;
 
     app_state.logger.info("Starting audio recording...");
     app_state.logger.info(format!(
@@ -149,8 +164,8 @@ async fn run_processing_loop(
     // Wait for stream initialization and get stream info
     let audio_stream_info = init_rx
         .recv()
-        .map_err(|_| "Audio recording thread failed to start")?
-        .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.into() })?;
+        .map_err(|_| "audio recording thread failed to start")?
+        .map_err(|e| format!("cannot start audio input: {}", e))?;
 
     app_state.logger.info(format!(
         "Audio: {} ch, {} Hz",
@@ -160,8 +175,6 @@ async fn run_processing_loop(
     let mut services = ProcessingServices::new(&config);
     // Initialize the shared cost from the loaded value
     app_state.set_total_cost(services.price_estimator.total_cost);
-
-    let api_client = build_api_client()?;
 
     let typing_indicator = TypingIndicator::new(Arc::clone(&socket), Arc::clone(&app_state.config));
 
