@@ -920,4 +920,94 @@ mod gui_tests {
             painted_text(&output)
         );
     }
+
+    // ===========================================================================
+    // Test: Meters and the toggle follow the theme
+    // ===========================================================================
+
+    fn themed_app(theme: crate::config::ThemeMode) -> (BabbleBoopApp, Arc<AppState>) {
+        let (cmd_tx, _cmd_rx) = tokio::sync::mpsc::channel(10);
+        let (log_tx, log_rx) = tokio::sync::mpsc::channel(100);
+        let config = Config {
+            theme,
+            ..Config::default()
+        };
+        let app_state = Arc::new(AppState::new(config, cmd_tx, log_tx));
+        (
+            BabbleBoopApp::new(Arc::clone(&app_state), log_rx),
+            app_state,
+        )
+    }
+
+    /// Filled rectangles of exactly `width` x `height` points in `output`.
+    fn painted_rect_fills(
+        output: &egui::FullOutput,
+        width: f32,
+        height: f32,
+    ) -> Vec<egui::Color32> {
+        output
+            .shapes
+            .iter()
+            .filter_map(|clipped| match &clipped.shape {
+                egui::Shape::Rect(rect)
+                    if rect.rect.width() == width && rect.rect.height() == height =>
+                {
+                    Some(rect.fill)
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn is_light(color: egui::Color32) -> bool {
+        (u32::from(color.r()) + u32::from(color.g()) + u32::from(color.b())) / 3 > 128
+    }
+
+    #[test]
+    fn test_meter_tracks_follow_the_theme() {
+        use crate::config::ThemeMode;
+        use std::sync::atomic::Ordering;
+
+        for theme in [ThemeMode::Dark, ThemeMode::Light] {
+            let (mut app, app_state) = themed_app(theme);
+            // Recording shows the silence and duration meters. Level,
+            // silence and duration are zero, so only the tracks are painted.
+            app_state.is_recording.store(true, Ordering::Relaxed);
+            let output = egui::Context::default().run(raw_input(), |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| app.audio_settings_ui(ui));
+            });
+
+            let window_is_light = is_light(crate::theme::get_visuals(theme).panel_fill);
+            let level_track = painted_rect_fills(&output, 200.0, 16.0);
+            let small_tracks = painted_rect_fills(&output, 200.0, 10.0);
+            // Gate, silence and duration.
+            assert_eq!(small_tracks.len(), 3, "{:?}", theme);
+            for track in level_track.iter().chain(&small_tracks) {
+                assert_eq!(
+                    is_light(*track),
+                    window_is_light,
+                    "{:?} theme meter track {:?}",
+                    theme,
+                    track
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_toggle_off_track_follows_the_theme() {
+        use crate::config::ThemeMode;
+        use std::sync::atomic::Ordering;
+
+        for theme in [ThemeMode::Dark, ThemeMode::Light] {
+            let (mut app, app_state) = themed_app(theme);
+            app_state.enabled.store(false, Ordering::Relaxed);
+            let output = egui::Context::default().run(raw_input(), |ctx| app.ui(ctx));
+
+            let window_is_light = is_light(crate::theme::get_visuals(theme).panel_fill);
+            let toggle = painted_rect_fills(&output, 36.0, 20.0);
+            assert_eq!(toggle.len(), 1, "{:?}", theme);
+            assert_eq!(is_light(toggle[0]), window_is_light, "{:?} theme", theme);
+        }
+    }
 }

@@ -67,7 +67,13 @@ fn draw_audio_level_meter(
 }
 
 /// Draw noise gate state indicator with hold time countdown
-fn draw_noise_gate_state(ui: &mut egui::Ui, is_active: bool, hold_remaining: f32, hold_time: f32) {
+fn draw_noise_gate_state(
+    ui: &mut egui::Ui,
+    is_active: bool,
+    hold_remaining: f32,
+    hold_time: f32,
+    colors: &AppColors,
+) {
     let meter_size = egui::vec2(ui.available_width().min(200.0), 10.0);
     let (rect, _response) = ui.allocate_exact_size(meter_size, egui::Sense::hover());
 
@@ -75,15 +81,15 @@ fn draw_noise_gate_state(ui: &mut egui::Ui, is_active: bool, hold_remaining: f32
         let painter = ui.painter();
 
         // Background
-        painter.rect_filled(rect, 2.0, egui::Color32::from_gray(40));
+        painter.rect_filled(rect, 2.0, colors.meter_background);
 
         if is_active {
             let color = if hold_remaining > 0.0 {
-                // In hold state: orange/amber
-                egui::Color32::from_rgb(220, 160, 60)
+                // In hold state: amber
+                colors.meter_medium
             } else {
                 // Active audio: green
-                egui::Color32::from_rgb(60, 180, 60)
+                colors.meter_low
             };
 
             // Fill amount based on hold state
@@ -104,7 +110,7 @@ fn draw_noise_gate_state(ui: &mut egui::Ui, is_active: bool, hold_remaining: f32
 }
 
 /// Draw a progress bar showing silent frames toward silence threshold
-fn draw_silence_counter(ui: &mut egui::Ui, silent_frames: u32, threshold: u32) {
+fn draw_silence_counter(ui: &mut egui::Ui, silent_frames: u32, threshold: u32, colors: &AppColors) {
     let meter_size = egui::vec2(ui.available_width().min(200.0), 10.0);
     let (rect, _response) = ui.allocate_exact_size(meter_size, egui::Sense::hover());
 
@@ -112,7 +118,7 @@ fn draw_silence_counter(ui: &mut egui::Ui, silent_frames: u32, threshold: u32) {
         let painter = ui.painter();
 
         // Background
-        painter.rect_filled(rect, 2.0, egui::Color32::from_gray(40));
+        painter.rect_filled(rect, 2.0, colors.meter_background);
 
         // Progress bar
         let progress = if threshold > 0 {
@@ -126,14 +132,21 @@ fn draw_silence_counter(ui: &mut egui::Ui, silent_frames: u32, threshold: u32) {
             let fill_rect =
                 egui::Rect::from_min_size(rect.min, egui::vec2(fill_width, rect.height()));
             // Yellow to red gradient as silence progresses
-            let color = egui::Color32::from_rgb(220, (180.0 * (1.0 - progress)) as u8, 60);
+            let color = colors
+                .meter_medium
+                .lerp_to_gamma(colors.meter_high, progress);
             painter.rect_filled(fill_rect, 2.0, color);
         }
     }
 }
 
 /// Draw recording duration progress toward minimum transcription duration
-fn draw_recording_duration(ui: &mut egui::Ui, duration: f32, min_duration: f32) {
+fn draw_recording_duration(
+    ui: &mut egui::Ui,
+    duration: f32,
+    min_duration: f32,
+    colors: &AppColors,
+) {
     let meter_size = egui::vec2(ui.available_width().min(200.0), 10.0);
     let (rect, _response) = ui.allocate_exact_size(meter_size, egui::Sense::hover());
 
@@ -141,7 +154,7 @@ fn draw_recording_duration(ui: &mut egui::Ui, duration: f32, min_duration: f32) 
         let painter = ui.painter();
 
         // Background
-        painter.rect_filled(rect, 2.0, egui::Color32::from_gray(40));
+        painter.rect_filled(rect, 2.0, colors.meter_background);
 
         // Progress bar
         let progress = if min_duration > 0.0 {
@@ -156,13 +169,9 @@ fn draw_recording_duration(ui: &mut egui::Ui, duration: f32, min_duration: f32) 
                 egui::Rect::from_min_size(rect.min, egui::vec2(fill_width, rect.height()));
             // Red to green as duration increases
             let color = if progress >= 1.0 {
-                egui::Color32::from_rgb(60, 180, 60)
+                colors.meter_low
             } else {
-                egui::Color32::from_rgb(
-                    (220.0 * (1.0 - progress) + 60.0 * progress) as u8,
-                    (60.0 * (1.0 - progress) + 180.0 * progress) as u8,
-                    60,
-                )
+                colors.meter_high.lerp_to_gamma(colors.meter_low, progress)
             };
             painter.rect_filled(fill_rect, 2.0, color);
         }
@@ -200,7 +209,7 @@ const OPENAI_MODELS: &[&str] = &[
 const TRANSCRIPTION_MODELS: &[&str] = &["whisper-1", "gpt-4o-transcribe", "gpt-4o-mini-transcribe"];
 
 /// Custom toggle switch widget
-fn toggle_switch(on: &mut bool) -> impl egui::Widget + '_ {
+fn toggle_switch<'a>(on: &'a mut bool, colors: &'a AppColors) -> impl egui::Widget + 'a {
     move |ui: &mut egui::Ui| {
         let desired_size = egui::vec2(36.0, 20.0);
         let (rect, mut response) = ui.allocate_exact_size(desired_size, egui::Sense::click());
@@ -218,11 +227,7 @@ fn toggle_switch(on: &mut bool) -> impl egui::Widget + '_ {
             let radius = 0.5 * rect.height();
 
             // Track background
-            let bg_color = egui::Color32::from_rgb(
-                (60.0 + how_on * 40.0) as u8,
-                (60.0 + how_on * 100.0) as u8,
-                (60.0 + how_on * 40.0) as u8,
-            );
+            let bg_color = colors.toggle_off.lerp_to_gamma(colors.toggle_on, how_on);
             ui.painter().rect(rect, radius, bg_color, visuals.bg_stroke);
 
             // Knob
@@ -232,7 +237,7 @@ fn toggle_switch(on: &mut bool) -> impl egui::Widget + '_ {
             ui.painter().circle(
                 knob_center,
                 knob_radius,
-                egui::Color32::WHITE,
+                colors.toggle_knob,
                 egui::Stroke::NONE,
             );
         }
@@ -500,7 +505,7 @@ impl BabbleBoopApp {
                 ui.add_space(8.0);
 
                 // Toggle switch
-                let response = ui.add(toggle_switch(&mut enabled));
+                let response = ui.add(toggle_switch(&mut enabled, &colors));
                 if response.changed() {
                     self.app_state.enabled.store(enabled, Ordering::Relaxed);
                     if let Err(e) = self.send_command(AppCommand::SetEnabled(enabled)) {
@@ -814,6 +819,7 @@ impl BabbleBoopApp {
             noise_gate_active,
             hold_remaining,
             self.config_draft.audio.noise_gate_hold_time,
+            &colors,
         );
         ui.add_space(4.0);
 
@@ -829,7 +835,12 @@ impl BabbleBoopApp {
                     .small(),
                 );
             });
-            draw_silence_counter(ui, silent_frames, self.config_draft.audio.silence_threshold);
+            draw_silence_counter(
+                ui,
+                silent_frames,
+                self.config_draft.audio.silence_threshold,
+                &colors,
+            );
             ui.add_space(4.0);
 
             // Recording duration
@@ -847,6 +858,7 @@ impl BabbleBoopApp {
                 ui,
                 recording_duration,
                 self.config_draft.audio.min_transcription_duration,
+                &colors,
             );
             ui.add_space(4.0);
         }
