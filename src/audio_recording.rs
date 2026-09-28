@@ -1,43 +1,13 @@
-use crate::app_state::{AppState, AudioParams, Logger};
+use crate::app_state::{AppState, AudioParams};
 use crate::recorder::{peak_level, Recorder, RecorderEvent, RecorderSettings, RecorderStatus};
-use crate::types::AudioEvent;
+use crate::types::{AudioEvent, CapturedAudio};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::Stream;
-use hound::WavWriter;
 use std::error::Error;
-use std::io::Cursor;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use tokio::sync::mpsc;
-
-fn encode_wav_buffer(samples: &[f32], channels: usize, sample_rate: f32) -> Option<Vec<u8>> {
-    let mut wav_buffer = Vec::new();
-    let mut writer = WavWriter::new(
-        Cursor::new(&mut wav_buffer),
-        hound::WavSpec {
-            channels: channels as u16,
-            sample_rate: sample_rate as u32,
-            bits_per_sample: 32,
-            sample_format: hound::SampleFormat::Float,
-        },
-    )
-    .ok()?;
-
-    for &sample in samples.iter() {
-        if writer.write_sample(sample).is_err() {
-            eprintln!("Error writing audio sample");
-            return None;
-        }
-    }
-
-    if writer.finalize().is_err() {
-        eprintln!("Error finalizing WAV buffer");
-        return None;
-    }
-
-    Some(wav_buffer)
-}
 
 /// State that the audio callback shares with the GUI and the processing loop.
 pub struct SharedAudioState {
@@ -90,18 +60,66 @@ impl SharedAudioState {
     }
 }
 
+/// Queues events for the processing loop without blocking.
+struct EventQueue {
+    tx: mpsc::Sender<AudioEvent>,
+    /// Events that did not fit in the channel and are not reported yet
+    dropped: u32,
+}
+
+impl EventQueue {
+    /// Queue an event, or count it as dropped if the channel is full.
+    fn send(&mut self, event: AudioEvent) {
+        if self.tx.try_send(event).is_err() {
+            self.dropped = self.dropped.saturating_add(1);
+        }
+    }
+
+    /// Report the dropped events if the channel has room again.
+    fn report_dropped(&mut self) {
+        if self.dropped > 0
+            && self
+                .tx
+                .try_send(AudioEvent::EventsDropped(self.dropped))
+                .is_ok()
+        {
+            self.dropped = 0;
+        }
+    }
+}
+
 /// Handles the input buffers of one stream, converted to f32.
+///
+/// This runs on the audio thread, which can be real time. It only updates
+/// atomics, copies samples and queues events with `try_send`. Logging and
+/// encoding happen on the processing side when it receives the events.
 struct InputHandler {
     shared: SharedAudioState,
     recorder: Recorder,
-    tx: mpsc::Sender<AudioEvent>,
-    logger: Logger,
-    channels: usize,
-    sample_rate: f32,
+    events: EventQueue,
+    channels: u16,
+    sample_rate: u32,
 }
 
 impl InputHandler {
-    fn process(&mut self, data: &[f32]) {
+    fn new(
+        shared: SharedAudioState,
+        tx: mpsc::Sender<AudioEvent>,
+        channels: u16,
+        sample_rate: u32,
+        now: Instant,
+    ) -> Self {
+        Self {
+            shared,
+            recorder: Recorder::new(now),
+            events: EventQueue { tx, dropped: 0 },
+            channels,
+            sample_rate,
+        }
+    }
+
+    fn process(&mut self, data: &[f32], now: Instant) {
+        self.events.report_dropped();
         self.shared
             .audio_level
             .store(peak_level(data).to_bits(), Ordering::Relaxed);
@@ -115,32 +133,24 @@ impl InputHandler {
         }
 
         let settings = self.shared.recorder_settings();
-        let now = Instant::now();
         let Self {
             recorder,
-            tx,
-            logger,
+            events,
             channels,
             sample_rate,
             ..
         } = self;
         recorder.process(data, &settings, now, |event| match event {
-            RecorderEvent::Started => {
-                logger.info("Sound detected, recording...");
-                if let Err(e) = tx.try_send(AudioEvent::StartRecording) {
-                    logger.error(format!("Failed to send StartRecording: {}", e));
-                }
-            }
+            RecorderEvent::Started => events.send(AudioEvent::StartRecording),
             RecorderEvent::Ended(samples) => {
                 if !samples.is_empty() {
-                    logger.info("Silence detected, processing...");
-                    if let Some(wav_buffer) = encode_wav_buffer(&samples, *channels, *sample_rate) {
-                        if let Err(e) = tx.try_send(AudioEvent::AudioData(wav_buffer)) {
-                            logger.error(format!("Failed to send AudioData: {}", e));
-                        }
-                    }
+                    events.send(AudioEvent::AudioData(CapturedAudio {
+                        samples,
+                        channels: *channels,
+                        sample_rate: *sample_rate,
+                    }));
                 }
-                let _ = tx.try_send(AudioEvent::StopRecording);
+                events.send(AudioEvent::StopRecording);
             }
         });
         self.shared.publish(&self.recorder.status(now));
@@ -176,7 +186,7 @@ fn build_input_stream<T: InputSample>(
         move |data: &[T], _: &cpal::InputCallbackInfo| {
             samples.clear();
             samples.extend(data.iter().map(|&s| s.to_f32()));
-            handler.process(&samples);
+            handler.process(&samples, Instant::now());
         },
         err_fn,
         None,
@@ -192,7 +202,6 @@ pub struct AudioStreamInfo {
 pub fn start_audio_recording(
     shared: SharedAudioState,
     tx: mpsc::Sender<AudioEvent>,
-    logger: Logger,
 ) -> Result<(Stream, AudioStreamInfo), Box<dyn Error>> {
     let host = cpal::default_host();
     let device = host
@@ -200,23 +209,19 @@ pub fn start_audio_recording(
         .ok_or("No input device available")?;
     let device_config = device.default_input_config()?;
 
-    let sample_rate = device_config.sample_rate().0 as f32;
-    let channels = device_config.channels() as usize;
     let sample_format = device_config.sample_format();
-
     let stream_info = AudioStreamInfo {
-        sample_rate: sample_rate as u32,
-        channels: channels as u16,
+        sample_rate: device_config.sample_rate().0,
+        channels: device_config.channels(),
     };
 
-    let handler = InputHandler {
+    let handler = InputHandler::new(
         shared,
-        recorder: Recorder::new(Instant::now()),
         tx,
-        logger,
-        channels,
-        sample_rate,
-    };
+        stream_info.channels,
+        stream_info.sample_rate,
+        Instant::now(),
+    );
     let config = device_config.config();
     let stream: Stream = match sample_format {
         cpal::SampleFormat::F32 => build_input_stream::<f32>(&device, &config, handler)?,
@@ -227,4 +232,123 @@ pub fn start_audio_recording(
     stream.play()?;
 
     Ok((stream, stream_info))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app_state::AppCommand;
+    use crate::config::{AudioConfig, Config};
+    use crate::types::CapturedAudio;
+    use std::time::Duration;
+
+    const LOUD: [f32; 4] = [0.0, 0.5, -0.5, 0.0];
+    const QUIET: [f32; 4] = [0.0, 0.05, -0.05, 0.0];
+
+    struct Setup {
+        app_state: AppState,
+        handler: InputHandler,
+        rx: mpsc::Receiver<AudioEvent>,
+        now: Instant,
+        // Keep the command and log channels open
+        _channels: (
+            mpsc::Receiver<AppCommand>,
+            mpsc::Receiver<crate::app_state::LogEntry>,
+        ),
+    }
+
+    impl Setup {
+        /// A stereo 48 kHz handler whose recording ends after two silent
+        /// buffers, with events queued in a channel of `capacity`.
+        fn new(capacity: usize) -> Self {
+            let (cmd_tx, cmd_rx) = mpsc::channel(1);
+            let (log_tx, log_rx) = mpsc::channel(10);
+            let app_state = AppState::new(Config::default(), cmd_tx, log_tx);
+            app_state.audio_params.update(&AudioConfig {
+                silence_threshold: 2,
+                noise_gate_threshold: 0.1,
+                noise_gate_hold_time: 0.0,
+                min_transcription_duration: 0.0,
+            });
+            let (tx, rx) = mpsc::channel(capacity);
+            let now = Instant::now();
+            let handler = InputHandler::new(SharedAudioState::new(&app_state), tx, 2, 48_000, now);
+            Setup {
+                app_state,
+                handler,
+                rx,
+                now,
+                _channels: (cmd_rx, log_rx),
+            }
+        }
+
+        fn feed(&mut self, data: &[f32]) {
+            self.now += Duration::from_millis(10);
+            self.handler.process(data, self.now);
+        }
+
+        fn events(&mut self) -> Vec<AudioEvent> {
+            std::iter::from_fn(|| self.rx.try_recv().ok()).collect()
+        }
+    }
+
+    #[test]
+    fn test_a_recording_reaches_the_processing_side_as_raw_samples() {
+        let mut s = Setup::new(10);
+        s.feed(&LOUD);
+        s.feed(&QUIET);
+        s.feed(&QUIET);
+        assert_eq!(
+            s.events(),
+            vec![
+                AudioEvent::StartRecording,
+                AudioEvent::AudioData(CapturedAudio {
+                    samples: [LOUD, QUIET].concat(),
+                    channels: 2,
+                    sample_rate: 48_000,
+                }),
+                AudioEvent::StopRecording,
+            ]
+        );
+    }
+
+    #[test]
+    fn test_recording_state_is_published_for_the_gui() {
+        let mut s = Setup::new(10);
+        s.feed(&LOUD);
+        assert!(s.app_state.is_recording.load(Ordering::Relaxed));
+        assert!(s.app_state.noise_gate_active.load(Ordering::Relaxed));
+        s.feed(&QUIET);
+        assert_eq!(s.app_state.silent_frames.load(Ordering::Relaxed), 1);
+        assert!(!s.app_state.noise_gate_active.load(Ordering::Relaxed));
+        let level = f32::from_bits(s.app_state.current_audio_level.load(Ordering::Relaxed));
+        assert_eq!(level, 0.05);
+    }
+
+    #[test]
+    fn test_test_mode_diverts_the_samples_and_sends_nothing() {
+        let mut s = Setup::new(10);
+        s.app_state.test_mode_active.store(true, Ordering::Relaxed);
+        s.feed(&LOUD);
+        s.feed(&QUIET);
+        assert!(s.events().is_empty());
+        assert!(!s.app_state.is_recording.load(Ordering::Relaxed));
+        let buffer = s.app_state.test_recording_buffer.lock().unwrap().clone();
+        assert_eq!(buffer, [LOUD, QUIET].concat());
+        let level = f32::from_bits(s.app_state.current_audio_level.load(Ordering::Relaxed));
+        assert_eq!(level, 0.05);
+    }
+
+    #[test]
+    fn test_events_lost_on_a_full_queue_are_reported_once_there_is_room() {
+        let mut s = Setup::new(1);
+        s.feed(&LOUD); // StartRecording fills the queue
+        s.feed(&QUIET);
+        s.feed(&QUIET); // AudioData and StopRecording do not fit
+        assert_eq!(s.events(), vec![AudioEvent::StartRecording]);
+        s.feed(&QUIET);
+        assert_eq!(s.events(), vec![AudioEvent::EventsDropped(2)]);
+        s.feed(&QUIET);
+        assert!(s.events().is_empty());
+    }
 }

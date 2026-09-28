@@ -18,6 +18,7 @@ pub mod transcription;
 pub mod translation;
 pub mod types;
 pub mod typing_indicator;
+pub mod upload_audio;
 
 #[cfg(test)]
 mod tests;

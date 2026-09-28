@@ -5,7 +5,9 @@ use babble_boop::audio_processing::process_audio;
 use babble_boop::audio_recording::{start_audio_recording, SharedAudioState};
 use babble_boop::config::{Config, CONFIG_PATH};
 use babble_boop::gui::{run_error_dialog, run_gui};
-use babble_boop::processing_loop::{apply_enabled, ProcessingServices};
+use babble_boop::processing_loop::{
+    apply_enabled, encode_for_upload, log_audio_event, ProcessingServices,
+};
 use babble_boop::types::AudioEvent;
 use babble_boop::typing_indicator::TypingIndicator;
 
@@ -123,11 +125,10 @@ async fn run_processing_loop(
     // Start the audio recording in a separate thread
     let shared_audio = SharedAudioState::new(&app_state);
     let shutdown_signal = app_state.shutdown.clone();
-    let logger_for_audio = app_state.logger.clone();
     let (init_tx, init_rx) =
         std::sync::mpsc::channel::<Result<babble_boop::audio_recording::AudioStreamInfo, String>>();
     std::thread::spawn(move || {
-        match start_audio_recording(shared_audio, tx, logger_for_audio) {
+        match start_audio_recording(shared_audio, tx) {
             Ok((stream, stream_info)) => {
                 let _ = init_tx.send(Ok(stream_info));
                 let _stream = stream;
@@ -274,6 +275,8 @@ async fn run_processing_loop(
                     }
                 }
 
+                log_audio_event(&event, &app_state.logger);
+
                 // Ignore speech while translation is off. SetEnabled(false)
                 // turns off a typing indicator that is still on.
                 if !app_state.enabled.load(Ordering::Relaxed) {
@@ -287,7 +290,16 @@ async fn run_processing_loop(
                     AudioEvent::StopRecording => {
                         typing_indicator.stop_typing().await;
                     }
-                    AudioEvent::AudioData(audio_data) => {
+                    AudioEvent::EventsDropped(_) => {}
+                    AudioEvent::AudioData(audio) => {
+                        let audio_data = match app_state.shutdown.run_until(encode_for_upload(audio)).await {
+                            Some(Ok(wav)) => wav,
+                            Some(Err(e)) => {
+                                app_state.logger.error(format!("Error: {}", e));
+                                continue;
+                            }
+                            None => break,
+                        };
                         // Read current config for processing
                         let current_config = app_state.config.read().expect("Config lock poisoned").clone();
                         // Shutdown drops the work, including the chatbox

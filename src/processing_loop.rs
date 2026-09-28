@@ -7,7 +7,9 @@ use crate::models;
 use crate::price_estimator::PriceEstimator;
 use crate::rate_limiter::RateLimiter;
 use crate::recording_manager::RecordingManager;
+use crate::types::{AudioEvent, CapturedAudio};
 use crate::typing_indicator::TypingIndicator;
+use crate::upload_audio::encode_upload_wav;
 use std::path::PathBuf;
 
 /// Directory for saved recordings when `keep_audio_files` is on.
@@ -76,5 +78,30 @@ pub async fn apply_enabled(enabled: bool, typing_indicator: &TypingIndicator, lo
     } else {
         typing_indicator.stop_typing().await;
         logger.info("Translation disabled");
+    }
+}
+
+/// Write the activity log line for an event from the audio callback. The
+/// callback runs on the audio thread and does not log itself.
+pub fn log_audio_event(event: &AudioEvent, logger: &Logger) {
+    match event {
+        AudioEvent::StartRecording => logger.info("Sound detected, recording..."),
+        AudioEvent::AudioData(_) => logger.info("Silence detected, processing..."),
+        AudioEvent::StopRecording => {}
+        AudioEvent::EventsDropped(count) => logger.error(format!(
+            "Lost {} audio events because the processing queue was full",
+            count
+        )),
+    }
+}
+
+/// Encode a recording for upload on a blocking thread, so that a long
+/// recording does not hold a runtime worker and shutdown does not wait for
+/// it.
+pub async fn encode_for_upload(audio: CapturedAudio) -> Result<Vec<u8>, String> {
+    match tokio::task::spawn_blocking(move || encode_upload_wav(&audio)).await {
+        Ok(Ok(wav)) => Ok(wav),
+        Ok(Err(e)) => Err(format!("cannot encode the recording: {}", e)),
+        Err(e) => Err(format!("encoding the recording failed: {}", e)),
     }
 }

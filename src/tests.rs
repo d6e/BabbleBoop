@@ -883,6 +883,66 @@ requests_per_minute = 50
     }
 
     // ===========================================================================
+    // Test: Audio events are logged and encoded on the processing side
+    // ===========================================================================
+
+    #[test]
+    fn test_audio_events_are_logged_on_the_processing_side() {
+        use crate::app_state::LogLevel;
+        use crate::processing_loop::log_audio_event;
+        use crate::types::{AudioEvent, CapturedAudio};
+
+        let audio = CapturedAudio {
+            samples: vec![0.5; 4],
+            channels: 1,
+            sample_rate: 16_000,
+        };
+        let entries = entries_logged_by(|logger| {
+            for event in [
+                AudioEvent::StartRecording,
+                AudioEvent::AudioData(audio),
+                AudioEvent::StopRecording,
+                AudioEvent::EventsDropped(3),
+            ] {
+                log_audio_event(&event, logger);
+            }
+        });
+        let logged: Vec<(&str, LogLevel)> = entries
+            .iter()
+            .map(|entry| (entry.message.as_str(), entry.level))
+            .collect();
+        assert_eq!(
+            logged,
+            vec![
+                ("Sound detected, recording...", LogLevel::Info),
+                ("Silence detected, processing...", LogLevel::Info),
+                (
+                    "Lost 3 audio events because the processing queue was full",
+                    LogLevel::Error
+                ),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_recording_is_encoded_for_upload_with_its_duration() {
+        use crate::processing_loop::encode_for_upload;
+        use crate::types::CapturedAudio;
+
+        // Half a second of stereo audio at 48 kHz
+        let audio = CapturedAudio {
+            samples: vec![0.25; 48_000],
+            channels: 2,
+            sample_rate: 48_000,
+        };
+        let wav = encode_for_upload(audio).await.unwrap();
+
+        let reader = hound::WavReader::new(std::io::Cursor::new(wav)).unwrap();
+        let seconds = reader.duration() as f32 / reader.spec().sample_rate as f32;
+        assert!((seconds - 0.5).abs() < 1e-3, "duration {}", seconds);
+    }
+
+    // ===========================================================================
     // Test: Processing thread failures reach the activity log
     // ===========================================================================
 
