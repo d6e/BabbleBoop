@@ -114,6 +114,10 @@ pub enum NoTranslation {
     /// speech. Such a text is not a translation (for example, the model
     /// repeated itself), and its end is missing, so it is not sent.
     CutOff,
+    /// The content filter removed part of the text
+    /// (`finish_reason: content_filter` with content). What is left is not
+    /// the whole translation, so it is not sent.
+    Filtered,
 }
 
 impl std::fmt::Display for NoTranslation {
@@ -129,8 +133,8 @@ impl std::fmt::Display for NoTranslation {
             NoTranslation::Empty { finish_reason } => match finish_reason.as_deref() {
                 Some("content_filter") => write!(
                     f,
-                    "The model returned no translation: the content filter removed it \
-                     (finish_reason: content_filter)"
+                    "The content filter removed the translation, \
+                     so nothing was sent (finish_reason: content_filter)"
                 ),
                 Some(reason) => write!(
                     f,
@@ -143,6 +147,11 @@ impl std::fmt::Display for NoTranslation {
                 f,
                 "The translation reached the output token limit and was cut off, \
                  so it was not sent (finish_reason: length)"
+            ),
+            NoTranslation::Filtered => write!(
+                f,
+                "The content filter removed part of the translation, \
+                 so it was not sent (finish_reason: content_filter)"
             ),
         }
     }
@@ -190,7 +199,7 @@ struct ChatGptAnswer {
 
 impl ChatGptChoice {
     /// The text to send, or why there is none. A refusal comes first,
-    /// then a cut off text, then a blank one.
+    /// then a cut off or filtered text, then a blank one.
     fn into_text(self) -> Result<String, NoTranslation> {
         if let Some(refusal) = self
             .message
@@ -205,6 +214,7 @@ impl ChatGptChoice {
             .filter(|content| !content.trim().is_empty());
         match (content, self.finish_reason) {
             (Some(_), Some(reason)) if reason == "length" => Err(NoTranslation::CutOff),
+            (Some(_), Some(reason)) if reason == "content_filter" => Err(NoTranslation::Filtered),
             (Some(content), _) => Ok(content),
             (None, finish_reason) => Err(NoTranslation::Empty { finish_reason }),
         }

@@ -1061,8 +1061,35 @@ requests_per_minute = 50
 
         assert_not_translated(
             deliver_response("content_filter", &body).await,
-            "The model returned no translation: the content filter removed it \
-             (finish_reason: content_filter)",
+            "The content filter removed the translation, \
+             so nothing was sent (finish_reason: content_filter)",
+        );
+    }
+
+    #[tokio::test]
+    async fn test_partly_filtered_translation_is_logged_and_not_sent() {
+        let body =
+            chat_completion_body_with(r#""Bonjour""#, "null", "content_filter", Some(SHORT_USAGE));
+
+        assert_not_translated(
+            deliver_response("content_filter_partial", &body).await,
+            "The content filter removed part of the translation, \
+             so it was not sent (finish_reason: content_filter)",
+        );
+    }
+
+    #[tokio::test]
+    async fn test_refusal_comes_before_the_content_filter() {
+        let body = chat_completion_body_with(
+            r#""Bonjour""#,
+            r#""I'm sorry, but I can't help with that.""#,
+            "content_filter",
+            Some(SHORT_USAGE),
+        );
+
+        assert_not_translated(
+            deliver_response("content_filter_refusal", &body).await,
+            "The model refused to translate: I'm sorry, but I can't help with that.",
         );
     }
 
