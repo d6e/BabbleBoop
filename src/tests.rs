@@ -1811,6 +1811,7 @@ mod gui_tests {
             let window_is_light = is_light(crate::theme::get_visuals(theme).panel_fill);
             let level_track = painted_rect_fills(&output, 200.0, 16.0);
             let small_tracks = painted_rect_fills(&output, 200.0, 10.0);
+            assert_eq!(level_track.len(), 1, "{:?}", theme);
             // Gate, silence and duration.
             assert_eq!(small_tracks.len(), 3, "{:?}", theme);
             for track in level_track.iter().chain(&small_tracks) {
