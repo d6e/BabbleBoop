@@ -1013,6 +1013,157 @@ requests_per_minute = 50
     }
 
     // ===========================================================================
+    // Test: Any minimum transcription duration in config.toml is safe
+    // ===========================================================================
+
+    /// What `process_audio` did with a recording.
+    #[derive(Debug, PartialEq)]
+    enum MinimumCheck {
+        /// The recording was skipped as too short.
+        Skipped,
+        /// The recording went on to transcription.
+        Transcribed,
+    }
+
+    /// Run `process_audio` on one second of audio with `min_seconds` as the
+    /// minimum transcription duration. The API client sends its requests
+    /// through a local proxy, which accepts the connection and closes it, so
+    /// no request leaves the machine.
+    async fn check_one_second_against_minimum(min_seconds: f32) -> MinimumCheck {
+        use crate::app_state::AppState;
+        use crate::audio_processing::process_audio;
+        use crate::processing_loop::encode_for_upload;
+        use crate::types::CapturedAudio;
+        use crate::typing_indicator::TypingIndicator;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::{Arc, RwLock};
+        use std::time::Duration;
+        use tokio::net::{TcpListener, UdpSocket};
+
+        let proxy = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy_addr = proxy.local_addr().unwrap();
+        let requested = Arc::new(AtomicBool::new(false));
+        let proxy_task = tokio::spawn({
+            let requested = requested.clone();
+            async move {
+                // The client gets its error only when this drops the connection
+                let (_connection, _) = proxy.accept().await.unwrap();
+                requested.store(true, Ordering::SeqCst);
+            }
+        });
+        let client = reqwest::Client::builder()
+            .proxy(reqwest::Proxy::all(format!("http://{}", proxy_addr)).unwrap())
+            .build()
+            .unwrap();
+
+        let chatbox = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let mut config = Config::default();
+        config.osc.address = "127.0.0.1".to_string();
+        config.osc.output_port = chatbox.local_addr().unwrap().port();
+        config.audio.min_transcription_duration = min_seconds;
+        let typing_indicator =
+            TypingIndicator::new(socket.clone(), Arc::new(RwLock::new(config.clone())));
+        let (cmd_tx, _cmd_rx) = tokio::sync::mpsc::channel(10);
+        let (log_tx, _log_rx) = tokio::sync::mpsc::channel(10);
+        let app_state = Arc::new(AppState::new(config.clone(), cmd_tx, log_tx));
+        let wav = encode_for_upload(CapturedAudio {
+            samples: vec![0.25; 16_000],
+            channels: 1,
+            sample_rate: 16_000,
+        })
+        .await
+        .unwrap();
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(10),
+            process_audio(
+                &client,
+                wav,
+                &config,
+                &socket,
+                &mut RateLimiter::new(50),
+                &typing_indicator,
+                &mut PriceEstimator::new(&config.openai.model, &config.openai.transcription_model),
+                None,
+                &app_state,
+            ),
+        )
+        .await
+        .expect("process_audio did not finish");
+        proxy_task.abort();
+
+        if requested.load(Ordering::SeqCst) {
+            assert!(result.is_err(), "the proxy closed the connection");
+            MinimumCheck::Transcribed
+        } else {
+            assert!(result.is_ok(), "{:?}", result.err());
+            MinimumCheck::Skipped
+        }
+    }
+
+    #[tokio::test]
+    async fn test_negative_minimum_duration_means_no_minimum() {
+        for min_seconds in [-1.0, -f32::MIN_POSITIVE, f32::NEG_INFINITY] {
+            assert_eq!(
+                (
+                    min_seconds,
+                    check_one_second_against_minimum(min_seconds).await
+                ),
+                (min_seconds, MinimumCheck::Transcribed)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_nan_minimum_duration_means_no_minimum() {
+        assert_eq!(
+            check_one_second_against_minimum(f32::NAN).await,
+            MinimumCheck::Transcribed
+        );
+    }
+
+    #[tokio::test]
+    async fn test_infinite_minimum_duration_skips_the_recording() {
+        assert_eq!(
+            check_one_second_against_minimum(f32::INFINITY).await,
+            MinimumCheck::Skipped
+        );
+    }
+
+    #[tokio::test]
+    async fn test_minimum_duration_too_large_for_duration_skips_the_recording() {
+        // Duration holds at most u64::MAX seconds, about 1.8e19
+        for min_seconds in [1e20, f32::MAX] {
+            assert_eq!(
+                (
+                    min_seconds,
+                    check_one_second_against_minimum(min_seconds).await
+                ),
+                (min_seconds, MinimumCheck::Skipped)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_valid_minimum_duration_is_kept() {
+        for (min_seconds, expected) in [
+            (0.0, MinimumCheck::Transcribed),
+            (0.5, MinimumCheck::Transcribed),
+            (1.0, MinimumCheck::Transcribed),
+            (2.0, MinimumCheck::Skipped),
+        ] {
+            assert_eq!(
+                (
+                    min_seconds,
+                    check_one_second_against_minimum(min_seconds).await
+                ),
+                (min_seconds, expected)
+            );
+        }
+    }
+
+    // ===========================================================================
     // Test: Processing thread failures reach the activity log
     // ===========================================================================
 

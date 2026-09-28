@@ -27,7 +27,7 @@ pub async fn process_audio(
 ) -> Result<(), Box<dyn Error>> {
     let audio_duration = calculate_audio_duration(&audio_data)?;
 
-    let min_duration = Duration::from_secs_f32(config.audio.min_transcription_duration);
+    let min_duration = min_transcription_duration(config.audio.min_transcription_duration);
     if audio_duration < min_duration {
         app_state.logger.info(format!(
             "Audio too short ({:.2}s < {:.2}s), skipping",
@@ -76,6 +76,20 @@ pub async fn process_audio(
     typing_indicator.stop_typing().await;
 
     Ok(())
+}
+
+/// The shortest recording to transcribe, from the minimum in seconds in
+/// the config. config.toml can hold any float there, and
+/// `Duration::from_secs_f32` panics if its argument is negative, not finite
+/// or too large for `Duration` (see its documentation). A negative or NaN
+/// minimum means no minimum. A minimum too large for `Duration`, such as
+/// `inf`, skips every recording.
+fn min_transcription_duration(seconds: f32) -> Duration {
+    match Duration::try_from_secs_f32(seconds) {
+        Ok(duration) => duration,
+        Err(_) if seconds > 0.0 => Duration::MAX,
+        Err(_) => Duration::ZERO,
+    }
 }
 
 pub(crate) fn calculate_audio_duration(audio_data: &[u8]) -> Result<Duration, Box<dyn Error>> {
