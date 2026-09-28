@@ -904,6 +904,7 @@ requests_per_minute = 50
                 AudioEvent::AudioData(audio()),
                 AudioEvent::StopRecording,
                 AudioEvent::EventsDropped(3),
+                AudioEvent::InputError("Audio input error: device unplugged".to_string()),
             ] {
                 log_audio_event(&event, logger);
             }
@@ -925,6 +926,7 @@ requests_per_minute = 50
                     "Lost 3 audio events because the processing queue was full",
                     LogLevel::Error
                 ),
+                ("Audio input error: device unplugged", LogLevel::Error),
             ]
         );
     }

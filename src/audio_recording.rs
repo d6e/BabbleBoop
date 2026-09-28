@@ -1,4 +1,4 @@
-use crate::app_state::{AppState, AudioParams};
+use crate::app_state::{panic_reason, AppState, AudioParams};
 use crate::recorder::{
     max_recording_samples, peak_level, Recorder, RecorderEvent, RecorderSettings, RecorderStatus,
 };
@@ -180,21 +180,89 @@ impl InputSample for i16 {
     }
 }
 
+/// Runs the audio callback and catches a panic in it. A panic would
+/// otherwise end the backend's audio thread with a message on stderr only
+/// (ALSA, WASAPI), or abort the program where the backend calls the
+/// callback through an `extern "C"` function (CoreAudio; Rust aborts on a
+/// panic that unwinds out of one since 1.81).
+struct PanicGuard {
+    tx: mpsc::Sender<AudioEvent>,
+    failed: bool,
+}
+
+impl PanicGuard {
+    fn new(tx: mpsc::Sender<AudioEvent>) -> Self {
+        Self { tx, failed: false }
+    }
+
+    /// Run `body` unless an earlier run panicked. On a panic, report it
+    /// to the processing side; later runs then do nothing, as the state the
+    /// body left can be inconsistent.
+    fn run(&mut self, body: impl FnOnce()) {
+        if self.failed {
+            return;
+        }
+        if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(body)) {
+            self.failed = true;
+            let _ = self.tx.try_send(AudioEvent::InputError(format!(
+                "Audio input crashed: {}. Restart BabbleBoop to record again.",
+                panic_reason(&*payload)
+            )));
+        }
+    }
+}
+
+/// Passes stream errors from cpal to the processing side. cpal can call
+/// the error callback in a loop with the same error, for example while a
+/// device is unplugged, so an error is sent again only after a different
+/// one.
+struct StreamErrorReporter {
+    tx: mpsc::Sender<AudioEvent>,
+    last_sent: Option<String>,
+}
+
+impl StreamErrorReporter {
+    fn new(tx: mpsc::Sender<AudioEvent>) -> Self {
+        Self {
+            tx,
+            last_sent: None,
+        }
+    }
+
+    fn report(&mut self, error: impl std::fmt::Display) {
+        let message = format!("Audio input error: {}", error);
+        if self.last_sent.as_ref() == Some(&message) {
+            return;
+        }
+        if self
+            .tx
+            .try_send(AudioEvent::InputError(message.clone()))
+            .is_ok()
+        {
+            self.last_sent = Some(message);
+        }
+    }
+}
+
 fn build_input_stream<T: InputSample>(
     device: &cpal::Device,
     config: &cpal::StreamConfig,
     mut handler: InputHandler,
+    tx: mpsc::Sender<AudioEvent>,
 ) -> Result<Stream, cpal::BuildStreamError> {
     let mut samples = Vec::new();
-    let err_fn = |err| eprintln!("An error occurred on the audio stream: {}", err);
+    let mut guard = PanicGuard::new(tx.clone());
+    let mut errors = StreamErrorReporter::new(tx);
     device.build_input_stream(
         config,
         move |data: &[T], _: &cpal::InputCallbackInfo| {
-            samples.clear();
-            samples.extend(data.iter().map(|&s| s.to_f32()));
-            handler.process(&samples, Instant::now());
+            guard.run(|| {
+                samples.clear();
+                samples.extend(data.iter().map(|&s| s.to_f32()));
+                handler.process(&samples, Instant::now());
+            });
         },
-        err_fn,
+        move |err| errors.report(err),
         None,
     )
 }
@@ -223,15 +291,15 @@ pub fn start_audio_recording(
 
     let handler = InputHandler::new(
         shared,
-        tx,
+        tx.clone(),
         stream_info.channels,
         stream_info.sample_rate,
         Instant::now(),
     );
     let config = device_config.config();
     let stream: Stream = match sample_format {
-        cpal::SampleFormat::F32 => build_input_stream::<f32>(&device, &config, handler)?,
-        cpal::SampleFormat::I16 => build_input_stream::<i16>(&device, &config, handler)?,
+        cpal::SampleFormat::F32 => build_input_stream::<f32>(&device, &config, handler, tx)?,
+        cpal::SampleFormat::I16 => build_input_stream::<i16>(&device, &config, handler, tx)?,
         _ => return Err(format!("Unsupported sample format: {:?}", sample_format).into()),
     };
 
@@ -375,5 +443,64 @@ mod tests {
         assert_eq!(part.samples.len(), 30 * 2 * 48_000);
         assert_eq!((part.channels, part.sample_rate), (2, 48_000));
         assert!(s.app_state.is_recording.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn test_a_panic_in_the_callback_is_reported_once_and_stops_processing() {
+        let (tx, mut rx) = mpsc::channel(10);
+        let mut guard = PanicGuard::new(tx);
+        guard.run(|| panic!("index out of bounds"));
+        let mut ran = false;
+        guard.run(|| ran = true);
+
+        assert!(!ran, "the callback ran again after a panic");
+        assert_eq!(
+            std::iter::from_fn(|| rx.try_recv().ok()).collect::<Vec<_>>(),
+            vec![AudioEvent::InputError(
+                "Audio input crashed: index out of bounds. Restart BabbleBoop to record again."
+                    .to_string()
+            )]
+        );
+    }
+
+    #[test]
+    fn test_the_callback_runs_while_it_does_not_panic() {
+        let (tx, mut rx) = mpsc::channel(10);
+        let mut guard = PanicGuard::new(tx);
+        let mut runs = 0;
+        guard.run(|| runs += 1);
+        guard.run(|| runs += 1);
+        assert_eq!(runs, 2);
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn test_a_repeated_stream_error_is_reported_once() {
+        let (tx, mut rx) = mpsc::channel(10);
+        let mut reporter = StreamErrorReporter::new(tx);
+        reporter.report("device unplugged");
+        reporter.report("device unplugged");
+        reporter.report("buffer overrun");
+        reporter.report("device unplugged");
+        let messages: Vec<AudioEvent> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+        assert_eq!(
+            messages,
+            ["device unplugged", "buffer overrun", "device unplugged"]
+                .map(|e| AudioEvent::InputError(format!("Audio input error: {}", e)))
+        );
+    }
+
+    #[test]
+    fn test_a_stream_error_that_did_not_fit_is_sent_again() {
+        let (tx, mut rx) = mpsc::channel(1);
+        tx.try_send(AudioEvent::StartRecording).unwrap();
+        let mut reporter = StreamErrorReporter::new(tx);
+        reporter.report("device unplugged");
+        assert_eq!(rx.try_recv().unwrap(), AudioEvent::StartRecording);
+        reporter.report("device unplugged");
+        assert_eq!(
+            rx.try_recv().unwrap(),
+            AudioEvent::InputError("Audio input error: device unplugged".to_string())
+        );
     }
 }

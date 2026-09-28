@@ -12,6 +12,9 @@ pub enum AudioEvent {
     /// The callback could not queue this many events because the channel
     /// was full. Sent once the channel has room again.
     EventsDropped(u32),
+    /// The audio input reported an error or stopped. Holds the message for
+    /// the activity log.
+    InputError(String),
 }
 
 /// Samples of one recording as the input device delivered them.

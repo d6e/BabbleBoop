@@ -97,6 +97,7 @@ pub fn log_audio_event(event: &AudioEvent, logger: &Logger) {
             "Lost {} audio events because the processing queue was full",
             count
         )),
+        AudioEvent::InputError(message) => logger.error(message.as_str()),
     }
 }
 

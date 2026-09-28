@@ -125,23 +125,31 @@ async fn run_processing_loop(
     // Start the audio recording in a separate thread
     let shared_audio = SharedAudioState::new(&app_state);
     let shutdown_signal = app_state.shutdown.clone();
+    let audio_logger = app_state.logger.clone();
     let (init_tx, init_rx) =
         std::sync::mpsc::channel::<Result<babble_boop::audio_recording::AudioStreamInfo, String>>();
+    // This thread only owns the stream; the callback runs on a thread of
+    // the audio backend. A panic here would stop capture with no sign in
+    // the GUI, so it goes to the activity log.
     std::thread::spawn(move || {
-        match start_audio_recording(shared_audio, tx) {
-            Ok((stream, stream_info)) => {
-                let _ = init_tx.send(Ok(stream_info));
-                let _stream = stream;
-                // Check shutdown signal periodically instead of parking forever
-                while !shutdown_signal.is_requested() {
-                    std::thread::sleep(std::time::Duration::from_millis(100));
+        run_logging_failure(&audio_logger, "Audio input", || {
+            match start_audio_recording(shared_audio, tx) {
+                Ok((stream, stream_info)) => {
+                    let _ = init_tx.send(Ok(stream_info));
+                    let _stream = stream;
+                    // Check shutdown signal periodically instead of parking forever
+                    while !shutdown_signal.is_requested() {
+                        std::thread::sleep(std::time::Duration::from_millis(100));
+                    }
+                    // Stream is dropped here, stopping audio capture
                 }
-                // Stream is dropped here, stopping audio capture
+                Err(e) => {
+                    // The processing loop reports this as a startup error
+                    let _ = init_tx.send(Err(e.to_string()));
+                }
             }
-            Err(e) => {
-                let _ = init_tx.send(Err(e.to_string()));
-            }
-        }
+            Ok::<(), std::convert::Infallible>(())
+        });
     });
 
     // Wait for stream initialization and get stream info
@@ -293,7 +301,8 @@ async fn run_processing_loop(
                     AudioEvent::StopRecording => {
                         typing_indicator.stop_typing().await;
                     }
-                    AudioEvent::EventsDropped(_) => {}
+                    // Logged above
+                    AudioEvent::EventsDropped(_) | AudioEvent::InputError(_) => {}
                     AudioEvent::AudioData(audio) | AudioEvent::AudioPart(audio) => {
                         let audio_data = match app_state.shutdown.run_until(encode_for_upload(audio)).await {
                             Some(Ok(wav)) => wav,

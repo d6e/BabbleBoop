@@ -109,14 +109,18 @@ pub fn run_logging_failure<E: std::fmt::Display>(
         Ok(Ok(())) => {}
         Ok(Err(e)) => logger.error(format!("{} stopped: {}", name, e)),
         Err(payload) => {
-            let reason = payload
-                .downcast_ref::<&str>()
-                .copied()
-                .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
-                .unwrap_or("unknown panic");
-            logger.error(format!("{} crashed: {}", name, reason));
+            logger.error(format!("{} crashed: {}", name, panic_reason(&*payload)));
         }
     }
+}
+
+/// The message of a panic caught with `catch_unwind`.
+pub fn panic_reason(payload: &(dyn std::any::Any + Send)) -> &str {
+    payload
+        .downcast_ref::<&str>()
+        .copied()
+        .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+        .unwrap_or("unknown panic")
 }
 
 /// Parse an API error message and extract a user-friendly version for display.
