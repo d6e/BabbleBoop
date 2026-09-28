@@ -9,9 +9,10 @@ use std::path::Path;
 /// Default path to the configuration file
 pub const CONFIG_PATH: &str = "config.toml";
 
-// The values the settings window accepts. `Config::load` moves a value from
-// the file into the same range, so the rest of the program only sees values
-// that the settings window can also produce.
+// The values the settings window accepts. `Config::load` moves a number from
+// the file into the same range. A value that does not fit the type of its
+// field, such as a negative count, port 70000 or a decimal number in an
+// integer field, still stops the load with a TOML error.
 pub const PORT_RANGE: RangeInclusive<u16> = 1..=65535;
 pub const DISPLAY_TIME_MS_RANGE: RangeInclusive<u64> = 1000..=30000;
 pub const MAX_MESSAGE_CHUNKS_RANGE: RangeInclusive<usize> = 1..=10;
@@ -136,7 +137,9 @@ impl Config {
     /// Replace each value that the program cannot use, and return a
     /// warning for each replacement. A value out of range moves to the
     /// nearest end of the range. A number that is not finite, a blank text
-    /// and port 0 become the default.
+    /// and port 0 become the default. A blank API key stays blank, and
+    /// -0.0 stays as it is. A value that does not fit the type of its field
+    /// does not get here: the TOML parser refuses it.
     fn normalize(&mut self) -> Vec<ConfigWarning> {
         let default = Config::default();
         let mut w = Warnings::default();
@@ -166,7 +169,7 @@ impl Config {
         // the input port has its default.
         if osc.input_port == osc.output_port {
             if osc.input_port != default.osc.input_port {
-                let reason = "the same as osc.output_port";
+                let reason = "the same as the osc.output_port in use";
                 w.replace(
                     "osc.input_port",
                     &mut osc.input_port,
@@ -174,7 +177,7 @@ impl Config {
                     reason,
                 );
             } else {
-                let reason = "the same as osc.input_port";
+                let reason = "the same as the osc.input_port in use";
                 w.replace(
                     "osc.output_port",
                     &mut osc.output_port,
@@ -331,14 +334,14 @@ impl Warnings {
     fn secret(&mut self, field: &'static str, value: &mut String) {
         let trimmed = value.trim();
         if trimmed.len() != value.len() {
+            let used = if trimmed.is_empty() {
+                "a blank text"
+            } else {
+                "the text without them"
+            };
             *value = trimmed.to_string();
             let reason = "spaces or line breaks around the text";
-            self.add(
-                field,
-                "(hidden)".to_string(),
-                reason,
-                "the text without them".to_string(),
-            );
+            self.add(field, "(hidden)".to_string(), reason, used.to_string());
         }
     }
 }
@@ -654,7 +657,7 @@ requests_per_minute = 50          # adjust based on your API limits, it should c
             value: "9000",
             expect: |c| c.osc.input_port = 9001,
         },
-        // 0 lets no request through
+        // 0 lets only one request through at the end of each minute
         BadValue {
             field: "rate_limit.requests_per_minute",
             key: "requests_per_minute",
@@ -814,6 +817,14 @@ requests_per_minute = 50          # adjust based on your API limits, it should c
         assert_eq!(loaded.warnings.len(), 1);
         let message = loaded.warnings[0].to_string();
         assert!(!message.contains("sk-secret"), "{:?}", message);
+    }
+
+    #[test]
+    fn api_key_of_only_spaces_warning_says_the_key_is_blank() {
+        let loaded = Config::from_toml(&v0_5_0_with("api_key", r#""  \n""#)).unwrap();
+        assert_eq!(loaded.config.openai.api_key, "");
+        let used: Vec<&str> = loaded.warnings.iter().map(|w| w.used.as_str()).collect();
+        assert_eq!(used, ["a blank text"]);
     }
 
     #[tokio::test]

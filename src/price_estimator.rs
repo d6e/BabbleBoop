@@ -22,8 +22,9 @@ pub struct PriceEstimator {
     gpt_output_price_per_million_tokens: f64,
     pub total_cost: f64,
     cost_file: PathBuf,
-    /// The cost is saved after every utterance; a save that fails keeps
-    /// failing until the user fixes the cause.
+    /// The cost is saved after each transcription and each translation,
+    /// so up to twice per utterance; a save that fails keeps failing until
+    /// the user fixes the cause.
     save_failure: FailureLog,
 }
 

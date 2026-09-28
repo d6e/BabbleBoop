@@ -191,9 +191,10 @@ impl Recorder {
     }
 
     /// Make room for `additional` samples. The buffer at least doubles, so
-    /// that the callback copies the samples at most 3 times in a part
-    /// (5 s to 10 s, 20 s, then 30 s). It never holds more than a part, and
-    /// after it grows, it holds less than twice its samples.
+    /// that the callback grows it at most 3 times in a part (5 s to 10 s,
+    /// 20 s, then 30 s), and each growth can copy the samples. It never
+    /// holds more than a part, and after it grows, it holds less than twice
+    /// its samples.
     fn reserve(&mut self, additional: usize) {
         let needed = self.samples.len() + additional;
         let capacity = self.samples.capacity();
@@ -235,7 +236,7 @@ impl Recorder {
             if !self.is_recording {
                 self.is_recording = true;
                 self.recording_start = Some(now);
-                // A recording that ended without sound keeps its buffer
+                // A recording that ended without sound keeps a buffer
                 if self.samples.capacity() == 0 {
                     self.samples = self.new_buffer();
                 }
@@ -647,9 +648,9 @@ mod tests {
 
     /// Record `millis` ms of loud input from a stream, then end the
     /// recording with silence. Returns the samples the recorder received
-    /// and, for each part, the number of times the recorder copied its
-    /// samples to a larger buffer. Checks after each buffer that the
-    /// recorder holds no more than 30 s, and after each copy that the new
+    /// and, for each part, the number of times the capacity of the
+    /// recorder's buffer increased. Checks after each buffer that the
+    /// recorder holds no more than 30 s, and after each increase that the
     /// buffer holds less than twice its samples.
     fn record_from_stream(
         h: &mut Harness,
@@ -661,7 +662,7 @@ mod tests {
         let buffer_len = STREAM_BUFFER_FRAMES * usize::from(channels);
         let limit = 30 * per_second;
         let mut fed = Vec::new();
-        let mut copies = vec![0];
+        let mut growths = vec![0];
         while fed.len() < per_second * millis / 1000 {
             let data = loud_samples(fed.len(), buffer_len);
             let held = h.recorder.samples.len();
@@ -676,14 +677,14 @@ mod tests {
                     grown < 2 * len,
                     "grew from {capacity} to {grown} for {len} samples"
                 );
-                if let Some(part) = copies.last_mut() {
+                if let Some(part) = growths.last_mut() {
                     *part += 1;
                 }
             }
             assert!(grown <= limit);
             for event in &h.events[events_before..] {
                 if matches!(event, RecorderEvent::LimitReached(_)) {
-                    copies.push(0);
+                    growths.push(0);
                 }
             }
         }
@@ -696,7 +697,7 @@ mod tests {
         for _ in 1..SETTINGS.silence_threshold {
             fed.extend_from_slice(&quiet);
         }
-        (fed, copies)
+        (fed, growths)
     }
 
     fn short_recording_reserves_about_five_seconds(channels: u16, sample_rate: u32) {
@@ -728,7 +729,7 @@ mod tests {
 
     fn long_recording_grows_to_thirty_seconds(channels: u16, sample_rate: u32) {
         let mut h = Harness::with_recorder(|now| Recorder::for_stream(now, channels, sample_rate));
-        let (fed, copies) = record_from_stream(&mut h, channels, sample_rate, 42_000);
+        let (fed, growths) = record_from_stream(&mut h, channels, sample_rate, 42_000);
         let [RecorderEvent::Started, RecorderEvent::LimitReached(first), RecorderEvent::Ended(rest, Extent::Part)] =
             &h.events[..]
         else {
@@ -740,9 +741,12 @@ mod tests {
         // The second part grew from its start to about 12 s
         assert!(rest.capacity() < 2 * rest.len());
         // The buffer doubles: 5, 10, 20 and 30 s in the first part (3
-        // copies), 5, 10 and 20 s in the second (2 copies)
-        assert_eq!(copies.len(), 2);
-        assert!(copies.iter().all(|&n| n <= 3), "copies per part {copies:?}");
+        // growths), 5, 10 and 20 s in the second (2 growths)
+        assert_eq!(growths.len(), 2);
+        assert!(
+            growths.iter().all(|&n| n <= 3),
+            "growths per part {growths:?}"
+        );
         assert_eq!([&first[..], rest].concat(), fed);
     }
 
@@ -756,9 +760,9 @@ mod tests {
         long_recording_grows_to_thirty_seconds(3, 44100);
     }
 
-    /// A recording that ends just after 5 s holds 10 s, and one that ends
-    /// just after 10 s holds 20 s. A larger buffer would carry more than
-    /// twice its samples to the processing side.
+    /// A recording that ends just after 5 s holds at most 10 s, and one that
+    /// ends just after 10 s at most 20 s. The buffer that reaches the
+    /// processing side holds less than twice its samples.
     fn growing_recording_holds_less_than_twice_its_samples(channels: u16, sample_rate: u32) {
         let per_second = sample_rate as usize * usize::from(channels);
         for (millis, reserved_seconds) in [(5_100, 10), (10_100, 20)] {

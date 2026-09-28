@@ -804,8 +804,7 @@ requests_per_minute = 50
         "total_tokens": 70
     }"#;
 
-    /// What happened when the processing loop received a response of the
-    /// API.
+    /// What the processing loop did with a response from the API.
     #[derive(Debug)]
     struct Delivery {
         /// Level and text of the activity log entries.
@@ -1223,10 +1222,10 @@ requests_per_minute = 50
         }
     }
 
-    /// A body without a text is an error of `process_audio`, and there is
-    /// no transcription to cost.
+    /// A body with a null text is an error of `process_audio`, and there
+    /// is no transcription to cost.
     #[tokio::test]
-    async fn test_transcription_body_without_text_is_an_error() {
+    async fn test_transcription_body_with_null_text_is_an_error() {
         use crate::app_state::LogLevel;
 
         let (text, delivery) =

@@ -81,8 +81,8 @@ pub async fn process_audio(
 /// text to translate. The cost is added before the later steps, so it
 /// stays in the total when one of them fails. The estimate depends only on
 /// the audio duration, so an empty or blank text costs as much as speech.
-/// Such a text goes to the activity log, turns the typing indicator off,
-/// and returns `None`.
+/// For such a text, an error message goes to the activity log, the typing
+/// indicator turns off, and the function returns `None`.
 pub(crate) async fn accept_transcription(
     text: String,
     audio_duration: Duration,

@@ -264,7 +264,7 @@ pub struct BabbleBoopApp {
     pub(crate) config_draft: Config,
     saved_config: Config,
     /// The config file has values that the loader replaced, so the file
-    /// differs from `saved_config` until the next save.
+    /// differs from `saved_config` until the next successful save.
     file_differs: bool,
     status_message: Option<(String, StatusType, std::time::Instant)>,
     log_rx: mpsc::Receiver<LogEntry>,
@@ -313,9 +313,9 @@ impl BabbleBoopApp {
         format!("{:02}:{:02}:{:02}", hours, mins, secs)
     }
 
-    /// Show the settings as unsaved until the next save if the loader
-    /// replaced values of the config file, so that Save can write the
-    /// values in use to the file.
+    /// Show the settings as unsaved until the next successful save if the
+    /// loader replaced values of the config file, so that Save can write
+    /// the values in use to the file.
     pub(crate) fn note_replaced_values(&mut self, warnings: &[ConfigWarning]) {
         self.file_differs = !warnings.is_empty();
     }

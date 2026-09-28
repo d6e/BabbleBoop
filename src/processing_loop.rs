@@ -283,7 +283,8 @@ pub async fn wait_for_audio_start<T>(
         None => Ok(None),
         Some(Ok(Ok(Ok(info)))) => Ok(Some(info)),
         Some(Ok(Ok(Err(e)))) => Err(format!("cannot start audio input: {}", e)),
-        // The audio thread panicked; its own log line gives the reason
+        // The audio thread panicked. Its own log line gives the reason; it
+        // can come before or after the line of this error.
         Some(Ok(Err(_))) => Err("cannot start audio input: the audio thread stopped".to_string()),
         Some(Err(_)) => Err(format!(
             "cannot start audio input: timed out after {} s",

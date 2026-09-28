@@ -9,8 +9,10 @@ pub struct TypingIndicator {
     socket: Arc<UdpSocket>,
     config: Arc<RwLock<Config>>,
     logger: Logger,
-    /// Every recording sends the indicator twice. While VRChat cannot be
-    /// reached at the configured address, every send fails the same way.
+    /// A recording turns the indicator on once and off up to twice, and a
+    /// long recording turns it on again after each part. While VRChat
+    /// cannot be reached at the configured address, every send fails the
+    /// same way.
     send_failure: Arc<Mutex<FailureLog>>,
 }
 
