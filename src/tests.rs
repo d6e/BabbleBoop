@@ -1260,6 +1260,30 @@ mod gui_tests {
         assert_eq!(app.config_draft.openai.model, "gpt-6-sol");
     }
 
+    #[test]
+    fn test_model_names_are_trimmed_on_save() {
+        let (mut app, _log_tx) = test_app();
+        app.config_draft.openai.api_key = "test-key".to_string();
+        app.config_draft.openai.model = "gpt-6-sol ".to_string();
+        app.config_draft.openai.transcription_model = "\tgpt-transcribe\n".to_string();
+
+        let saved = app.config_to_save().expect("config is valid");
+
+        assert_eq!(saved.openai.model, "gpt-6-sol");
+        assert_eq!(saved.openai.transcription_model, "gpt-transcribe");
+        // The settings show what was saved.
+        assert_eq!(app.config_draft, saved);
+    }
+
+    #[test]
+    fn test_blank_transcription_model_is_not_saved() {
+        let (mut app, _log_tx) = test_app();
+        app.config_draft.openai.api_key = "test-key".to_string();
+        app.config_draft.openai.transcription_model = " ".to_string();
+
+        assert!(app.config_to_save().is_err());
+    }
+
     /// Press and release the primary button at `pos`, in two frames.
     fn click(ctx: &egui::Context, app: &mut BabbleBoopApp, pos: egui::Pos2) {
         let button = |pressed| egui::Event::PointerButton {

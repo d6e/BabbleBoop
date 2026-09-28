@@ -314,6 +314,36 @@ impl BabbleBoopApp {
         self.set_status_info("Changes discarded");
     }
 
+    /// The draft to save, or why it cannot be saved. Removes spaces around
+    /// the model names first, because the API does not know a model name
+    /// with a space at the end.
+    pub(crate) fn config_to_save(&mut self) -> Result<Config, String> {
+        let openai = &mut self.config_draft.openai;
+        for name in [&mut openai.model, &mut openai.transcription_model] {
+            *name = name.trim().to_string();
+        }
+        self.validate_config()?;
+        Ok(self.config_draft.clone())
+    }
+
+    /// Write `new_config` to the config file and send it to the processing
+    /// loop.
+    fn save_config(&mut self, new_config: Config) {
+        if let Err(e) = new_config.save(CONFIG_PATH) {
+            self.set_status_error(format!("Failed to save: {}", e));
+            return;
+        }
+        // Update the shared config
+        if let Ok(mut config) = self.app_state.config.write() {
+            *config = new_config.clone();
+        }
+        self.saved_config = new_config.clone();
+        match self.send_command(AppCommand::UpdateConfig(new_config)) {
+            Ok(()) => self.set_status_success("Settings saved successfully"),
+            Err(e) => self.set_status_error(format!("Settings saved to file, but {}", e)),
+        }
+    }
+
     fn validate_config(&self) -> Result<(), String> {
         // Validate ports
         if self.config_draft.osc.input_port == 0 {
@@ -334,6 +364,15 @@ impl BabbleBoopApp {
         // Validate model
         if self.config_draft.openai.model.trim().is_empty() {
             return Err("OpenAI model is required".to_string());
+        }
+        if self
+            .config_draft
+            .openai
+            .transcription_model
+            .trim()
+            .is_empty()
+        {
+            return Err("Transcription model is required".to_string());
         }
 
         // Validate target language
@@ -419,32 +458,9 @@ impl BabbleBoopApp {
                 );
 
                 if save_button.clicked() {
-                    if let Err(e) = self.validate_config() {
-                        self.set_status_error(e);
-                    } else {
-                        match self.config_draft.save(CONFIG_PATH) {
-                            Ok(()) => {
-                                // Update the shared config
-                                if let Ok(mut config) = self.app_state.config.write() {
-                                    *config = self.config_draft.clone();
-                                }
-                                self.saved_config = self.config_draft.clone();
-                                match self.send_command(AppCommand::UpdateConfig(
-                                    self.config_draft.clone(),
-                                )) {
-                                    Ok(()) => {
-                                        self.set_status_success("Settings saved successfully")
-                                    }
-                                    Err(e) => self.set_status_error(format!(
-                                        "Settings saved to file, but {}",
-                                        e
-                                    )),
-                                }
-                            }
-                            Err(e) => {
-                                self.set_status_error(format!("Failed to save: {}", e));
-                            }
-                        }
+                    match self.config_to_save() {
+                        Ok(new_config) => self.save_config(new_config),
+                        Err(e) => self.set_status_error(e),
                     }
                 }
             });
