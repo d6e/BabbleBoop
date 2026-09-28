@@ -5,11 +5,11 @@
 use std::time::{Duration, Instant};
 
 /// Longest recording sent as one upload. Longer speech is sent in parts of
-/// this length while recording goes on. This keeps each upload far below
-/// the 25 MB limit of the transcription API in any format (30 s of 32 bit
-/// float stereo at 96 kHz is 23 MB; the 16 kHz mono upload is 0.96 MB),
-/// and the first translation of a long speech appears after 30 s instead
-/// of after the speech ends.
+/// this length while recording goes on. The upload of a 30 s part is a
+/// 16 kHz mono 16 bit WAV file (`upload_audio`) of about 0.96 MB
+/// (30 x 16000 x 2 bytes and a 44 byte header), far below the 25 MB file
+/// limit of the transcription API. The first translation of a long speech
+/// also appears after 30 s instead of after the speech ends.
 pub const MAX_RECORDING: Duration = Duration::from_secs(30);
 
 /// Number of interleaved samples in `MAX_RECORDING`.

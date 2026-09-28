@@ -94,10 +94,25 @@ impl EventQueue {
 /// Handles the input buffers of one stream, converted to f32.
 ///
 /// This runs on the audio thread, which can be real time. It updates
-/// atomics, copies samples and queues events with `try_send`; it allocates
-/// only when a recording or a part starts. In test mode it copies the
-/// samples into the test buffer if its lock is free (`try_lock`). Logging
-/// and encoding happen on the processing side when it receives the events.
+/// atomics, copies samples and queues events with `try_send`. In test mode
+/// it copies the samples into the test buffer if its lock is free
+/// (`try_lock`). Logging and encoding happen on the processing side when
+/// it receives the events.
+///
+/// The callback can still allocate, free memory or take a lock:
+/// - `Recorder` allocates a buffer for a whole part when it sends a part,
+///   and when a recording starts with no buffer (the first recording, or
+///   one after a recording that ended with sound).
+/// - `build_input_stream` grows its f32 buffer on the first callback and
+///   when the backend delivers a larger buffer than before.
+/// - `try_send` can allocate a new block of the channel list (tokio 1.48.0,
+///   `src/sync/mpsc/list.rs` line 134 calls `Block::grow`,
+///   `src/sync/mpsc/block.rs` line 351). Waking the processing loop locks
+///   a mutex if its thread is parked (`src/runtime/park.rs` line 202; the
+///   loop runs in `Runtime::block_on` in `main.rs`).
+/// - An event that `try_send` rejects is dropped here, and so are its
+///   samples.
+/// - `PanicGuard` formats a crash report after a panic.
 struct InputHandler {
     shared: SharedAudioState,
     recorder: Recorder,

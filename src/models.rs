@@ -108,6 +108,8 @@ pub const CHAT_MODELS: &[ChatModel] = &[
     // `none`. The shutdown warnings recommend them.
     chat("gpt-5.6-luna", 0.20, 1.20, Developer, Some("none"), false),
     chat("gpt-5.6-terra", 2.00, 12.00, Developer, Some("none"), false),
+    // Promotional price, available at least through 2026-11-21
+    // (/api/docs/pricing, note below the Standard table).
     chat("gpt-5.6-sol", 4.00, 20.00, Developer, Some("none"), false),
     chat("gpt-4.1", 2.00, 8.00, System, None, false),
     chat("gpt-4.1-mini", 0.40, 1.60, System, None, true),
