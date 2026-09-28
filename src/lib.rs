@@ -12,6 +12,7 @@ pub mod processing_loop;
 pub mod rate_limiter;
 pub mod recorder;
 pub mod recording_manager;
+mod resample;
 pub mod shutdown;
 pub mod theme;
 pub mod transcription;
