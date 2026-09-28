@@ -15,31 +15,60 @@ mod regression_tests {
     // ===========================================================================
 
     #[test]
-    fn test_common_models_have_pricing() {
-        // These models should now have proper pricing
-        let models_with_pricing = vec![
-            "gpt-4o",
-            "gpt-4o-mini",
-            "gpt-4-turbo",
-            "gpt-4",
-            "gpt-3.5-turbo",
-        ];
-
-        for model in models_with_pricing {
-            let estimator = PriceEstimator::new(model, "whisper-1");
-            // Verify we can estimate non-zero costs
-            let cost = estimator.estimate_translation_cost(1000, 500);
-            assert!(cost > 0.0, "Model {} should have non-zero pricing", model);
+    fn test_older_models_keep_pricing() {
+        // Models that existing config files can name, until they shut down.
+        for (model, transcription_model) in [
+            ("gpt-4o", "whisper-1"),
+            ("gpt-4o-mini", "gpt-4o-transcribe"),
+            ("gpt-4-turbo", "gpt-4o-mini-transcribe"),
+            ("gpt-4", "whisper-1"),
+            ("gpt-3.5-turbo", "whisper-1"),
+        ] {
+            assert_eq!(
+                PriceEstimator::unknown_pricing(model, transcription_model),
+                Vec::<String>::new()
+            );
         }
     }
 
     #[test]
-    fn test_unknown_model_uses_default_pricing() {
-        // Unknown models should use conservative default pricing (gpt-4o-mini rates)
-        let estimator = PriceEstimator::new("unknown-model-xyz", "whisper-1");
-        let cost = estimator.estimate_translation_cost(1000, 500);
-        // Should use gpt-4o-mini pricing as fallback, not zero
-        assert!(cost > 0.0, "Unknown models should use default pricing");
+    fn test_current_models_have_pricing() {
+        for (model, transcription_model) in [
+            ("gpt-6-luna", "gpt-transcribe"),
+            ("gpt-6-sol", "gpt-transcribe"),
+            ("gpt-5.4-nano", "gpt-transcribe"),
+            ("gpt-5.4-mini", "gpt-transcribe"),
+            ("gpt-4.1-mini", "gpt-transcribe"),
+        ] {
+            assert_eq!(
+                PriceEstimator::unknown_pricing(model, transcription_model),
+                Vec::<String>::new()
+            );
+        }
+    }
+
+    #[test]
+    fn test_unknown_model_uses_default_model_pricing() {
+        use std::time::Duration;
+
+        let defaults = Config::default().openai;
+        let unknown = PriceEstimator::new("unknown-model-xyz", "unknown-transcriber");
+        let default = PriceEstimator::new(&defaults.model, &defaults.transcription_model);
+        assert_eq!(
+            unknown.estimate_translation_cost(1000, 500),
+            default.estimate_translation_cost(1000, 500)
+        );
+        let minute = Duration::from_secs(60);
+        assert_eq!(
+            unknown.estimate_transcription_cost(minute),
+            default.estimate_transcription_cost(minute)
+        );
+
+        // The warnings name the models whose prices the estimate uses.
+        let warnings = PriceEstimator::unknown_pricing("unknown-model-xyz", "unknown-transcriber");
+        assert_eq!(warnings.len(), 2, "{:?}", warnings);
+        assert!(warnings[0].contains(&format!("{} prices", defaults.model)));
+        assert!(warnings[1].contains(&format!("{} prices", defaults.transcription_model)));
     }
 
     // ===========================================================================

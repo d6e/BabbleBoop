@@ -1,3 +1,4 @@
+use crate::models::{self, DEFAULT_CHAT_MODEL, DEFAULT_TRANSCRIPTION_MODEL};
 use std::error::Error;
 use std::fs;
 use std::time::Duration;
@@ -6,7 +7,7 @@ use std::time::Duration;
 const TOTAL_COST_FILE: &str = "total_cost.txt";
 
 pub struct PriceEstimator {
-    whisper_price_per_minute: f64,
+    transcription_price_per_minute: f64,
     gpt_input_price_per_million_tokens: f64,
     gpt_output_price_per_million_tokens: f64,
     pub total_cost: f64,
@@ -15,7 +16,7 @@ pub struct PriceEstimator {
 impl PriceEstimator {
     pub fn new(model: &str, transcription_model: &str) -> Self {
         let mut estimator = PriceEstimator {
-            whisper_price_per_minute: 0.0,
+            transcription_price_per_minute: 0.0,
             gpt_input_price_per_million_tokens: 0.0,
             gpt_output_price_per_million_tokens: 0.0,
             total_cost: Self::load_total_cost().unwrap_or(0.0),
@@ -27,78 +28,37 @@ impl PriceEstimator {
     /// Use the prices of these models for new estimates. The total cost is
     /// kept. See `unknown_pricing` for models without a known price.
     pub fn set_models(&mut self, model: &str, transcription_model: &str) {
-        let (input_price, output_price, _) = Self::get_model_pricing(model);
-        let (whisper_price, _) = Self::get_transcription_pricing(transcription_model);
+        let chat = models::chat_model(model).unwrap_or(&DEFAULT_CHAT_MODEL);
+        let transcription = models::transcription_model(transcription_model)
+            .unwrap_or(&DEFAULT_TRANSCRIPTION_MODEL);
 
-        self.whisper_price_per_minute = whisper_price;
-        self.gpt_input_price_per_million_tokens = input_price;
-        self.gpt_output_price_per_million_tokens = output_price;
+        self.transcription_price_per_minute = transcription.price_per_minute;
+        self.gpt_input_price_per_million_tokens = chat.input_price;
+        self.gpt_output_price_per_million_tokens = chat.output_price;
     }
 
     /// A warning for each model that has no known price, for the activity
-    /// log. Cost estimates use default prices for these models.
+    /// log. Cost estimates use the default model prices for these models.
     pub fn unknown_pricing(model: &str, transcription_model: &str) -> Vec<String> {
         let mut warnings = Vec::new();
-        if !Self::get_model_pricing(model).2 {
+        if models::chat_model(model).is_none() {
             warnings.push(format!(
-                "No price known for model '{}'. The cost uses gpt-4o-mini prices.",
-                model
+                "No price known for model '{}'. The cost uses {} prices.",
+                model, DEFAULT_CHAT_MODEL.name
             ));
         }
-        if !Self::get_transcription_pricing(transcription_model).1 {
+        if models::transcription_model(transcription_model).is_none() {
             warnings.push(format!(
-                "No price known for transcription model '{}'. The cost uses whisper-1 prices.",
-                transcription_model
+                "No price known for transcription model '{}'. The cost uses {} prices.",
+                transcription_model, DEFAULT_TRANSCRIPTION_MODEL.name
             ));
         }
         warnings
     }
 
-    fn get_transcription_pricing(model: &str) -> (f64, bool) {
-        // Prices per minute as of late 2024
-        // See: https://openai.com/api/pricing/
-        match model {
-            "whisper-1" => (0.006, true),
-            "gpt-4o-transcribe" => (0.006, true),
-            "gpt-4o-mini-transcribe" => (0.003, true),
-            _ => (0.006, false), // Default to whisper-1 pricing
-        }
-    }
-
-    fn get_model_pricing(model: &str) -> (f64, f64, bool) {
-        // Prices per million tokens (input, output) as of late 2024
-        // See: https://openai.com/api/pricing/
-        match model {
-            // GPT-4o models
-            "gpt-4o" | "gpt-4o-2024-11-20" | "gpt-4o-2024-08-06" => (2.50, 10.00, true),
-            "gpt-4o-2024-05-13" => (5.00, 15.00, true),
-
-            // GPT-4o mini models
-            "gpt-4o-mini" | "gpt-4o-mini-2024-07-18" => (0.15, 0.60, true),
-
-            // GPT-4 Turbo models
-            "gpt-4-turbo"
-            | "gpt-4-turbo-2024-04-09"
-            | "gpt-4-turbo-preview"
-            | "gpt-4-0125-preview"
-            | "gpt-4-1106-preview" => (10.00, 30.00, true),
-
-            // GPT-4 models
-            "gpt-4" | "gpt-4-0613" => (30.00, 60.00, true),
-            "gpt-4-32k" | "gpt-4-32k-0613" => (60.00, 120.00, true),
-
-            // GPT-3.5 Turbo models
-            "gpt-3.5-turbo" | "gpt-3.5-turbo-0125" | "gpt-3.5-turbo-1106" => (0.50, 1.50, true),
-            "gpt-3.5-turbo-instruct" => (1.50, 2.00, true),
-
-            // Unknown model - use gpt-4o-mini pricing as conservative default
-            _ => (0.15, 0.60, false),
-        }
-    }
-
     pub fn estimate_transcription_cost(&self, duration: Duration) -> f64 {
         let minutes = duration.as_secs_f64() / 60.0;
-        minutes * self.whisper_price_per_minute
+        minutes * self.transcription_price_per_minute
     }
 
     pub fn estimate_translation_cost(&self, input_tokens: usize, output_tokens: usize) -> f64 {

@@ -1,3 +1,4 @@
+use crate::models::{DEFAULT_CHAT_MODEL, DEFAULT_TRANSCRIPTION_MODEL};
 use serde::{Deserialize, Serialize};
 use std::error::Error;
 use std::fs;
@@ -108,14 +109,14 @@ impl Default for OpenAiConfig {
     fn default() -> Self {
         Self {
             api_key: String::new(),
-            model: "gpt-4o-mini".to_string(),
-            transcription_model: "whisper-1".to_string(),
+            model: DEFAULT_CHAT_MODEL.name.to_string(),
+            transcription_model: default_transcription_model(),
         }
     }
 }
 
 fn default_transcription_model() -> String {
-    "whisper-1".to_string()
+    DEFAULT_TRANSCRIPTION_MODEL.name.to_string()
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug, PartialEq)]
