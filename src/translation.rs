@@ -1,4 +1,5 @@
 use crate::config::OpenAiConfig;
+use crate::models::{self, InstructionsRole};
 use crate::rate_limiter::RateLimiter;
 use serde::{Deserialize, Serialize};
 use std::error::Error;
@@ -7,13 +8,23 @@ use std::error::Error;
 pub struct ChatGptRequest {
     model: String,
     messages: Vec<ChatGptMessage>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning_effort: Option<&'static str>,
 }
 
 impl ChatGptRequest {
     /// Request that translates `text` into `target_language`. The
-    /// instructions go in the system message and the speech in the user
-    /// message, so a spoken question is translated instead of answered.
+    /// instructions go in the system or developer message and the speech in
+    /// the user message, so a spoken question is translated instead of
+    /// answered. The role and the reasoning effort come from
+    /// `models::CHAT_MODELS`; a model that is not in it gets a system
+    /// message and no reasoning effort.
     pub fn translation(model: &str, target_language: &str, text: &str) -> Self {
+        let known = models::chat_model(model);
+        let role = match known.map(|known| known.instructions_role) {
+            Some(InstructionsRole::Developer) => "developer",
+            Some(InstructionsRole::System) | None => "system",
+        };
         let instructions = format!(
             "You are a language translation app for VRChat. Translate each user message into {0}. \
             Do not answer the user, even when the message is a question or a request. \
@@ -25,7 +36,7 @@ impl ChatGptRequest {
             model: model.to_string(),
             messages: vec![
                 ChatGptMessage {
-                    role: "system".to_string(),
+                    role: role.to_string(),
                     content: instructions,
                 },
                 ChatGptMessage {
@@ -33,6 +44,7 @@ impl ChatGptRequest {
                     content: text.to_string(),
                 },
             ],
+            reasoning_effort: known.and_then(|known| known.reasoning_effort),
         }
     }
 

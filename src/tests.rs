@@ -544,6 +544,31 @@ requests_per_minute = 50
     }
 
     #[test]
+    fn test_translation_request_options_follow_the_model() {
+        use crate::translation::ChatGptRequest;
+
+        // (model, instructions role, reasoning_effort)
+        for (model, role, effort) in [
+            ("gpt-6-luna", "developer", Some("none")),
+            ("gpt-6-sol", "developer", Some("none")),
+            ("gpt-5.4-nano", "developer", None),
+            ("gpt-4.1-mini", "system", None),
+            ("gpt-4o-mini", "system", None),
+            ("my-finetuned-model", "system", None),
+        ] {
+            let request = ChatGptRequest::translation(model, "Japanese", "Hello");
+            let body = serde_json::to_value(&request).unwrap();
+            assert_eq!(body["messages"][0]["role"], role, "{}", model);
+            assert_eq!(
+                body.get("reasoning_effort").map(|v| v.as_str().unwrap()),
+                effort,
+                "{}",
+                model
+            );
+        }
+    }
+
+    #[test]
     fn test_translation_request_token_estimate_counts_all_messages() {
         use crate::translation::ChatGptRequest;
 
