@@ -5,7 +5,7 @@ use crate::price_estimator::PriceEstimator;
 use crate::rate_limiter::RateLimiter;
 use crate::recording_manager::RecordingManager;
 use crate::transcription::transcribe_audio;
-use crate::translation::{ask_chatgpt, ChatGptRequest};
+use crate::translation::{ask_chatgpt, ChatGptRequest, Translation};
 use crate::types::Extent;
 use crate::typing_indicator::TypingIndicator;
 
@@ -64,6 +64,29 @@ pub async fn process_audio(
     );
 
     let translation = ask_chatgpt(client, &request, &config.openai, rate_limiter).await?;
+    deliver_translation(
+        translation,
+        &transcription,
+        config,
+        socket,
+        typing_indicator,
+        price_estimator,
+        app_state,
+    )
+    .await
+}
+
+/// Add the cost of the translation request to the total and send the
+/// translation to the chatbox.
+pub(crate) async fn deliver_translation(
+    translation: Translation,
+    transcription: &str,
+    config: &Config,
+    socket: &UdpSocket,
+    typing_indicator: &TypingIndicator,
+    price_estimator: &mut PriceEstimator,
+    app_state: &AppState,
+) -> Result<(), Box<dyn Error>> {
     app_state
         .logger
         .success(format!("Translation: {}", translation.text));
@@ -74,7 +97,7 @@ pub async fn process_audio(
 
     let mut final_response = translation.text;
     if config.translation.include_original_message {
-        final_response = final_response + "\n" + &transcription;
+        final_response = final_response + "\n" + transcription;
     }
     send_to_chatbox(&final_response, config, socket).await?;
 
