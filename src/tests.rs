@@ -1830,9 +1830,9 @@ mod gui_tests {
     // Test: The duration line shows when a recording can be sent
     // ===========================================================================
 
-    /// The painted "Duration:" status of a recording that is 0.5 s long,
-    /// with a minimum transcription duration of 1 s.
-    fn duration_status(recording_split: bool) -> Vec<String> {
+    /// One frame of the audio settings while a recording that is 0.5 s long
+    /// is in progress, with a minimum transcription duration of 1 s.
+    fn recording_frame(recording_split: bool) -> egui::FullOutput {
         use std::sync::atomic::Ordering;
 
         let (mut app, app_state) = test_app_with_state();
@@ -1844,13 +1844,33 @@ mod gui_tests {
         app_state
             .recording_split
             .store(recording_split, Ordering::Relaxed);
-        let output = egui::Context::default().run(raw_input(), |ctx| {
+        egui::Context::default().run(raw_input(), |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| app.audio_settings_ui(ui));
-        });
+        })
+    }
 
-        painted_text(&output)
+    /// The painted "Duration:" status in the frame from `recording_frame`.
+    fn duration_status(recording_split: bool) -> Vec<String> {
+        painted_text(&recording_frame(recording_split))
             .into_iter()
             .filter(|text| text.starts_with("0.5s"))
+            .collect()
+    }
+
+    /// Widths of the filled parts of the 10 point high meters in the frame
+    /// from `recording_frame`. The noise gate is closed and there are no
+    /// silent frames, so only the duration meter has a filled part.
+    fn duration_bar_fill_widths(recording_split: bool) -> Vec<f32> {
+        let track = crate::theme::get_colors(Config::default().theme).meter_background;
+        recording_frame(recording_split)
+            .shapes
+            .iter()
+            .filter_map(|clipped| match &clipped.shape {
+                egui::Shape::Rect(rect) if rect.rect.height() == 10.0 && rect.fill != track => {
+                    Some(rect.rect.width())
+                }
+                _ => None,
+            })
             .collect()
     }
 
@@ -1864,6 +1884,18 @@ mod gui_tests {
     #[test]
     fn test_whole_recording_below_the_minimum_shows_not_ready() {
         assert_eq!(duration_status(false), ["0.5s / 1.0s"]);
+    }
+
+    #[test]
+    fn test_last_part_of_a_split_recording_fills_the_duration_bar() {
+        // The 200 point bar is full, because the minimum does not apply.
+        assert_eq!(duration_bar_fill_widths(true), [200.0]);
+    }
+
+    #[test]
+    fn test_whole_recording_below_the_minimum_half_fills_the_duration_bar() {
+        // 0.5 s of the 1 s minimum fills half of the 200 point bar.
+        assert_eq!(duration_bar_fill_widths(false), [100.0]);
     }
 
     #[test]
