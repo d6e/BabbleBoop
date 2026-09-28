@@ -2,7 +2,7 @@ use babble_boop::api_client::build_api_client;
 use babble_boop::app_state::{run_logging_failure, AppCommand, AppState, LogEntry};
 use babble_boop::audio_playback::play_wav_buffer;
 use babble_boop::audio_processing::process_audio;
-use babble_boop::audio_recording::start_audio_recording;
+use babble_boop::audio_recording::{start_audio_recording, SharedAudioState};
 use babble_boop::config::{Config, CONFIG_PATH};
 use babble_boop::gui::{run_error_dialog, run_gui};
 use babble_boop::processing_loop::{apply_enabled, ProcessingServices};
@@ -121,33 +121,13 @@ async fn run_processing_loop(
     let (tx, mut rx) = mpsc::channel::<AudioEvent>(100);
 
     // Start the audio recording in a separate thread
-    let audio_params = Arc::clone(&app_state.audio_params);
-    let audio_level = Arc::clone(&app_state.current_audio_level);
-    let test_mode_active = Arc::clone(&app_state.test_mode_active);
-    let test_recording_buffer = Arc::clone(&app_state.test_recording_buffer);
+    let shared_audio = SharedAudioState::new(&app_state);
     let shutdown_signal = app_state.shutdown.clone();
-    let is_recording_state = Arc::clone(&app_state.is_recording);
-    let silent_frames_state = Arc::clone(&app_state.silent_frames);
-    let noise_gate_active_state = Arc::clone(&app_state.noise_gate_active);
-    let noise_gate_hold_remaining = Arc::clone(&app_state.noise_gate_hold_remaining);
-    let recording_duration_state = Arc::clone(&app_state.recording_duration);
     let logger_for_audio = app_state.logger.clone();
     let (init_tx, init_rx) =
         std::sync::mpsc::channel::<Result<babble_boop::audio_recording::AudioStreamInfo, String>>();
     std::thread::spawn(move || {
-        match start_audio_recording(
-            audio_params,
-            audio_level,
-            test_mode_active,
-            test_recording_buffer,
-            tx,
-            logger_for_audio,
-            is_recording_state,
-            silent_frames_state,
-            noise_gate_active_state,
-            noise_gate_hold_remaining,
-            recording_duration_state,
-        ) {
+        match start_audio_recording(shared_audio, tx, logger_for_audio) {
             Ok((stream, stream_info)) => {
                 let _ = init_tx.send(Ok(stream_info));
                 let _stream = stream;
