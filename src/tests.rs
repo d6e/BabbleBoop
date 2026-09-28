@@ -2143,6 +2143,67 @@ mod gui_tests {
         assert!(app.config_to_save().is_err());
     }
 
+    /// The settings window clamps a value to the range of its field when it
+    /// draws the field, even if the user does not touch it. A config that
+    /// loads unchanged must also stay unchanged in the window.
+    #[test]
+    fn test_high_limits_are_not_clamped_in_the_settings() {
+        let (cmd_tx, _cmd_rx) = tokio::sync::mpsc::channel(10);
+        let (log_tx, log_rx) = tokio::sync::mpsc::channel(100);
+        let config = Config {
+            keep_audio_files: true,
+            max_audio_files: 500,
+            rate_limit: crate::config::RateLimitConfig {
+                requests_per_minute: 500,
+            },
+            ..Config::default()
+        };
+        let app_state = Arc::new(AppState::new(config.clone(), cmd_tx, log_tx));
+        let mut app = BabbleBoopApp::new(app_state, log_rx);
+        // Tall enough that the settings below the log are not scrolled away
+        let tall = |events| egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(400.0, 3000.0),
+            )),
+            events,
+            ..Default::default()
+        };
+        let ctx = egui::Context::default();
+        let mut output = ctx.run(tall(Vec::new()), |ctx| app.ui(ctx));
+
+        // Open the two sections, which are closed at the start
+        for header in ["Rate Limit", "Debug"] {
+            let pos = text_center(&output, header);
+            let button = |pressed| egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            };
+            let press = vec![egui::Event::PointerMoved(pos), button(true)];
+            #[expect(
+                clippy::let_underscore_must_use,
+                reason = "only the output after the release is used"
+            )]
+            let _ = ctx.run(tall(press), |ctx| app.ui(ctx));
+            output = ctx.run(tall(vec![button(false)]), |ctx| app.ui(ctx));
+        }
+        for _ in 0..3 {
+            output = ctx.run(tall(Vec::new()), |ctx| app.ui(ctx));
+        }
+
+        // Both fields were drawn, so the clamp had its chance to run
+        let text = painted_text(&output);
+        assert!(text.contains(&"Max Audio Files:".to_string()), "{:?}", text);
+        assert!(
+            text.contains(&"Requests per Minute:".to_string()),
+            "{:?}",
+            text
+        );
+        assert_eq!(app.config_draft, config);
+    }
+
     /// Press and release the primary button at `pos`, in two frames.
     fn click(ctx: &egui::Context, app: &mut BabbleBoopApp, pos: egui::Pos2) {
         let button = |pressed| egui::Event::PointerButton {

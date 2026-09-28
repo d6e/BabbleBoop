@@ -15,8 +15,11 @@ pub const CONFIG_PATH: &str = "config.toml";
 pub const PORT_RANGE: RangeInclusive<u16> = 1..=65535;
 pub const DISPLAY_TIME_MS_RANGE: RangeInclusive<u64> = 1000..=30000;
 pub const MAX_MESSAGE_CHUNKS_RANGE: RangeInclusive<usize> = 1..=10;
-pub const REQUESTS_PER_MINUTE_RANGE: RangeInclusive<usize> = 1..=120;
-pub const MAX_AUDIO_FILES_RANGE: RangeInclusive<usize> = 1..=100;
+// The maximums of these two are far above the values that users set. A
+// lower maximum slows an API account with a higher limit, and a lower
+// max_audio_files deletes saved recordings at the next recording.
+pub const REQUESTS_PER_MINUTE_RANGE: RangeInclusive<usize> = 1..=10000;
+pub const MAX_AUDIO_FILES_RANGE: RangeInclusive<usize> = 1..=10000;
 pub const SILENCE_THRESHOLD_RANGE: RangeInclusive<u32> = 1..=200;
 pub const NOISE_GATE_THRESHOLD_RANGE: RangeInclusive<f32> = 0.0..=1.0;
 pub const NOISE_GATE_HOLD_TIME_RANGE: RangeInclusive<f32> = 0.0..=2.0;
@@ -433,6 +436,7 @@ impl Default for RateLimitConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::rate_limiter::RateLimiter;
     use crate::recording_manager::RecordingManager;
 
     /// `config.toml.example` of v0.5.0, the last release.
@@ -595,8 +599,8 @@ requests_per_minute = 50          # adjust based on your API limits, it should c
         BadValue {
             field: "max_audio_files",
             key: "max_audio_files",
-            value: "1000",
-            expect: |c| c.max_audio_files = 100,
+            value: "20000",
+            expect: |c| c.max_audio_files = 10000,
         },
         // The chatbox pauses this long after each part of a message
         BadValue {
@@ -660,8 +664,8 @@ requests_per_minute = 50          # adjust based on your API limits, it should c
         BadValue {
             field: "rate_limit.requests_per_minute",
             key: "requests_per_minute",
-            value: "1000",
-            expect: |c| c.rate_limit.requests_per_minute = 120,
+            value: "20000",
+            expect: |c| c.rate_limit.requests_per_minute = 10000,
         },
         BadValue {
             field: "osc.address",
@@ -737,6 +741,62 @@ requests_per_minute = 50          # adjust based on your API limits, it should c
             }
         }
         assert!(failures.is_empty(), "{:#?}", failures);
+    }
+
+    /// Values above the limits of earlier versions of the settings window
+    /// (100 recordings, 120 requests per minute), as a user can have set
+    /// them in the file.
+    fn v0_5_0_with_high_limits() -> LoadedConfig {
+        let text = v0_5_0_with("max_audio_files", "500")
+            .replace("keep_audio_files = false", "keep_audio_files = true")
+            .replace("requests_per_minute = 50", "requests_per_minute = 500");
+        Config::from_toml(&text).unwrap()
+    }
+
+    #[test]
+    fn high_limits_load_unchanged() {
+        let loaded = v0_5_0_with_high_limits();
+        assert_eq!(loaded.warnings, []);
+        assert_eq!(loaded.config.max_audio_files, 500);
+        assert_eq!(loaded.config.rate_limit.requests_per_minute, 500);
+    }
+
+    #[tokio::test]
+    async fn more_than_100_saved_recordings_are_kept() {
+        let loaded = v0_5_0_with_high_limits();
+        let dir = std::env::temp_dir().join(format!(
+            "babble_boop_more_than_100_recordings_{}",
+            std::process::id()
+        ));
+        if dir.exists() {
+            fs::remove_dir_all(&dir).unwrap();
+        }
+        fs::create_dir_all(&dir).unwrap();
+        for i in 0..150 {
+            fs::write(dir.join(format!("{}_old.wav", i)), b"wav").unwrap();
+        }
+
+        let manager = RecordingManager::new(dir.clone(), loaded.config.max_audio_files);
+        let saved = manager.save_recording(b"wav".to_vec(), "hello").await;
+        let kept = fs::read_dir(&dir).map(|entries| entries.count());
+        fs::remove_dir_all(&dir).unwrap();
+
+        assert!(saved.is_ok(), "{:?}", saved.err());
+        assert_eq!(kept.unwrap(), 151);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn more_than_120_requests_per_minute_do_not_wait() {
+        let loaded = v0_5_0_with_high_limits();
+        let mut limiter = RateLimiter::new(loaded.config.rate_limit.requests_per_minute);
+
+        let start = tokio::time::Instant::now();
+        for _ in 0..500 {
+            limiter.wait().await;
+        }
+
+        // The paused clock moves only when the limiter sleeps
+        assert_eq!(start.elapsed(), std::time::Duration::ZERO);
     }
 
     #[test]
