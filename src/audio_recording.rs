@@ -173,9 +173,9 @@ impl InputHandler {
             RecorderEvent::LimitReached(samples) => {
                 events.send(AudioEvent::AudioPart(captured(samples)))
             }
-            RecorderEvent::Ended(samples) => {
+            RecorderEvent::Ended(samples, extent) => {
                 if !samples.is_empty() {
-                    events.send(AudioEvent::AudioData(captured(samples)));
+                    events.send(AudioEvent::AudioData(captured(samples), extent));
                 }
                 events.send(AudioEvent::StopRecording);
             }
@@ -368,7 +368,8 @@ mod tests {
     use super::*;
     use crate::app_state::AppCommand;
     use crate::config::{AudioConfig, Config};
-    use crate::types::CapturedAudio;
+    use crate::tests::regression_tests::{check_against_minimum, MinimumCheck};
+    use crate::types::{CapturedAudio, Extent};
     use std::time::Duration;
 
     const LOUD: [f32; 4] = [0.0, 0.5, -0.5, 0.0];
@@ -455,11 +456,14 @@ mod tests {
             s.events(),
             vec![
                 AudioEvent::StartRecording,
-                AudioEvent::AudioData(CapturedAudio {
-                    samples: [LOUD, QUIET].concat(),
-                    channels: 2,
-                    sample_rate: 48_000,
-                }),
+                AudioEvent::AudioData(
+                    CapturedAudio {
+                        samples: [LOUD, QUIET].concat(),
+                        channels: 2,
+                        sample_rate: 48_000,
+                    },
+                    Extent::Whole
+                ),
                 AudioEvent::StopRecording,
             ]
         );
@@ -594,6 +598,49 @@ mod tests {
             events.get(2..)
         );
         assert!(!s.app_state.is_recording.load(Ordering::Relaxed));
+    }
+
+    /// The recorded audio that `process_audio` receives after the events
+    /// of one recording.
+    fn recorded_audio(events: Vec<AudioEvent>) -> (CapturedAudio, Extent) {
+        let mut audio = events.into_iter().filter_map(|event| match event {
+            AudioEvent::AudioData(audio, extent) => Some((audio, extent)),
+            _ => None,
+        });
+        let recorded = audio.next().expect("no AudioData event");
+        assert!(audio.next().is_none(), "more than one AudioData event");
+        recorded
+    }
+
+    #[tokio::test]
+    async fn test_the_end_of_a_long_speech_is_not_skipped_as_too_short() {
+        let mut s = Setup::new(10);
+        // One second of stereo audio at 48 kHz
+        let second = vec![0.5; 2 * 48_000];
+        // 31 s of speech: a part of 30 s, then the last second
+        for _ in 0..31 {
+            s.feed(&second);
+        }
+        s.feed(&QUIET);
+        s.feed(&QUIET);
+        let (last, extent) = recorded_audio(s.events());
+        assert_eq!(
+            check_against_minimum(last, extent, 2.0).await,
+            MinimumCheck::Transcribed
+        );
+    }
+
+    #[tokio::test]
+    async fn test_a_short_recording_is_skipped_as_too_short() {
+        let mut s = Setup::new(10);
+        s.feed(&vec![0.5; 2 * 48_000]);
+        s.feed(&QUIET);
+        s.feed(&QUIET);
+        let (recording, extent) = recorded_audio(s.events());
+        assert_eq!(
+            check_against_minimum(recording, extent, 2.0).await,
+            MinimumCheck::Skipped
+        );
     }
 
     #[test]

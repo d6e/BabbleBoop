@@ -3,7 +3,7 @@
 //! These tests verify the fixes for issues identified during code review.
 
 #[cfg(test)]
-mod regression_tests {
+pub(crate) mod regression_tests {
     use crate::config::{
         AudioConfig, Config, OpenAiConfig, OscConfig, RateLimitConfig, ThemeMode, TranslationConfig,
     };
@@ -828,7 +828,7 @@ requests_per_minute = 50
     fn test_audio_events_are_logged_on_the_processing_side() {
         use crate::app_state::LogLevel;
         use crate::processing_loop::log_audio_event;
-        use crate::types::{AudioEvent, CapturedAudio};
+        use crate::types::{AudioEvent, CapturedAudio, Extent};
 
         let audio = || CapturedAudio {
             samples: vec![0.5; 4],
@@ -839,7 +839,7 @@ requests_per_minute = 50
             for event in [
                 AudioEvent::StartRecording,
                 AudioEvent::AudioPart(audio()),
-                AudioEvent::AudioData(audio()),
+                AudioEvent::AudioData(audio(), Extent::Whole),
                 AudioEvent::StopRecording,
                 AudioEvent::EventsDropped(3),
                 AudioEvent::InputError("Audio input error: device unplugged".to_string()),
@@ -1008,7 +1008,7 @@ requests_per_minute = 50
 
     /// What `process_audio` did with a recording.
     #[derive(Debug, PartialEq)]
-    enum MinimumCheck {
+    pub(crate) enum MinimumCheck {
         /// The recording was skipped as too short.
         Skipped,
         /// The recording went on to transcription.
@@ -1016,14 +1016,28 @@ requests_per_minute = 50
     }
 
     /// Run `process_audio` on one second of audio with `min_seconds` as the
-    /// minimum transcription duration. The API client sends its requests
-    /// through a local proxy, which accepts the connection and closes it, so
-    /// no request leaves the machine.
+    /// minimum transcription duration.
     async fn check_one_second_against_minimum(min_seconds: f32) -> MinimumCheck {
+        let second = crate::types::CapturedAudio {
+            samples: vec![0.25; 16_000],
+            channels: 1,
+            sample_rate: 16_000,
+        };
+        check_against_minimum(second, crate::types::Extent::Whole, min_seconds).await
+    }
+
+    /// Run `process_audio` on `audio`, which holds `extent` of a recording,
+    /// with `min_seconds` as the minimum transcription duration. The API client sends its requests through a
+    /// local proxy, which accepts the connection and closes it, so no
+    /// request leaves the machine.
+    pub(crate) async fn check_against_minimum(
+        audio: crate::types::CapturedAudio,
+        extent: crate::types::Extent,
+        min_seconds: f32,
+    ) -> MinimumCheck {
         use crate::app_state::AppState;
         use crate::audio_processing::process_audio;
         use crate::processing_loop::encode_for_upload;
-        use crate::types::CapturedAudio;
         use crate::typing_indicator::TypingIndicator;
         use std::sync::atomic::{AtomicBool, Ordering};
         use std::sync::{Arc, RwLock};
@@ -1057,19 +1071,14 @@ requests_per_minute = 50
         let (cmd_tx, _cmd_rx) = tokio::sync::mpsc::channel(10);
         let (log_tx, _log_rx) = tokio::sync::mpsc::channel(10);
         let app_state = Arc::new(AppState::new(config.clone(), cmd_tx, log_tx));
-        let wav = encode_for_upload(CapturedAudio {
-            samples: vec![0.25; 16_000],
-            channels: 1,
-            sample_rate: 16_000,
-        })
-        .await
-        .unwrap();
+        let wav = encode_for_upload(audio).await.unwrap();
 
         let result = tokio::time::timeout(
             Duration::from_secs(10),
             process_audio(
                 &client,
                 wav,
+                extent,
                 &config,
                 &socket,
                 &mut RateLimiter::new(50),
@@ -1151,6 +1160,21 @@ requests_per_minute = 50
                 (min_seconds, expected)
             );
         }
+    }
+
+    #[tokio::test]
+    async fn test_minimum_duration_does_not_apply_to_a_part_of_a_long_recording() {
+        // A part holds 30 s unless it is the last part; a config.toml
+        // minimum can be longer than that.
+        let second = crate::types::CapturedAudio {
+            samples: vec![0.25; 16_000],
+            channels: 1,
+            sample_rate: 16_000,
+        };
+        assert_eq!(
+            check_against_minimum(second, crate::types::Extent::Part, 2.0).await,
+            MinimumCheck::Transcribed
+        );
     }
 
     // ===========================================================================

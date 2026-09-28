@@ -205,7 +205,7 @@ pub fn log_audio_event(event: &AudioEvent, logger: &Logger) {
             "Recording reached {} s, processing it while recording goes on...",
             MAX_RECORDING.as_secs()
         )),
-        AudioEvent::AudioData(_) => logger.info("Silence detected, processing..."),
+        AudioEvent::AudioData(..) => logger.info("Silence detected, processing..."),
         AudioEvent::StopRecording => {}
         AudioEvent::EventsDropped(count) => logger.error(format!(
             "Lost {} audio events because the processing queue was full",

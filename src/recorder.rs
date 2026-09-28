@@ -2,6 +2,7 @@
 //! callback feeds it each buffer; it has no device, clock or channel of its
 //! own, so it can be tested with plain sample buffers.
 
+use crate::types::Extent;
 use std::time::{Duration, Instant};
 
 /// Longest recording sent as one upload. Longer speech is sent in parts of
@@ -35,9 +36,10 @@ pub enum RecorderEvent {
     /// The gate opened and a recording started.
     Started,
     /// Silence ended the recording. Holds its samples since the last part,
-    /// interleaved. Holds no samples if none of them is above the gate
+    /// interleaved, and whether the recording reached the length limit
+    /// before. Holds no samples if none of them is above the gate
     /// threshold.
-    Ended(Vec<f32>),
+    Ended(Vec<f32>, Extent),
     /// The recording reached the maximum length. Holds its samples so far;
     /// the recording goes on with a new part. A part with no sample above
     /// the gate threshold is not sent.
@@ -105,6 +107,8 @@ pub struct Recorder {
     samples: Vec<f32>,
     /// Whether `samples` holds a sample above the gate threshold
     has_sound: bool,
+    /// Whether the recording reached the length limit
+    split: bool,
     max_samples: usize,
 }
 
@@ -120,6 +124,7 @@ impl Recorder {
             recording_start: None,
             samples: Vec::new(),
             has_sound: false,
+            split: false,
             max_samples: max_samples.max(1),
         }
     }
@@ -146,6 +151,7 @@ impl Recorder {
             data = rest;
             if self.samples.len() == self.max_samples {
                 self.recording_start = Some(now);
+                self.split = true;
                 if self.has_sound {
                     self.has_sound = false;
                     let next = self.new_buffer();
@@ -194,12 +200,20 @@ impl Recorder {
                 self.is_recording = false;
                 self.silent_frames = 0;
                 self.recording_start = None;
+                let extent = if std::mem::take(&mut self.split) {
+                    Extent::Part
+                } else {
+                    Extent::Whole
+                };
                 if self.has_sound {
                     self.has_sound = false;
-                    emit(RecorderEvent::Ended(std::mem::take(&mut self.samples)));
+                    emit(RecorderEvent::Ended(
+                        std::mem::take(&mut self.samples),
+                        extent,
+                    ));
                 } else {
                     self.samples.clear();
-                    emit(RecorderEvent::Ended(Vec::new()));
+                    emit(RecorderEvent::Ended(Vec::new(), extent));
                 }
             } else {
                 // Keep recording during short pauses
@@ -326,7 +340,10 @@ mod tests {
         let expected: Vec<f32> = [&LOUD[..], &QUIET, &QUIET, &QUIET].concat();
         assert_eq!(
             h.events,
-            vec![RecorderEvent::Started, RecorderEvent::Ended(expected)]
+            vec![
+                RecorderEvent::Started,
+                RecorderEvent::Ended(expected, Extent::Whole)
+            ]
         );
         assert!(!ended.is_recording);
         assert_eq!(ended.silent_frames, 0);
@@ -377,7 +394,7 @@ mod tests {
         let second: Vec<f32> = [&LOUD[..], &QUIET, &QUIET].concat();
         assert_eq!(h.events.len(), 4);
         assert_eq!(h.events[2], RecorderEvent::Started);
-        assert_eq!(h.events[3], RecorderEvent::Ended(second));
+        assert_eq!(h.events[3], RecorderEvent::Ended(second, Extent::Whole));
     }
 
     #[test]
@@ -406,7 +423,35 @@ mod tests {
         }
         let last: Vec<f32> = [&LOUD[..], &QUIET, &QUIET].concat();
         assert_eq!(h.events.len(), 4);
-        assert_eq!(h.events[3], RecorderEvent::Ended(last));
+        assert_eq!(h.events[3], RecorderEvent::Ended(last, Extent::Part));
+    }
+
+    #[test]
+    fn test_a_recording_after_a_split_one_is_whole() {
+        let mut h = Harness::with_limit(4 * LOUD.len());
+        for _ in 0..5 {
+            h.feed(&LOUD);
+        }
+        h.wait_past_hold();
+        for _ in 0..SETTINGS.silence_threshold {
+            h.feed(&QUIET);
+        }
+        h.feed(&LOUD);
+        h.wait_past_hold();
+        for _ in 0..SETTINGS.silence_threshold {
+            h.feed(&QUIET);
+        }
+        let last = [&LOUD[..], &QUIET, &QUIET].concat();
+        assert_eq!(
+            h.events,
+            vec![
+                RecorderEvent::Started,
+                RecorderEvent::LimitReached([LOUD, LOUD, LOUD, LOUD].concat()),
+                RecorderEvent::Ended(last.clone(), Extent::Part),
+                RecorderEvent::Started,
+                RecorderEvent::Ended(last, Extent::Whole),
+            ]
+        );
     }
 
     #[test]
@@ -427,7 +472,7 @@ mod tests {
             vec![
                 RecorderEvent::Started,
                 RecorderEvent::LimitReached(first),
-                RecorderEvent::Ended(rest),
+                RecorderEvent::Ended(rest, Extent::Part),
             ]
         );
     }
@@ -446,7 +491,7 @@ mod tests {
                 RecorderEvent::Started,
                 RecorderEvent::LimitReached([LOUD, QUIET].concat()),
                 // The rest holds no sound above the threshold: not sent
-                RecorderEvent::Ended(Vec::new()),
+                RecorderEvent::Ended(Vec::new(), Extent::Part),
             ]
         );
     }
@@ -467,7 +512,7 @@ mod tests {
             vec![
                 RecorderEvent::Started,
                 RecorderEvent::LimitReached([LOUD, LOUD, LOUD].concat()),
-                RecorderEvent::Ended(Vec::new()),
+                RecorderEvent::Ended(Vec::new(), Extent::Part),
             ]
         );
     }
@@ -492,7 +537,7 @@ mod tests {
             vec![
                 RecorderEvent::Started,
                 RecorderEvent::LimitReached(first),
-                RecorderEvent::Ended(Vec::new()),
+                RecorderEvent::Ended(Vec::new(), Extent::Part),
             ]
         );
     }
@@ -525,7 +570,7 @@ mod tests {
                 RecorderEvent::Started,
                 RecorderEvent::LimitReached([LOUD, LOUD].concat()),
                 RecorderEvent::LimitReached([LOUD, QUIET].concat()),
-                RecorderEvent::Ended(Vec::new()),
+                RecorderEvent::Ended(Vec::new(), Extent::Part),
             ]
         );
     }

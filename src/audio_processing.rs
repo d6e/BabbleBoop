@@ -6,6 +6,7 @@ use crate::rate_limiter::RateLimiter;
 use crate::recording_manager::RecordingManager;
 use crate::transcription::transcribe_audio;
 use crate::translation::{ask_chatgpt, ChatGptRequest};
+use crate::types::Extent;
 use crate::typing_indicator::TypingIndicator;
 
 use std::error::Error;
@@ -17,6 +18,7 @@ use tokio::net::UdpSocket;
 pub async fn process_audio(
     client: &reqwest::Client,
     audio_data: Vec<u8>,
+    extent: Extent,
     config: &Config,
     socket: &UdpSocket,
     rate_limiter: &mut RateLimiter,
@@ -28,7 +30,7 @@ pub async fn process_audio(
     let audio_duration = calculate_audio_duration(&audio_data)?;
 
     let min_duration = min_transcription_duration(config.audio.min_transcription_duration);
-    if audio_duration < min_duration {
+    if extent == Extent::Whole && audio_duration < min_duration {
         app_state.logger.info(format!(
             "Audio too short ({:.2}s < {:.2}s), skipping",
             audio_duration.as_secs_f32(),

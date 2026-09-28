@@ -9,7 +9,7 @@ use babble_boop::processing_loop::{
     apply_enabled, convert_for_playback, encode_for_upload, AudioEvents, ProcessingServices,
     TestRecording, TEST_RECORDING_LIMIT,
 };
-use babble_boop::types::AudioEvent;
+use babble_boop::types::{AudioEvent, Extent};
 use babble_boop::typing_indicator::TypingIndicator;
 
 use std::ops::ControlFlow;
@@ -266,49 +266,52 @@ async fn run_processing_loop(
                 // A part of a long recording: the typing indicator is to stay
                 // on after process_audio turns it off.
                 let recording_goes_on = matches!(event, AudioEvent::AudioPart(_));
-                match event {
+                let (audio, extent) = match event {
                     AudioEvent::StartRecording => {
                         typing_indicator.start_typing().await;
+                        continue;
                     }
                     AudioEvent::StopRecording => {
                         typing_indicator.stop_typing().await;
+                        continue;
                     }
                     // Logged above
-                    AudioEvent::EventsDropped(_) | AudioEvent::InputError(_) => {}
-                    AudioEvent::AudioData(audio) | AudioEvent::AudioPart(audio) => {
-                        let audio_data = match app_state.shutdown.run_until(encode_for_upload(audio)).await {
-                            Some(Ok(wav)) => wav,
-                            Some(Err(e)) => {
-                                app_state.logger.error(format!("Error: {}", e));
-                                continue;
-                            }
-                            None => break,
-                        };
-                        // Read current config for processing
-                        let current_config = app_state.config.read().expect("Config lock poisoned").clone();
-                        // Shutdown drops the work, including the chatbox
-                        // display pause and rate limiter wait.
-                        let result = app_state.shutdown.run_until(process_audio(
-                            &api_client,
-                            audio_data,
-                            &current_config,
-                            &socket,
-                            &mut services.rate_limiter,
-                            &typing_indicator,
-                            &mut services.price_estimator,
-                            services.recording_manager.as_ref(),
-                            &app_state,
-                        ))
-                        .await;
-                        match result {
-                            Some(Ok(())) => {}
-                            Some(Err(e)) => app_state.logger.error_api(format!("Error: {}", e)),
-                            None => break,
-                        }
-                        if recording_goes_on {
-                            typing_indicator.start_typing().await;
-                        }
+                    AudioEvent::EventsDropped(_) | AudioEvent::InputError(_) => continue,
+                    AudioEvent::AudioData(audio, extent) => (audio, extent),
+                    AudioEvent::AudioPart(audio) => (audio, Extent::Part),
+                };
+                let audio_data = match app_state.shutdown.run_until(encode_for_upload(audio)).await {
+                    Some(Ok(wav)) => wav,
+                    Some(Err(e)) => {
+                        app_state.logger.error(format!("Error: {}", e));
+                        continue;
                     }
+                    None => break,
+                };
+                // Read current config for processing
+                let current_config = app_state.config.read().expect("Config lock poisoned").clone();
+                // Shutdown drops the work, including the chatbox
+                // display pause and rate limiter wait.
+                let result = app_state.shutdown.run_until(process_audio(
+                    &api_client,
+                    audio_data,
+                    extent,
+                    &current_config,
+                    &socket,
+                    &mut services.rate_limiter,
+                    &typing_indicator,
+                    &mut services.price_estimator,
+                    services.recording_manager.as_ref(),
+                    &app_state,
+                ))
+                .await;
+                match result {
+                    Some(Ok(())) => {}
+                    Some(Err(e)) => app_state.logger.error_api(format!("Error: {}", e)),
+                    None => break,
+                }
+                if recording_goes_on {
+                    typing_indicator.start_typing().await;
                 }
             }
         }
