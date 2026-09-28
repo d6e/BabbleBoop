@@ -873,8 +873,9 @@ impl BabbleBoopApp {
             );
             ui.add_space(4.0);
 
-            // Recording duration. The last part of a recording that
-            // reached the length limit is transcribed whatever its length.
+            // Recording duration. The minimum transcription duration does
+            // not apply to the last part of a recording that reached the
+            // length limit.
             let min_duration_shown = if recording_split {
                 0.0
             } else {

@@ -575,7 +575,7 @@ mod tests {
         assert_eq!(part.samples.len(), 30 * 2 * 48_000);
         assert_eq!((part.channels, part.sample_rate), (2, 48_000));
         assert!(s.app_state.is_recording.load(Ordering::Relaxed));
-        // The GUI shows the rest as ready to transcribe
+        // The GUI shows that the minimum does not apply to the rest
         assert!(s.app_state.recording_split.load(Ordering::Relaxed));
         s.feed(&QUIET);
         s.feed(&QUIET);

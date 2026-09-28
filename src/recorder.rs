@@ -56,8 +56,8 @@ pub struct RecorderStatus {
     pub hold_remaining: f32,
     /// Seconds since the recording started, 0 when not recording
     pub recording_duration: f32,
-    /// Whether the recording reached the length limit. Its last part is
-    /// then transcribed whatever its length.
+    /// Whether the recording reached the length limit. The minimum
+    /// transcription duration then does not apply to its last part.
     pub split: bool,
 }
 
