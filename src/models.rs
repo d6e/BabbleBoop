@@ -104,10 +104,11 @@ pub const CHAT_MODELS: &[ChatModel] = &[
     // GPT-5.4 nano and mini use reasoning effort `none` by default.
     chat("gpt-5.4-nano", 0.20, 1.25, Developer, None, true),
     chat("gpt-5.4-mini", 0.75, 4.50, Developer, None, true),
-    // GPT-5.6 models use reasoning effort `medium` by default.
-    chat("gpt-5.6-luna", 0.20, 1.20, Developer, None, false),
-    chat("gpt-5.6-terra", 2.00, 12.00, Developer, None, false),
-    chat("gpt-5.6-sol", 4.00, 20.00, Developer, None, false),
+    // GPT-5.6 models use reasoning effort `medium` by default and support
+    // `none`. The shutdown warnings recommend them.
+    chat("gpt-5.6-luna", 0.20, 1.20, Developer, Some("none"), false),
+    chat("gpt-5.6-terra", 2.00, 12.00, Developer, Some("none"), false),
+    chat("gpt-5.6-sol", 4.00, 20.00, Developer, Some("none"), false),
     chat("gpt-4.1", 2.00, 8.00, System, None, false),
     chat("gpt-4.1-mini", 0.40, 1.60, System, None, true),
     retiring_chat("gpt-4.1-nano", 0.10, 0.40, "2026-10-23", "gpt-5.6-luna"),

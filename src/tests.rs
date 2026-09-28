@@ -551,6 +551,10 @@ requests_per_minute = 50
         for (model, role, effort) in [
             ("gpt-6-luna", "developer", Some("none")),
             ("gpt-6-sol", "developer", Some("none")),
+            // Shutdown replacements; without `none` they reason at `medium`.
+            ("gpt-5.6-luna", "developer", Some("none")),
+            ("gpt-5.6-terra", "developer", Some("none")),
+            ("gpt-5.6-sol", "developer", Some("none")),
             ("gpt-5.4-nano", "developer", None),
             ("gpt-4.1-mini", "system", None),
             ("gpt-4o-mini", "system", None),
