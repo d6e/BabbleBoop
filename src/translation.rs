@@ -62,39 +62,101 @@ impl ChatGptRequest {
     /// Reads the response body of this request. The token counts come from
     /// the `usage` that the API reports. A count that is missing is
     /// estimated at four bytes of text for each token, which does not
-    /// include reasoning tokens.
+    /// include reasoning tokens. A response that the API returns without a
+    /// usable translation, such as a refusal, is still a `Translation`: the
+    /// API charges for its tokens.
     pub fn parse_response(&self, body: &str) -> Result<Translation, Box<dyn Error>> {
         let response: ChatGptResponse = serde_json::from_str(body)?;
-        let choice = response
-            .choices
-            .into_iter()
-            .next()
-            .ok_or("ChatGPT API returned empty choices array")?;
-        let text = choice.message.content;
+        let (text, answer_len) = match response.choices.into_iter().next() {
+            Some(choice) => {
+                let answer_len = choice
+                    .message
+                    .content
+                    .as_ref()
+                    .or(choice.message.refusal.as_ref())
+                    .map_or(0, String::len);
+                (choice.into_text(), answer_len)
+            }
+            None => (Err(NoTranslation::NoChoices), 0),
+        };
         let usage = response.usage.unwrap_or_default();
         let tokens = TokenCounts {
             input: usage
                 .prompt_tokens
                 .unwrap_or_else(|| self.approx_input_tokens()),
-            output: usage.completion_tokens.unwrap_or(text.len() / 4),
+            output: usage.completion_tokens.unwrap_or(answer_len / 4),
         };
         Ok(Translation { text, tokens })
     }
 }
 
-/// Translated text and the tokens that the request used.
+/// The answer to a translation request and the tokens that the request
+/// used.
 pub struct Translation {
-    pub text: String,
+    /// The translated text, or why the response holds none to send.
+    pub text: Result<String, NoTranslation>,
     pub tokens: TokenCounts,
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+/// Why a Chat Completions response holds no translation to send.
+#[derive(Debug, PartialEq)]
+pub enum NoTranslation {
+    /// The model refused, with this message.
+    Refused(String),
+    /// The response has no choices.
+    NoChoices,
+    /// The content is null or blank. `finish_reason` is from the response,
+    /// such as `content_filter`.
+    Empty { finish_reason: Option<String> },
+    /// The model reached the output token limit (`finish_reason: length`).
+    /// The request sets no limit, so the text reached the limit of the
+    /// model, which is much longer than a translation of a 30 s part of
+    /// speech. Such a text is not a translation (for example, the model
+    /// repeated itself), and its end is missing, so it is not sent.
+    CutOff,
+}
+
+impl std::fmt::Display for NoTranslation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            NoTranslation::Refused(refusal) => {
+                write!(f, "The model refused to translate: {}", refusal)
+            }
+            NoTranslation::NoChoices => write!(
+                f,
+                "The model returned no translation (the response has no choices)"
+            ),
+            NoTranslation::Empty { finish_reason } => match finish_reason.as_deref() {
+                Some("content_filter") => write!(
+                    f,
+                    "The model returned no translation: the content filter removed it \
+                     (finish_reason: content_filter)"
+                ),
+                Some(reason) => write!(
+                    f,
+                    "The model returned no translation (finish_reason: {})",
+                    reason
+                ),
+                None => write!(f, "The model returned no translation"),
+            },
+            NoTranslation::CutOff => write!(
+                f,
+                "The translation reached the output token limit and was cut off, \
+                 so it was not sent (finish_reason: length)"
+            ),
+        }
+    }
+}
+
+impl Error for NoTranslation {}
+
+#[derive(Serialize, Clone)]
 pub struct ChatGptMessage {
     pub role: String,
     pub content: String,
 }
 
-#[derive(Deserialize, Clone)]
+#[derive(Deserialize)]
 struct ChatGptResponse {
     choices: Vec<ChatGptChoice>,
     usage: Option<ChatGptUsage>,
@@ -108,9 +170,45 @@ struct ChatGptUsage {
     completion_tokens: Option<usize>,
 }
 
-#[derive(Deserialize, Clone)]
+/// One choice of a Chat Completions response. The API reference
+/// (developers.openai.com/api/reference/resources/chat) gives `content` as
+/// string or null, `refusal` as an optional string or null, and
+/// `finish_reason` as `stop`, `length`, `tool_calls`, `content_filter` or
+/// `function_call`.
+#[derive(Deserialize)]
 struct ChatGptChoice {
-    message: ChatGptMessage,
+    message: ChatGptAnswer,
+    finish_reason: Option<String>,
+}
+
+/// The assistant message of a choice.
+#[derive(Deserialize)]
+struct ChatGptAnswer {
+    content: Option<String>,
+    refusal: Option<String>,
+}
+
+impl ChatGptChoice {
+    /// The text to send, or why there is none. A refusal comes first,
+    /// then a cut off text, then a blank one.
+    fn into_text(self) -> Result<String, NoTranslation> {
+        if let Some(refusal) = self
+            .message
+            .refusal
+            .filter(|refusal| !refusal.trim().is_empty())
+        {
+            return Err(NoTranslation::Refused(refusal));
+        }
+        let content = self
+            .message
+            .content
+            .filter(|content| !content.trim().is_empty());
+        match (content, self.finish_reason) {
+            (Some(_), Some(reason)) if reason == "length" => Err(NoTranslation::CutOff),
+            (Some(content), _) => Ok(content),
+            (None, finish_reason) => Err(NoTranslation::Empty { finish_reason }),
+        }
+    }
 }
 
 pub async fn ask_chatgpt(

@@ -77,7 +77,9 @@ pub async fn process_audio(
 }
 
 /// Add the cost of the translation request to the total and send the
-/// translation to the chatbox.
+/// translation to the chatbox. A response without a translation, such as
+/// a refusal, costs its tokens too; it goes to the activity log, not to the
+/// chatbox.
 pub(crate) async fn deliver_translation(
     translation: Translation,
     transcription: &str,
@@ -87,15 +89,21 @@ pub(crate) async fn deliver_translation(
     price_estimator: &mut PriceEstimator,
     app_state: &AppState,
 ) -> Result<(), Box<dyn Error>> {
-    app_state
-        .logger
-        .success(format!("Translation: {}", translation.text));
-
     let translation_cost = price_estimator.estimate_translation_cost(translation.tokens);
     price_estimator.add_cost(translation_cost, &app_state.logger);
     app_state.set_total_cost(price_estimator.total_cost);
 
-    let mut final_response = translation.text;
+    let text = match translation.text {
+        Ok(text) => text,
+        Err(no_translation) => {
+            app_state.logger.error(no_translation.to_string());
+            typing_indicator.stop_typing().await;
+            return Ok(());
+        }
+    };
+    app_state.logger.success(format!("Translation: {}", text));
+
+    let mut final_response = text;
     if config.translation.include_original_message {
         final_response = final_response + "\n" + transcription;
     }

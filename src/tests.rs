@@ -667,6 +667,22 @@ requests_per_minute = 50
     /// Chat Completions response body in the shape the API returns. `usage`
     /// is the JSON of the usage field, or `None` to leave the field out.
     fn chat_completion_body(content: &str, usage: Option<&str>) -> String {
+        chat_completion_body_with(
+            &serde_json::to_string(content).unwrap(),
+            "null",
+            "stop",
+            usage,
+        )
+    }
+
+    /// Chat Completions response body with one choice. `content` and
+    /// `refusal` are the JSON of the message fields, such as `null`.
+    fn chat_completion_body_with(
+        content: &str,
+        refusal: &str,
+        finish_reason: &str,
+        usage: Option<&str>,
+    ) -> String {
         let usage = usage
             .map(|usage| format!(r#","usage":{}"#, usage))
             .unwrap_or_default();
@@ -681,17 +697,16 @@ requests_per_minute = 50
                     "message": {{
                         "role": "assistant",
                         "content": {},
-                        "refusal": null,
+                        "refusal": {},
                         "annotations": []
                     }},
                     "logprobs": null,
-                    "finish_reason": "stop"
+                    "finish_reason": "{}"
                 }}],
                 "service_tier": "default",
                 "system_fingerprint": null{}
             }}"#,
-            serde_json::to_string(content).unwrap(),
-            usage
+            content, refusal, finish_reason, usage
         )
     }
 
@@ -718,7 +733,7 @@ requests_per_minute = 50
 
         let translation = request.parse_response(&body).unwrap();
 
-        assert_eq!(translation.text, "Quelle heure est-il ?");
+        assert_eq!(translation.text, Ok("Quelle heure est-il ?".to_string()));
         // completion_tokens includes the 320 reasoning tokens.
         assert_eq!(
             translation.tokens,
@@ -740,7 +755,7 @@ requests_per_minute = 50
         ] {
             let translation = request.parse_response(&body).unwrap();
 
-            assert_eq!(translation.text, "Quelle heure est-il ?");
+            assert_eq!(translation.text, Ok("Quelle heure est-il ?".to_string()));
             // Four bytes a token: 21 bytes of translation give 5 tokens.
             assert_eq!(
                 translation.tokens,
@@ -778,17 +793,287 @@ requests_per_minute = 50
         assert!(reported_cost > estimator.estimate_translation_cost(estimated.tokens));
     }
 
+    // ===========================================================================
+    // Test: A response without a translation is logged, not sent
+    // ===========================================================================
+
+    /// Usage of a short response, such as a refusal.
+    const SHORT_USAGE: &str = r#"{
+        "prompt_tokens": 58,
+        "completion_tokens": 12,
+        "total_tokens": 70
+    }"#;
+
+    /// What happened when the processing loop received a Chat Completions
+    /// response.
+    #[derive(Debug)]
+    struct Delivery {
+        /// Level and text of the activity log entries.
+        log: Vec<(crate::app_state::LogLevel, String)>,
+        /// The OSC messages that reached the chatbox address.
+        chatbox: Vec<rosc::OscMessage>,
+        /// The total cost after the response, from zero.
+        total_cost: f64,
+    }
+
+    /// Give the Chat Completions response `body` to `parse_response` and
+    /// `deliver_translation`, with a local UDP socket as the chatbox. An
+    /// error is logged as the processing loop logs an error of
+    /// `process_audio`. The total cost starts at zero, in a file of its
+    /// own named after `test_name`.
+    async fn deliver_response(test_name: &str, body: &str) -> Delivery {
+        use crate::app_state::AppState;
+        use crate::audio_processing::deliver_translation;
+        use crate::translation::ChatGptRequest;
+        use crate::typing_indicator::TypingIndicator;
+        use std::sync::{Arc, RwLock};
+        use std::time::Duration;
+        use tokio::net::UdpSocket;
+
+        let chatbox = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let mut config = Config::default();
+        config.osc.address = "127.0.0.1".to_string();
+        config.osc.output_port = chatbox.local_addr().unwrap().port();
+        config.osc.display_time = 0;
+        let (cmd_tx, _cmd_rx) = tokio::sync::mpsc::channel(10);
+        let (log_tx, mut log_rx) = tokio::sync::mpsc::channel(10);
+        let app_state = Arc::new(AppState::new(config.clone(), cmd_tx, log_tx));
+        let typing_indicator = TypingIndicator::new(
+            socket.clone(),
+            Arc::new(RwLock::new(config.clone())),
+            app_state.logger.clone(),
+        );
+        let cost_file = std::env::temp_dir().join(format!(
+            "babble_boop_{}_{}_total_cost.txt",
+            test_name,
+            std::process::id()
+        ));
+        if cost_file.exists() {
+            std::fs::remove_file(&cost_file).unwrap();
+        }
+        let mut price_estimator = PriceEstimator::with_cost_file(
+            cost_file.clone(),
+            &config.openai.model,
+            &config.openai.transcription_model,
+        );
+        let request = ChatGptRequest::translation(&config.openai.model, "French", "Hello");
+
+        let result = match request.parse_response(body) {
+            Ok(translation) => {
+                deliver_translation(
+                    translation,
+                    "Hello",
+                    &config,
+                    &socket,
+                    &typing_indicator,
+                    &mut price_estimator,
+                    &app_state,
+                )
+                .await
+            }
+            Err(e) => Err(e),
+        };
+        if let Err(e) = result {
+            app_state.logger.error_api(format!("Error: {}", e));
+        }
+        if cost_file.exists() {
+            std::fs::remove_file(&cost_file).unwrap();
+        }
+        assert_eq!(app_state.get_total_cost(), price_estimator.total_cost);
+
+        let mut chatbox_messages = Vec::new();
+        let mut buf = [0u8; 1024];
+        while let Ok(received) =
+            tokio::time::timeout(Duration::from_millis(200), chatbox.recv_from(&mut buf)).await
+        {
+            let (len, _) = received.unwrap();
+            match rosc::decoder::decode_udp(&buf[..len]).unwrap().1 {
+                rosc::OscPacket::Message(message) => chatbox_messages.push(message),
+                bundle => panic!("unexpected OSC bundle {:?}", bundle),
+            }
+        }
+        Delivery {
+            log: std::iter::from_fn(|| log_rx.try_recv().ok())
+                .map(|entry| (entry.level, entry.message))
+                .collect(),
+            chatbox: chatbox_messages,
+            total_cost: price_estimator.total_cost,
+        }
+    }
+
+    /// The only OSC message that a response without a translation sends:
+    /// the typing indicator off.
+    fn typing_off() -> rosc::OscMessage {
+        rosc::OscMessage {
+            addr: "/chatbox/typing".to_string(),
+            args: vec![rosc::OscType::Bool(false)],
+        }
+    }
+
+    /// The cost of a response that reports `SHORT_USAGE`.
+    fn short_usage_cost() -> f64 {
+        let config = Config::default();
+        PriceEstimator::new(&config.openai.model, &config.openai.transcription_model)
+            .estimate_translation_cost(TokenCounts {
+                input: 58,
+                output: 12,
+            })
+    }
+
+    /// A response without a translation logs `message` as an error, sends
+    /// nothing to the chatbox, turns the typing indicator off, and adds
+    /// its reported tokens to the total cost.
+    fn assert_not_translated(delivery: Delivery, message: &str) {
+        use crate::app_state::LogLevel;
+
+        assert_eq!(
+            delivery.log,
+            [(LogLevel::Error, message.to_string())],
+            "{:?}",
+            delivery
+        );
+        assert_eq!(delivery.chatbox, [typing_off()], "{:?}", delivery);
+        assert!(short_usage_cost() > 0.0);
+        assert_eq!(delivery.total_cost, short_usage_cost(), "{:?}", delivery);
+    }
+
     #[test]
-    fn test_translation_response_without_choices_is_an_error() {
+    fn test_refusal_tokens_are_estimated_from_the_refusal_without_usage() {
+        use crate::translation::{ChatGptRequest, NoTranslation};
+
+        let request = ChatGptRequest::translation("gpt-5.6-sol", "French", "Hello");
+        let refusal = "I'm sorry, but I can't help with that.";
+        let body = chat_completion_body_with(
+            "null",
+            &serde_json::to_string(refusal).unwrap(),
+            "stop",
+            None,
+        );
+
+        let translation = request.parse_response(&body).unwrap();
+
+        assert_eq!(
+            translation.text,
+            Err(NoTranslation::Refused(refusal.to_string()))
+        );
+        // Four bytes a token: 38 bytes of refusal give 9 tokens.
+        assert_eq!(translation.tokens.output, 9);
+    }
+
+    #[test]
+    fn test_blank_refusal_is_not_a_refusal() {
         use crate::translation::ChatGptRequest;
 
         let request = ChatGptRequest::translation("gpt-5.6-sol", "French", "Hello");
-        let body = r#"{"choices": [], "usage": {"prompt_tokens": 5, "completion_tokens": 0}}"#;
+        let body = chat_completion_body_with(r#""Bonjour""#, r#""""#, "stop", None);
 
-        let result = request
-            .parse_response(body)
-            .map(|translation| translation.text);
-        assert!(result.is_err(), "parsed as {:?}", result);
+        let translation = request.parse_response(&body).unwrap();
+
+        assert_eq!(translation.text, Ok("Bonjour".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_translation_is_sent_to_the_chatbox_and_costed() {
+        use crate::app_state::LogLevel;
+
+        let body = chat_completion_body("Bonjour", Some(SHORT_USAGE));
+
+        let delivery = deliver_response("translated", &body).await;
+
+        assert_eq!(
+            delivery.log,
+            [(LogLevel::Success, "Translation: Bonjour".to_string())]
+        );
+        assert_eq!(
+            delivery.chatbox,
+            [
+                rosc::OscMessage {
+                    addr: "/chatbox/input".to_string(),
+                    args: vec![
+                        rosc::OscType::String("Bonjour".to_string()),
+                        rosc::OscType::Bool(true),
+                        rosc::OscType::Bool(true),
+                    ],
+                },
+                typing_off(),
+            ]
+        );
+        assert_eq!(delivery.total_cost, short_usage_cost());
+    }
+
+    #[tokio::test]
+    async fn test_refusal_is_logged_and_not_sent() {
+        let body = chat_completion_body_with(
+            "null",
+            r#""I'm sorry, but I can't help with that.""#,
+            "stop",
+            Some(SHORT_USAGE),
+        );
+
+        assert_not_translated(
+            deliver_response("refusal", &body).await,
+            "The model refused to translate: I'm sorry, but I can't help with that.",
+        );
+    }
+
+    #[tokio::test]
+    async fn test_content_filtered_response_is_logged_and_not_sent() {
+        let body = chat_completion_body_with("null", "null", "content_filter", Some(SHORT_USAGE));
+
+        assert_not_translated(
+            deliver_response("content_filter", &body).await,
+            "The model returned no translation: the content filter removed it \
+             (finish_reason: content_filter)",
+        );
+    }
+
+    #[tokio::test]
+    async fn test_empty_response_is_logged_and_not_sent() {
+        for (name, content) in [("empty_null", "null"), ("empty_string", r#""  ""#)] {
+            let body = chat_completion_body_with(content, "null", "stop", Some(SHORT_USAGE));
+
+            assert_not_translated(
+                deliver_response(name, &body).await,
+                "The model returned no translation (finish_reason: stop)",
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_response_without_choices_is_logged_and_not_sent() {
+        let body = format!(
+            r#"{{
+                "id": "chatcmpl-abc123",
+                "object": "chat.completion",
+                "created": 1790000000,
+                "model": "gpt-5.6-sol-2026-08-14",
+                "choices": [],
+                "usage": {}
+            }}"#,
+            SHORT_USAGE
+        );
+
+        assert_not_translated(
+            deliver_response("no_choices", &body).await,
+            "The model returned no translation (the response has no choices)",
+        );
+    }
+
+    #[tokio::test]
+    async fn test_cut_off_translation_is_logged_and_not_sent() {
+        let body = chat_completion_body_with(
+            r#""Bonjour, bonjour, bonjour, bonjour""#,
+            "null",
+            "length",
+            Some(SHORT_USAGE),
+        );
+
+        assert_not_translated(
+            deliver_response("length", &body).await,
+            "The translation reached the output token limit and was cut off, \
+             so it was not sent (finish_reason: length)",
+        );
     }
 
     // ===========================================================================
