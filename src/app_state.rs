@@ -1,8 +1,9 @@
 use crate::config::{AudioConfig, Config};
 use crate::shutdown::Shutdown;
+use eframe::egui;
 use serde_json::Value;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, OnceLock, RwLock};
 use std::time::Instant;
 use tokio::sync::mpsc;
 
@@ -22,61 +23,77 @@ pub struct LogEntry {
     pub level: LogLevel,
 }
 
+/// Wakes the GUI when another thread changes what it shows. The GUI
+/// repaints only on input or on request, so without this a new log entry
+/// or cost stays hidden until the mouse moves over the window.
+#[derive(Clone, Default)]
+pub struct GuiWaker {
+    ctx: Arc<OnceLock<egui::Context>>,
+}
+
+impl GuiWaker {
+    /// Set the context to wake. The GUI calls this once when it starts.
+    pub fn attach(&self, ctx: egui::Context) {
+        let _ = self.ctx.set(ctx);
+    }
+
+    /// Ask the GUI to repaint. Does nothing before the GUI starts; its first
+    /// frame shows the current state.
+    pub fn wake(&self) {
+        if let Some(ctx) = self.ctx.get() {
+            ctx.request_repaint();
+        }
+    }
+}
+
 /// Logger that outputs to stdout/stderr and the GUI activity log.
 #[derive(Clone)]
 pub struct Logger {
     log_tx: mpsc::Sender<LogEntry>,
+    gui_waker: GuiWaker,
 }
 
 impl Logger {
-    pub fn new(log_tx: mpsc::Sender<LogEntry>) -> Self {
-        Self { log_tx }
+    pub fn new(log_tx: mpsc::Sender<LogEntry>, gui_waker: GuiWaker) -> Self {
+        Self { log_tx, gui_waker }
     }
 
     /// Log an info message to stdout and the activity log.
     pub fn info(&self, message: impl Into<String>) {
         let msg = message.into();
         println!("{}", msg);
-        let _ = self.log_tx.try_send(LogEntry {
-            timestamp: Instant::now(),
-            message: msg,
-            level: LogLevel::Info,
-        });
+        self.send(msg, LogLevel::Info);
     }
 
     /// Log a success message to stdout and the activity log.
     pub fn success(&self, message: impl Into<String>) {
         let msg = message.into();
         println!("{}", msg);
-        let _ = self.log_tx.try_send(LogEntry {
-            timestamp: Instant::now(),
-            message: msg,
-            level: LogLevel::Success,
-        });
+        self.send(msg, LogLevel::Success);
     }
 
     /// Log an error message to stderr and the activity log.
     pub fn error(&self, message: impl Into<String>) {
         let msg = message.into();
         eprintln!("{}", msg);
-        let _ = self.log_tx.try_send(LogEntry {
-            timestamp: Instant::now(),
-            message: msg,
-            level: LogLevel::Error,
-        });
+        self.send(msg, LogLevel::Error);
     }
 
     /// Log an API error. Shows raw details to stderr but a cleaner message to the activity log.
     pub fn error_api(&self, message: impl Into<String>) {
         let raw_msg = message.into();
         eprintln!("{}", raw_msg);
+        self.send(parse_api_error_for_display(&raw_msg), LogLevel::Error);
+    }
 
-        let clean_msg = parse_api_error_for_display(&raw_msg);
+    /// Add an entry to the activity log and wake the GUI to show it.
+    fn send(&self, message: String, level: LogLevel) {
         let _ = self.log_tx.try_send(LogEntry {
             timestamp: Instant::now(),
-            message: clean_msg,
-            level: LogLevel::Error,
+            message,
+            level,
         });
+        self.gui_waker.wake();
     }
 }
 
@@ -192,6 +209,8 @@ pub struct AppState {
     pub command_tx: mpsc::Sender<AppCommand>,
     pub log_tx: mpsc::Sender<LogEntry>,
     pub logger: Logger,
+    /// Wakes the GUI when state it shows changes on another thread
+    pub gui_waker: GuiWaker,
     /// Current audio input level (f32 stored as bits) for the level meter
     pub current_audio_level: Arc<AtomicU32>,
     /// Hot-reloadable audio parameters shared with the audio thread
@@ -231,7 +250,8 @@ impl AppState {
         log_tx: mpsc::Sender<LogEntry>,
     ) -> Self {
         let audio_params = Arc::new(AudioParams::new(&config.audio));
-        let logger = Logger::new(log_tx.clone());
+        let gui_waker = GuiWaker::default();
+        let logger = Logger::new(log_tx.clone(), gui_waker.clone());
         Self {
             config: Arc::new(RwLock::new(config)),
             enabled: Arc::new(AtomicBool::new(true)),
@@ -239,6 +259,7 @@ impl AppState {
             command_tx,
             log_tx,
             logger,
+            gui_waker,
             current_audio_level: Arc::new(AtomicU32::new(0)),
             audio_params,
             test_mode_active: Arc::new(AtomicBool::new(false)),
@@ -254,6 +275,7 @@ impl AppState {
 
     pub fn set_total_cost(&self, cost: f64) {
         self.total_cost.store(cost.to_bits(), Ordering::Relaxed);
+        self.gui_waker.wake();
     }
 
     pub fn get_total_cost(&self) -> f64 {

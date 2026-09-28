@@ -286,7 +286,7 @@ requests_per_minute = 50
 
         let (log_tx, mut log_rx) = tokio::sync::mpsc::channel(1);
         let body = serde_json::json!({ "error": { "message": message, "code": "other" } });
-        Logger::new(log_tx).error_api(format!("API error: {}", body));
+        Logger::new(log_tx, Default::default()).error_api(format!("API error: {}", body));
         log_rx
             .try_recv()
             .expect("error_api sends one log entry")
@@ -617,7 +617,7 @@ requests_per_minute = 50
         use crate::app_state::{run_logging_failure, Logger};
 
         let (log_tx, mut log_rx) = tokio::sync::mpsc::channel(10);
-        run_logging_failure(&Logger::new(log_tx), "Processing", body);
+        run_logging_failure(&Logger::new(log_tx, Default::default()), "Processing", body);
         std::iter::from_fn(|| log_rx.try_recv().ok()).collect()
     }
 
@@ -658,6 +658,68 @@ requests_per_minute = 50
     }
 
     // ===========================================================================
+    // Test: Changes made on other threads wake the GUI
+    // ===========================================================================
+
+    /// Whether `change` asks the egui context attached to a `GuiWaker` for a
+    /// repaint. The GUI does not repaint on its own, so a change that does
+    /// not ask stays hidden until the next mouse or keyboard input.
+    fn wakes_gui(change: impl FnOnce(&crate::app_state::GuiWaker)) -> bool {
+        use crate::app_state::GuiWaker;
+        use eframe::egui;
+
+        let ctx = egui::Context::default();
+        let waker = GuiWaker::default();
+        waker.attach(ctx.clone());
+        assert!(!ctx.has_requested_repaint());
+        change(&waker);
+        ctx.has_requested_repaint()
+    }
+
+    #[test]
+    fn test_log_entry_wakes_gui() {
+        use crate::app_state::Logger;
+
+        let (log_tx, _log_rx) = tokio::sync::mpsc::channel(10);
+        assert!(wakes_gui(|waker| Logger::new(
+            log_tx.clone(),
+            waker.clone()
+        )
+        .info("Transcription: hello")));
+        assert!(wakes_gui(|waker| Logger::new(
+            log_tx.clone(),
+            waker.clone()
+        )
+        .success("Translation: hallo")));
+        assert!(wakes_gui(|waker| Logger::new(
+            log_tx.clone(),
+            waker.clone()
+        )
+        .error("Processing stopped")));
+        assert!(wakes_gui(|waker| Logger::new(
+            log_tx.clone(),
+            waker.clone()
+        )
+        .error_api("API error")));
+    }
+
+    #[test]
+    fn test_cost_update_wakes_gui() {
+        use crate::app_state::AppState;
+        use eframe::egui;
+
+        let (cmd_tx, _cmd_rx) = tokio::sync::mpsc::channel(10);
+        let (log_tx, _log_rx) = tokio::sync::mpsc::channel(10);
+        let app_state = AppState::new(Config::default(), cmd_tx, log_tx);
+        let ctx = egui::Context::default();
+        app_state.gui_waker.attach(ctx.clone());
+
+        app_state.set_total_cost(0.25);
+
+        assert!(ctx.has_requested_repaint());
+    }
+
+    // ===========================================================================
     // Test: Disabling translation clears the typing indicator
     // ===========================================================================
 
@@ -679,7 +741,7 @@ requests_per_minute = 50
         let indicator = TypingIndicator::new(socket, Arc::new(RwLock::new(config)));
         let (log_tx, _log_rx) = tokio::sync::mpsc::channel(10);
 
-        apply_enabled(false, &indicator, &Logger::new(log_tx)).await;
+        apply_enabled(false, &indicator, &Logger::new(log_tx, Default::default())).await;
 
         let mut buf = [0u8; 256];
         let (len, _) = tokio::time::timeout(Duration::from_secs(1), receiver.recv_from(&mut buf))

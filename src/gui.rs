@@ -891,6 +891,7 @@ pub fn run_gui(
         "BabbleBoop",
         options,
         Box::new(move |cc| {
+            app_state.gui_waker.attach(cc.egui_ctx.clone());
             let mut app = BabbleBoopApp::new(app_state, log_rx);
 
             // Apply saved theme on startup
