@@ -1,7 +1,5 @@
 use crate::app_state::{panic_reason, AppState, AudioParams};
-use crate::recorder::{
-    max_recording_samples, peak_level, Recorder, RecorderEvent, RecorderSettings, RecorderStatus,
-};
+use crate::recorder::{peak_level, Recorder, RecorderEvent, RecorderSettings, RecorderStatus};
 use crate::types::{AudioEvent, CapturedAudio};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::Stream;
@@ -103,9 +101,12 @@ impl EventQueue {
 /// it receives the events.
 ///
 /// The callback can still allocate, free memory or take a lock:
-/// - `Recorder` allocates a buffer for a whole part when it sends a part,
-///   and when a recording starts with no buffer (the first recording, or
-///   one after a recording that ended with sound).
+/// - `Recorder` allocates a 5 s buffer when it sends a part, and when a
+///   recording starts with no buffer (the first recording, or one after a
+///   recording that ended with sound). During speech longer than 5 s it
+///   doubles the buffer (10, 20, then 30 s), which copies the samples: at
+///   most 3 times in a part. After a quiet part or a recording that ended
+///   without sound, it frees a buffer that grew and allocates a new 5 s one.
 /// - `build_input_stream` grows its f32 buffer on the first callback and
 ///   when the backend delivers a larger buffer than before.
 /// - `try_send` can allocate a new block of the channel list (tokio 1.48.0,
@@ -134,7 +135,7 @@ impl InputHandler {
     ) -> Self {
         Self {
             shared,
-            recorder: Recorder::new(now, max_recording_samples(channels, sample_rate)),
+            recorder: Recorder::for_stream(now, channels, sample_rate),
             events: EventQueue { tx, dropped: 0 },
             channels,
             sample_rate,

@@ -13,9 +13,16 @@ use std::time::{Duration, Instant};
 /// also appears after 30 s instead of after the speech ends.
 pub const MAX_RECORDING: Duration = Duration::from_secs(30);
 
-/// Number of interleaved samples in `MAX_RECORDING`.
-pub fn max_recording_samples(channels: u16, sample_rate: u32) -> usize {
-    MAX_RECORDING.as_secs() as usize * sample_rate as usize * usize::from(channels)
+/// Length of the buffer a recording or a part reserves when it starts.
+/// Longer speech doubles the buffer, up to `MAX_RECORDING`. The buffer goes
+/// with the samples to the processing side, so its capacity stays close to
+/// the length of the speech: a 1 s utterance holds 5 s (about 1.9 MB at
+/// 48 kHz stereo), not 30 s (about 11.5 MB).
+const INITIAL_RESERVE: Duration = Duration::from_secs(5);
+
+/// Number of interleaved samples in `length` of audio, in whole seconds.
+fn samples_in(length: Duration, channels: u16, sample_rate: u32) -> usize {
+    length.as_secs() as usize * sample_rate as usize * usize::from(channels)
 }
 
 /// Settings the GUI can change while the stream runs. The callback reads
@@ -113,14 +120,27 @@ pub struct Recorder {
     has_sound: bool,
     /// Whether the recording reached the length limit
     split: bool,
+    initial_samples: usize,
     max_samples: usize,
 }
 
 impl Recorder {
-    /// `max_samples` is the length at which a recording is split. It must
-    /// be a whole number of frames, so that a split does not fall inside a
-    /// frame.
-    pub fn new(now: Instant, max_samples: usize) -> Self {
+    /// A recorder for a stream with `channels` and `sample_rate`. It splits
+    /// recordings at `MAX_RECORDING`.
+    pub fn for_stream(now: Instant, channels: u16, sample_rate: u32) -> Self {
+        Self::new(
+            now,
+            samples_in(INITIAL_RESERVE, channels, sample_rate),
+            samples_in(MAX_RECORDING, channels, sample_rate),
+        )
+    }
+
+    /// `initial_samples` is the capacity a recording or part reserves when
+    /// it starts. `max_samples` is the length at which a recording is
+    /// split. It must be a whole number of frames, so that a split does not
+    /// fall inside a frame.
+    pub fn new(now: Instant, initial_samples: usize, max_samples: usize) -> Self {
+        let max_samples = max_samples.max(1);
         Recorder {
             gate: NoiseGate::new(now),
             is_recording: false,
@@ -129,7 +149,8 @@ impl Recorder {
             samples: Vec::new(),
             has_sound: false,
             split: false,
-            max_samples: max_samples.max(1),
+            initial_samples: initial_samples.min(max_samples),
+            max_samples,
         }
     }
 
@@ -147,6 +168,7 @@ impl Recorder {
         while !data.is_empty() {
             let room = self.max_samples - self.samples.len();
             let (part, rest) = data.split_at(room.min(data.len()));
+            self.reserve(part.len());
             self.samples.extend_from_slice(part);
             // A split can leave all the loud samples of a buffer in one part
             if loud && !self.has_sound {
@@ -162,16 +184,39 @@ impl Recorder {
                     let samples = std::mem::replace(&mut self.samples, next);
                     emit(RecorderEvent::LimitReached(samples));
                 } else {
-                    self.samples.clear();
+                    self.discard_samples();
                 }
             }
         }
     }
 
-    /// Buffer for a new recording. It holds a whole part, so that the audio
-    /// callback does not copy the samples each time the buffer grows.
+    /// Make room for `additional` samples. The buffer at least doubles, so
+    /// that the callback copies the samples at most 3 times in a part
+    /// (5 s to 10 s, 20 s, then 30 s). It never holds more than a part, and
+    /// after it grows, it holds less than twice its samples.
+    fn reserve(&mut self, additional: usize) {
+        let needed = self.samples.len() + additional;
+        let capacity = self.samples.capacity();
+        if needed > capacity {
+            let target = needed.max(2 * capacity).min(self.max_samples);
+            self.samples.reserve_exact(target - self.samples.len());
+        }
+    }
+
+    /// Buffer for a new recording or part.
     fn new_buffer(&self) -> Vec<f32> {
-        Vec::with_capacity(self.max_samples)
+        Vec::with_capacity(self.initial_samples)
+    }
+
+    /// Drop the samples of a quiet part and keep its buffer for the next
+    /// part or recording, unless the buffer grew. The next part would then
+    /// carry that capacity to the processing side.
+    fn discard_samples(&mut self) {
+        if self.samples.capacity() > self.initial_samples {
+            self.samples = self.new_buffer();
+        } else {
+            self.samples.clear();
+        }
     }
 
     /// Process one input buffer received at `now`, and pass each resulting
@@ -216,7 +261,7 @@ impl Recorder {
                         extent,
                     ));
                 } else {
-                    self.samples.clear();
+                    self.discard_samples();
                     emit(RecorderEvent::Ended(Vec::new(), extent));
                 }
             } else {
@@ -268,11 +313,17 @@ mod tests {
             Self::with_limit(1000)
         }
 
-        /// A recorder that splits recordings at `max_samples`.
+        /// A recorder that splits recordings at `max_samples`. Each
+        /// recording or part starts with room for one buffer, so the
+        /// buffer grows while it records.
         fn with_limit(max_samples: usize) -> Self {
+            Self::with_recorder(|now| Recorder::new(now, LOUD.len(), max_samples))
+        }
+
+        fn with_recorder(recorder: impl FnOnce(Instant) -> Recorder) -> Self {
             let now = Instant::now();
             Harness {
-                recorder: Recorder::new(now, max_samples),
+                recorder: recorder(now),
                 now,
                 events: Vec::new(),
             }
@@ -580,5 +631,167 @@ mod tests {
                 RecorderEvent::Ended(Vec::new(), Extent::Part),
             ]
         );
+    }
+
+    /// Buffers of 441 frames: 30 s at 48 kHz is not a whole number of them,
+    /// so the split falls inside a buffer.
+    const STREAM_BUFFER_FRAMES: usize = 441;
+
+    /// Loud samples that differ from each other, so that a lost or
+    /// reordered sample changes the recording.
+    fn loud_samples(start: usize, len: usize) -> Vec<f32> {
+        (start..start + len)
+            .map(|i| 0.2 + (i * 7919 % 10007) as f32 / 10007.0 * 0.7)
+            .collect()
+    }
+
+    /// Record `seconds` of loud input from a stream, then end the recording
+    /// with silence. Returns the samples the recorder received and the
+    /// number of times its buffer grew, and checks after each buffer that
+    /// the recorder holds no more than 30 s.
+    fn record_from_stream(
+        h: &mut Harness,
+        channels: u16,
+        sample_rate: u32,
+        seconds: usize,
+    ) -> (Vec<f32>, usize) {
+        let per_second = sample_rate as usize * usize::from(channels);
+        let buffer_len = STREAM_BUFFER_FRAMES * usize::from(channels);
+        let limit = 30 * per_second;
+        let mut fed = Vec::new();
+        let mut growths = 0;
+        while fed.len() < seconds * per_second {
+            let data = loud_samples(fed.len(), buffer_len);
+            let capacity = h.recorder.samples.capacity();
+            h.feed(&data);
+            fed.extend_from_slice(&data);
+            growths += usize::from(h.recorder.samples.capacity() > capacity);
+            assert!(h.recorder.samples.capacity() <= limit);
+        }
+        h.wait_past_hold();
+        let quiet = vec![0.0; buffer_len];
+        for _ in 0..SETTINGS.silence_threshold {
+            h.feed(&quiet);
+        }
+        // The buffer that ends the recording is not recorded
+        for _ in 1..SETTINGS.silence_threshold {
+            fed.extend_from_slice(&quiet);
+        }
+        (fed, growths)
+    }
+
+    fn short_recording_reserves_about_five_seconds(channels: u16, sample_rate: u32) {
+        let mut h = Harness::with_recorder(|now| Recorder::for_stream(now, channels, sample_rate));
+        let (fed, _) = record_from_stream(&mut h, channels, sample_rate, 1);
+        let [RecorderEvent::Started, RecorderEvent::Ended(samples, Extent::Whole)] = &h.events[..]
+        else {
+            panic!("unexpected events {:?}", h.events.len());
+        };
+        assert_eq!(samples, &fed);
+        let per_second = sample_rate as usize * usize::from(channels);
+        assert!(
+            (4 * per_second..=5 * per_second).contains(&samples.capacity()),
+            "capacity {} for {} samples",
+            samples.capacity(),
+            samples.len()
+        );
+    }
+
+    #[test]
+    fn test_a_short_recording_reserves_about_five_seconds_in_stereo() {
+        short_recording_reserves_about_five_seconds(2, 48000);
+    }
+
+    #[test]
+    fn test_a_short_recording_reserves_about_five_seconds_with_three_channels() {
+        short_recording_reserves_about_five_seconds(3, 44100);
+    }
+
+    fn long_recording_grows_to_thirty_seconds(channels: u16, sample_rate: u32) {
+        let mut h = Harness::with_recorder(|now| Recorder::for_stream(now, channels, sample_rate));
+        let (fed, growths) = record_from_stream(&mut h, channels, sample_rate, 42);
+        let [RecorderEvent::Started, RecorderEvent::LimitReached(first), RecorderEvent::Ended(rest, Extent::Part)] =
+            &h.events[..]
+        else {
+            panic!("unexpected events {:?}", h.events.len());
+        };
+        let limit = 30 * sample_rate as usize * usize::from(channels);
+        assert_eq!(first.len(), limit);
+        assert!(first.capacity() <= limit);
+        // The second part grew from its start to about 12 s
+        assert!(rest.capacity() <= 2 * rest.len());
+        // The buffer doubles: 5, 10, 20 and 30 s in the first part, 5, 10
+        // and 20 s in the second
+        assert!(growths <= 7, "{growths} growths");
+        assert_eq!([&first[..], rest].concat(), fed);
+    }
+
+    #[test]
+    fn test_a_long_recording_grows_to_thirty_seconds_in_stereo() {
+        long_recording_grows_to_thirty_seconds(2, 48000);
+    }
+
+    #[test]
+    fn test_a_long_recording_grows_to_thirty_seconds_with_three_channels() {
+        long_recording_grows_to_thirty_seconds(3, 44100);
+    }
+
+    /// Settings with a long hold time, so that a quiet part fits in one
+    /// pause.
+    const LONG_HOLD: RecorderSettings = RecorderSettings {
+        noise_gate_hold_time: 2.0,
+        ..SETTINGS
+    };
+
+    fn end_after_long_hold(h: &mut Harness) {
+        h.now += Duration::from_secs(3);
+        for _ in 0..LONG_HOLD.silence_threshold {
+            h.feed_with(&QUIET, &LONG_HOLD);
+        }
+    }
+
+    #[test]
+    fn test_a_part_after_a_quiet_part_does_not_keep_its_buffer() {
+        let mut h = Harness::with_limit(8 * LOUD.len());
+        for _ in 0..8 {
+            h.feed_with(&LOUD, &LONG_HOLD);
+        }
+        // A whole quiet part inside the hold time
+        for _ in 0..8 {
+            h.feed_with(&QUIET, &LONG_HOLD);
+        }
+        h.feed_with(&LOUD, &LONG_HOLD);
+        end_after_long_hold(&mut h);
+        let last = [LOUD, QUIET, QUIET].concat();
+        let Some(RecorderEvent::Ended(samples, Extent::Part)) = h.events.last() else {
+            panic!("unexpected events {:?}", h.events);
+        };
+        assert_eq!(samples, &last);
+        assert!(samples.capacity() <= 2 * last.len());
+    }
+
+    #[test]
+    fn test_a_recording_after_a_quiet_end_does_not_keep_its_buffer() {
+        let mut h = Harness::with_limit(8 * LOUD.len());
+        for _ in 0..8 {
+            h.feed_with(&LOUD, &LONG_HOLD);
+        }
+        // A quiet rest of 7 buffers, not sent
+        for _ in 0..5 {
+            h.feed_with(&QUIET, &LONG_HOLD);
+        }
+        end_after_long_hold(&mut h);
+        assert_eq!(
+            h.events.last(),
+            Some(&RecorderEvent::Ended(Vec::new(), Extent::Part))
+        );
+        h.feed_with(&LOUD, &LONG_HOLD);
+        end_after_long_hold(&mut h);
+        let last = [LOUD, QUIET, QUIET].concat();
+        let Some(RecorderEvent::Ended(samples, Extent::Whole)) = h.events.last() else {
+            panic!("unexpected events {:?}", h.events);
+        };
+        assert_eq!(samples, &last);
+        assert!(samples.capacity() <= 2 * last.len());
     }
 }
