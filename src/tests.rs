@@ -1881,6 +1881,30 @@ mod gui_tests {
     }
 
     #[test]
+    fn test_api_key_and_target_language_are_trimmed_on_save() {
+        let (mut app, _log_tx) = test_app();
+        // A pasted key often has a space or a line break at an end. The
+        // Authorization header must not contain them.
+        app.config_draft.openai.api_key = " sk-test \n".to_string();
+        app.config_draft.translation.target_language = "\tFrench ".to_string();
+
+        let saved = app.config_to_save().expect("config is valid");
+
+        assert_eq!(saved.openai.api_key, "sk-test");
+        assert_eq!(saved.translation.target_language, "French");
+        // The settings show what was saved.
+        assert_eq!(app.config_draft, saved);
+    }
+
+    #[test]
+    fn test_blank_api_key_is_not_saved() {
+        let (mut app, _log_tx) = test_app();
+        app.config_draft.openai.api_key = " \n".to_string();
+
+        assert!(app.config_to_save().is_err());
+    }
+
+    #[test]
     fn test_blank_transcription_model_is_not_saved() {
         let (mut app, _log_tx) = test_app();
         app.config_draft.openai.api_key = "test-key".to_string();

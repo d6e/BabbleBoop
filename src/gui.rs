@@ -315,13 +315,20 @@ impl BabbleBoopApp {
         self.set_status_info("Changes discarded");
     }
 
-    /// The draft to save, or why it cannot be saved. Removes spaces around
-    /// the model names first, because the API does not know a model name
-    /// with a space at the end.
+    /// The draft to save, or why it cannot be saved. Removes spaces and
+    /// line breaks around the text fields first. The API does not know a
+    /// model name with a space at the end. A pasted API key often has a
+    /// line break at the end, and a request cannot put a line break in its
+    /// Authorization header (http 1.4.0, src/header/value.rs:557).
     pub(crate) fn config_to_save(&mut self) -> Result<Config, String> {
-        let openai = &mut self.config_draft.openai;
-        for name in [&mut openai.model, &mut openai.transcription_model] {
-            *name = name.trim().to_string();
+        let draft = &mut self.config_draft;
+        for text in [
+            &mut draft.openai.api_key,
+            &mut draft.openai.model,
+            &mut draft.openai.transcription_model,
+            &mut draft.translation.target_language,
+        ] {
+            *text = text.trim().to_string();
         }
         self.validate_config()?;
         Ok(self.config_draft.clone())
