@@ -1896,6 +1896,66 @@ mod gui_tests {
         assert_eq!(app.config_draft, saved);
     }
 
+    /// Every free text field of the config, found through its serialized
+    /// form, so that a text field added later is checked too.
+    #[test]
+    fn test_every_text_field_is_trimmed_on_save() {
+        fn text_paths(value: &toml::Value, path: &str, out: &mut Vec<String>) {
+            match value {
+                toml::Value::String(_) => out.push(path.to_string()),
+                toml::Value::Table(table) => {
+                    for (key, child) in table {
+                        let child_path = if path.is_empty() {
+                            key.clone()
+                        } else {
+                            format!("{path}.{key}")
+                        };
+                        text_paths(child, &child_path, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+        fn text_at<'a>(value: &'a mut toml::Value, path: &str) -> &'a mut String {
+            let mut value = value;
+            for key in path.split('.') {
+                value = value.get_mut(key).expect("path exists");
+            }
+            match value {
+                toml::Value::String(text) => text,
+                _ => panic!("{path} is not text"),
+            }
+        }
+
+        let mut valid = Config::default();
+        valid.openai.api_key = "test-key".to_string();
+        let valid = toml::Value::try_from(&valid).expect("config serializes");
+        let mut paths = Vec::new();
+        text_paths(&valid, "", &mut paths);
+
+        let mut checked = Vec::new();
+        for path in paths {
+            let mut padded = valid.clone();
+            let text = text_at(&mut padded, &path);
+            *text = format!(" {text}\n");
+            // A value that does not load with spaces around it, such as the
+            // theme, is a fixed choice and not free text.
+            let Ok(draft) = padded.try_into::<Config>() else {
+                continue;
+            };
+            let (mut app, _log_tx) = test_app();
+            app.config_draft = draft;
+
+            let saved = app.config_to_save().expect("config is valid");
+
+            let mut saved = toml::Value::try_from(&saved).expect("config serializes");
+            let mut expected = valid.clone();
+            assert_eq!(text_at(&mut saved, &path), text_at(&mut expected, &path));
+            checked.push(path);
+        }
+        assert!(checked.contains(&"openai.api_key".to_string()));
+    }
+
     #[test]
     fn test_blank_api_key_is_not_saved() {
         let (mut app, _log_tx) = test_app();
