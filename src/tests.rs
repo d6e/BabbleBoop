@@ -1552,6 +1552,163 @@ requests_per_minute = 50
     }
 
     // ===========================================================================
+    // Test: Waiting for the audio input to start cannot hang shutdown
+    // ===========================================================================
+
+    #[tokio::test(start_paused = true)]
+    async fn test_audio_start_returns_the_stream_format() {
+        use crate::processing_loop::{wait_for_audio_start, AUDIO_START_TIMEOUT};
+        use crate::shutdown::Shutdown;
+        use tokio::sync::oneshot;
+
+        let (started_tx, started_rx) = oneshot::channel::<Result<u32, String>>();
+        started_tx.send(Ok(48_000)).unwrap();
+        let result = wait_for_audio_start(started_rx, &Shutdown::new(), AUDIO_START_TIMEOUT).await;
+        assert_eq!(result, Ok(Some(48_000)));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_audio_start_error_is_a_startup_error() {
+        use crate::processing_loop::{wait_for_audio_start, AUDIO_START_TIMEOUT};
+        use crate::shutdown::Shutdown;
+        use tokio::sync::oneshot;
+
+        let (started_tx, started_rx) = oneshot::channel::<Result<u32, String>>();
+        started_tx.send(Err("no input device".to_string())).unwrap();
+        let result = wait_for_audio_start(started_rx, &Shutdown::new(), AUDIO_START_TIMEOUT).await;
+        assert_eq!(
+            result,
+            Err("cannot start audio input: no input device".to_string())
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_audio_start_times_out_when_the_stream_does_not_start() {
+        use crate::processing_loop::{wait_for_audio_start, AUDIO_START_TIMEOUT};
+        use crate::shutdown::Shutdown;
+        use tokio::sync::oneshot;
+        use tokio::time::{timeout, Instant};
+
+        // The audio thread is stuck in the driver: the sender stays alive
+        let (_started_tx, started_rx) = oneshot::channel::<Result<u32, String>>();
+        let started = Instant::now();
+        let result = timeout(
+            AUDIO_START_TIMEOUT * 2,
+            wait_for_audio_start(started_rx, &Shutdown::new(), AUDIO_START_TIMEOUT),
+        )
+        .await
+        .expect("waiting for the audio input has no time limit");
+        assert_eq!(
+            result,
+            Err("cannot start audio input: timed out after 15 s".to_string())
+        );
+        assert_eq!(started.elapsed(), AUDIO_START_TIMEOUT);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_shutdown_stops_waiting_for_the_audio_start() {
+        use crate::processing_loop::{wait_for_audio_start, AUDIO_START_TIMEOUT};
+        use crate::shutdown::Shutdown;
+        use std::time::Duration;
+        use tokio::sync::oneshot;
+        use tokio::time::{timeout, Instant};
+
+        let (_started_tx, started_rx) = oneshot::channel::<Result<u32, String>>();
+        let shutdown = Shutdown::new();
+        let requester = shutdown.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            requester.request();
+        });
+        let started = Instant::now();
+        let result = timeout(
+            AUDIO_START_TIMEOUT * 2,
+            wait_for_audio_start(started_rx, &shutdown, AUDIO_START_TIMEOUT),
+        )
+        .await
+        .expect("shutdown does not stop the wait");
+        assert_eq!(result, Ok(None));
+        assert_eq!(started.elapsed(), Duration::from_secs(1));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_audio_start_fails_when_the_audio_thread_ends_without_a_result() {
+        use crate::processing_loop::{wait_for_audio_start, AUDIO_START_TIMEOUT};
+        use crate::shutdown::Shutdown;
+        use tokio::sync::oneshot;
+        use tokio::time::Instant;
+
+        // As when start_audio_recording panics
+        let (started_tx, started_rx) = oneshot::channel::<Result<u32, String>>();
+        drop(started_tx);
+        let started = Instant::now();
+        let result = wait_for_audio_start(started_rx, &Shutdown::new(), AUDIO_START_TIMEOUT).await;
+        assert_eq!(
+            result,
+            Err("cannot start audio input: the audio thread stopped".to_string())
+        );
+        assert_eq!(started.elapsed(), std::time::Duration::ZERO);
+    }
+
+    /// Run `hold_audio_stream` on a thread. The receiver gets a message
+    /// when it returns, and the returned `Arc` is the stream: its strong
+    /// count falls to 1 when the stream is dropped.
+    fn hold_on_thread(
+        app_state: std::sync::Arc<crate::app_state::AppState>,
+    ) -> (std::sync::mpsc::Receiver<()>, std::sync::Arc<()>) {
+        use crate::processing_loop::hold_audio_stream;
+
+        let stream = std::sync::Arc::new(());
+        let held = std::sync::Arc::clone(&stream);
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            hold_audio_stream(held, &app_state);
+            done_tx.send(()).unwrap();
+        });
+        (done_rx, stream)
+    }
+
+    #[test]
+    fn test_audio_stream_is_held_while_the_processing_loop_runs() {
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        let (app_state, _cmd_rx, _log_rx) = app_state_for_test();
+        let (done, stream) = hold_on_thread(Arc::new(app_state));
+        assert!(done.recv_timeout(Duration::from_millis(300)).is_err());
+        assert_eq!(Arc::strong_count(&stream), 2);
+    }
+
+    #[test]
+    fn test_audio_stream_is_dropped_on_shutdown() {
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        let (app_state, _cmd_rx, _log_rx) = app_state_for_test();
+        let app_state = Arc::new(app_state);
+        let (done, stream) = hold_on_thread(Arc::clone(&app_state));
+        app_state.request_shutdown();
+        done.recv_timeout(Duration::from_secs(5))
+            .expect("the stream is still held after shutdown");
+        assert_eq!(Arc::strong_count(&stream), 1);
+    }
+
+    #[test]
+    fn test_audio_stream_is_dropped_when_the_processing_thread_ends() {
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        // As after the loop timed out waiting for the stream, or stopped
+        let (app_state, _cmd_rx, _log_rx) = app_state_for_test();
+        let app_state = Arc::new(app_state);
+        let (done, stream) = hold_on_thread(Arc::clone(&app_state));
+        app_state.mark_processing_stopped();
+        done.recv_timeout(Duration::from_secs(5))
+            .expect("the stream is still held with nothing to receive its events");
+        assert_eq!(Arc::strong_count(&stream), 1);
+    }
+
+    // ===========================================================================
     // Test: Disabling translation clears the typing indicator
     // ===========================================================================
 

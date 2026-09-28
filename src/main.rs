@@ -6,8 +6,9 @@ use babble_boop::audio_recording::{start_audio_recording, SharedAudioState};
 use babble_boop::config::{Config, CONFIG_PATH};
 use babble_boop::gui::{run_error_dialog, run_gui};
 use babble_boop::processing_loop::{
-    apply_enabled, convert_for_playback, encode_for_upload, AudioEvents, ProcessingServices,
-    TestRecording, TEST_RECORDING_LIMIT,
+    apply_enabled, convert_for_playback, encode_for_upload, hold_audio_stream,
+    wait_for_audio_start, AudioEvents, ProcessingServices, TestRecording, AUDIO_START_TIMEOUT,
+    TEST_RECORDING_LIMIT,
 };
 use babble_boop::types::{AudioEvent, Extent};
 use babble_boop::typing_indicator::TypingIndicator;
@@ -178,10 +179,9 @@ async fn run_processing_loop(
 
     // Start the audio recording in a separate thread
     let shared_audio = SharedAudioState::new(&app_state);
-    let shutdown_signal = app_state.shutdown.clone();
+    let audio_app_state = Arc::clone(&app_state);
     let audio_logger = app_state.logger.clone();
-    let (init_tx, init_rx) =
-        std::sync::mpsc::channel::<Result<babble_boop::audio_recording::AudioStreamInfo, String>>();
+    let (init_tx, init_rx) = tokio::sync::oneshot::channel();
     // This thread only owns the stream; the callback runs on a thread of
     // the audio backend. A panic here would stop capture with no sign in
     // the GUI, so it goes to the activity log.
@@ -191,15 +191,10 @@ async fn run_processing_loop(
                 Ok((stream, stream_info)) => {
                     #[expect(
                         clippy::let_underscore_must_use,
-                        reason = "send fails only if the processing loop stopped waiting for the stream"
+                        reason = "send fails only if the processing loop stopped waiting; the processing thread then ends, and hold_audio_stream drops the stream"
                     )]
                     let _ = init_tx.send(Ok(stream_info));
-                    let _stream = stream;
-                    // Check shutdown signal periodically instead of parking forever
-                    while !shutdown_signal.is_requested() {
-                        std::thread::sleep(std::time::Duration::from_millis(100));
-                    }
-                    // Stream is dropped here, stopping audio capture
+                    hold_audio_stream(stream, &audio_app_state);
                 }
                 Err(e) => {
                     // The processing loop reports this as a startup error
@@ -214,11 +209,14 @@ async fn run_processing_loop(
         });
     });
 
-    // Wait for stream initialization and get stream info
-    let audio_stream_info = init_rx
-        .recv()
-        .map_err(|_| "audio recording thread failed to start")?
-        .map_err(|e| format!("cannot start audio input: {}", e))?;
+    // The audio thread is not joined: if the driver never returns, the
+    // thread stays blocked until the process exits.
+    let Some(audio_stream_info) =
+        wait_for_audio_start(init_rx, &app_state.shutdown, AUDIO_START_TIMEOUT).await?
+    else {
+        // Shutdown was requested before the stream started
+        return Ok(());
+    };
 
     app_state.logger.info(format!(
         "Audio: {} ch, {} Hz",

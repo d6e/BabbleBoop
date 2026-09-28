@@ -9,6 +9,7 @@ use crate::price_estimator::PriceEstimator;
 use crate::rate_limiter::RateLimiter;
 use crate::recorder::MAX_RECORDING;
 use crate::recording_manager::RecordingManager;
+use crate::shutdown::Shutdown;
 use crate::types::{AudioEvent, CapturedAudio};
 use crate::typing_indicator::TypingIndicator;
 use crate::upload_audio::encode_upload_wav;
@@ -16,7 +17,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tokio::time::Instant;
 
 /// Directory for saved recordings when `keep_audio_files` is on.
@@ -255,6 +256,51 @@ pub async fn encode_for_upload(audio: CapturedAudio) -> Result<Vec<u8>, String> 
         Ok(Err(e)) => Err(format!("cannot encode the recording: {}", e)),
         Err(e) => Err(format!("encoding the recording failed: {}", e)),
     }
+}
+
+/// Longest wait for the audio input stream to start. Opening a device
+/// usually takes less than a second, but a driver can take a few seconds
+/// (for example a Bluetooth headset that changes to its microphone
+/// profile). A driver that never returns gives this error instead of an
+/// application that records nothing and shows no reason.
+pub const AUDIO_START_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// Wait until the audio thread reports whether the input stream started.
+/// Returns the stream format, or `None` if shutdown is requested first.
+/// The error is the startup error for the activity log.
+///
+/// The wait does not block the runtime, and it ends on shutdown, so a
+/// driver that never returns cannot stop the application from closing.
+pub async fn wait_for_audio_start<T>(
+    started: oneshot::Receiver<Result<T, String>>,
+    shutdown: &Shutdown,
+    timeout: Duration,
+) -> Result<Option<T>, String> {
+    match shutdown
+        .run_until(tokio::time::timeout(timeout, started))
+        .await
+    {
+        None => Ok(None),
+        Some(Ok(Ok(Ok(info)))) => Ok(Some(info)),
+        Some(Ok(Ok(Err(e)))) => Err(format!("cannot start audio input: {}", e)),
+        // The audio thread panicked; its own log line gives the reason
+        Some(Ok(Err(_))) => Err("cannot start audio input: the audio thread stopped".to_string()),
+        Some(Err(_)) => Err(format!(
+            "cannot start audio input: timed out after {} s",
+            timeout.as_secs()
+        )),
+    }
+}
+
+/// Keep the audio input stream until shutdown is requested or the
+/// processing thread ends. The processing thread also ends when it stops
+/// waiting for the stream to start, so no stream records that nothing
+/// reads.
+pub fn hold_audio_stream<S>(stream: S, app_state: &AppState) {
+    while !app_state.is_shutdown_requested() && !app_state.is_processing_stopped() {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    drop(stream);
 }
 
 /// Convert a test recording for the output device on a blocking thread.
