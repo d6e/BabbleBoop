@@ -105,6 +105,33 @@ impl Logger {
     }
 }
 
+/// The last failure of an action that runs again and again, such as a send
+/// on every utterance. While the cause stays, each attempt fails the same
+/// way, so the activity log gets a failure only when it differs from the
+/// failure before it.
+#[derive(Default)]
+pub struct FailureLog {
+    last: Option<String>,
+}
+
+impl FailureLog {
+    /// Log `message` as an error, unless the last attempt failed with the
+    /// same message.
+    pub fn failed(&mut self, logger: &Logger, message: String) {
+        if self.last.as_ref() != Some(&message) {
+            logger.error(message.as_str());
+            self.last = Some(message);
+        }
+    }
+
+    /// Record a success. Returns true if the last attempt failed, so the
+    /// caller can log that the action works again.
+    #[must_use]
+    pub fn succeeded(&mut self) -> bool {
+        self.last.take().is_some()
+    }
+}
+
 /// Run the body of a background thread and log in the activity log if it
 /// returns an error or panics, so that the thread does not stop with a
 /// message on stderr only. The panic does not propagate.

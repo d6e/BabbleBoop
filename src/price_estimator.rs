@@ -1,6 +1,8 @@
+use crate::app_state::{FailureLog, Logger};
 use crate::models::{self, DEFAULT_CHAT_MODEL, DEFAULT_TRANSCRIPTION_MODEL};
 use std::error::Error;
 use std::fs;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 /// File to persist total API cost across sessions
@@ -19,15 +21,30 @@ pub struct PriceEstimator {
     gpt_input_price_per_million_tokens: f64,
     gpt_output_price_per_million_tokens: f64,
     pub total_cost: f64,
+    cost_file: PathBuf,
+    /// The cost is saved after every utterance; a save that fails keeps
+    /// failing until the user fixes the cause.
+    save_failure: FailureLog,
 }
 
 impl PriceEstimator {
     pub fn new(model: &str, transcription_model: &str) -> Self {
+        Self::with_cost_file(PathBuf::from(TOTAL_COST_FILE), model, transcription_model)
+    }
+
+    /// An estimator that loads and saves the total cost in `cost_file`.
+    pub(crate) fn with_cost_file(
+        cost_file: PathBuf,
+        model: &str,
+        transcription_model: &str,
+    ) -> Self {
         let mut estimator = PriceEstimator {
             transcription_price_per_minute: 0.0,
             gpt_input_price_per_million_tokens: 0.0,
             gpt_output_price_per_million_tokens: 0.0,
-            total_cost: Self::load_total_cost().unwrap_or(0.0),
+            total_cost: Self::load_total_cost(&cost_file).unwrap_or(0.0),
+            cost_file,
+            save_failure: FailureLog::default(),
         };
         estimator.set_models(model, transcription_model);
         estimator
@@ -77,19 +94,99 @@ impl PriceEstimator {
         input_cost + output_cost
     }
 
-    pub fn add_cost(&mut self, cost: f64) {
+    /// Add to the total cost and save it. A failed save goes to the
+    /// activity log, once until the save works again or fails differently.
+    pub fn add_cost(&mut self, cost: f64, logger: &Logger) {
         self.total_cost += cost;
-        self.save_total_cost();
+        match fs::write(&self.cost_file, self.total_cost.to_string()) {
+            Ok(()) => {
+                if self.save_failure.succeeded() {
+                    logger.info(format!(
+                        "Saved the total cost to {} again",
+                        self.cost_file.display()
+                    ));
+                }
+            }
+            Err(e) => self.save_failure.failed(
+                logger,
+                format!(
+                    "Cannot save the total cost to {}: {}",
+                    self.cost_file.display(),
+                    e
+                ),
+            ),
+        }
     }
 
-    fn load_total_cost() -> Result<f64, Box<dyn Error>> {
-        let content = fs::read_to_string(TOTAL_COST_FILE)?;
+    fn load_total_cost(cost_file: &Path) -> Result<f64, Box<dyn Error>> {
+        let content = fs::read_to_string(cost_file)?;
         Ok(content.trim().parse()?)
     }
+}
 
-    fn save_total_cost(&self) {
-        if let Err(e) = fs::write(TOTAL_COST_FILE, self.total_cost.to_string()) {
-            eprintln!("Failed to save total cost: {}", e);
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app_state::{LogEntry, LogLevel};
+    use tokio::sync::mpsc;
+
+    /// Level and text of the entries in the activity log since the last call.
+    fn new_entries(log_rx: &mut mpsc::Receiver<LogEntry>) -> Vec<(LogLevel, String)> {
+        std::iter::from_fn(|| log_rx.try_recv().ok())
+            .map(|entry| (entry.level, entry.message))
+            .collect()
+    }
+
+    #[test]
+    fn test_a_failed_cost_save_is_logged_once_per_distinct_error() {
+        let dir = std::env::temp_dir().join(format!("babble_boop_cost_{}", std::process::id()));
+        if dir.exists() {
+            fs::remove_dir_all(&dir).unwrap();
         }
+        let file = dir.join("total_cost.txt");
+        let (log_tx, mut log_rx) = mpsc::channel(10);
+        let logger = Logger::new(log_tx, Default::default());
+        let mut estimator =
+            PriceEstimator::with_cost_file(file.clone(), "gpt-6-luna", "gpt-transcribe");
+        let saves_fail_with = |entries: Vec<(LogLevel, String)>| {
+            assert_eq!(entries.len(), 1, "{:?}", entries);
+            assert_eq!(entries[0].0, LogLevel::Error, "{:?}", entries);
+            assert!(
+                entries[0].1.contains(&file.display().to_string()),
+                "{:?}",
+                entries
+            );
+            entries[0].1.clone()
+        };
+
+        // The directory does not exist: every save fails the same way
+        estimator.add_cost(0.5, &logger);
+        let not_found = saves_fail_with(new_entries(&mut log_rx));
+        estimator.add_cost(0.5, &logger);
+        estimator.add_cost(0.5, &logger);
+        assert_eq!(new_entries(&mut log_rx), []);
+
+        // A different failure: the file is a directory
+        fs::create_dir_all(&file).unwrap();
+        estimator.add_cost(0.5, &logger);
+        let is_a_directory = saves_fail_with(new_entries(&mut log_rx));
+        assert_ne!(is_a_directory, not_found);
+        estimator.add_cost(0.5, &logger);
+        assert_eq!(new_entries(&mut log_rx), []);
+
+        // The save works again
+        fs::remove_dir(&file).unwrap();
+        estimator.add_cost(0.5, &logger);
+        let entries = new_entries(&mut log_rx);
+        assert_eq!(entries.len(), 1, "{:?}", entries);
+        assert_eq!(entries[0].0, LogLevel::Info, "{:?}", entries);
+        assert_eq!(fs::read_to_string(&file).unwrap(), "3");
+        estimator.add_cost(0.5, &logger);
+        assert_eq!(new_entries(&mut log_rx), []);
+
+        // The first failure again, after a save that worked
+        fs::remove_dir_all(&dir).unwrap();
+        estimator.add_cost(0.5, &logger);
+        assert_eq!(saves_fail_with(new_entries(&mut log_rx)), not_found);
     }
 }

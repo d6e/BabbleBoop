@@ -66,7 +66,7 @@ pub async fn process_audio(
     let translation_cost = price_estimator.estimate_translation_cost(translation.tokens);
     let op_cost = transcription_cost + translation_cost;
 
-    price_estimator.add_cost(op_cost);
+    price_estimator.add_cost(op_cost, &app_state.logger);
     app_state.set_total_cost(price_estimator.total_cost);
 
     let mut final_response = translation.text;
