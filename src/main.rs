@@ -1,6 +1,6 @@
 use babble_boop::api_client::build_api_client;
-use babble_boop::app_state::{run_logging_failure, AppCommand, AppState, LogEntry};
-use babble_boop::audio_playback::play_wav_buffer;
+use babble_boop::app_state::{run_logging_failure, AppCommand, AppState, LogEntry, Logger};
+use babble_boop::audio_playback::{convert_for_output, AudioOutput};
 use babble_boop::audio_processing::process_audio;
 use babble_boop::audio_recording::{start_audio_recording, SharedAudioState};
 use babble_boop::config::{Config, CONFIG_PATH};
@@ -12,55 +12,37 @@ use babble_boop::processing_loop::{
 use babble_boop::types::AudioEvent;
 use babble_boop::typing_indicator::TypingIndicator;
 
-use std::io::Cursor;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 
-/// Encode raw f32 samples to WAV format
-fn encode_samples_to_wav(samples: &[f32], spec: hound::WavSpec) -> Option<Vec<u8>> {
-    let mut buffer = Vec::new();
-    let cursor = Cursor::new(&mut buffer);
-    let mut writer = hound::WavWriter::new(cursor, spec).ok()?;
-    for &sample in samples {
-        writer.write_sample(sample).ok()?;
-    }
-    writer.finalize().ok()?;
-    Some(buffer)
-}
-
-/// Stop the test recording and queue it for playback.
-fn finish_test_recording(test_recording: &mut TestRecording, app_state: &AppState) {
+/// Stop the test recording and play it back. The stream is kept in
+/// `playback` until the next playback or the end of the loop.
+fn finish_test_recording(
+    test_recording: &mut TestRecording,
+    playback: &mut Option<cpal::Stream>,
+    logger: &Logger,
+) {
     let Some(audio) = test_recording.stop() else {
         return;
     };
     if audio.samples.is_empty() {
-        app_state
-            .logger
-            .info("Test recording stopped, nothing recorded");
+        logger.info("Test recording stopped, nothing recorded");
         return;
     }
-    app_state.logger.info(format!(
+    logger.info(format!(
         "Test recording stopped, {} samples",
         audio.samples.len()
     ));
-    let spec = hound::WavSpec {
-        channels: audio.channels,
-        sample_rate: audio.sample_rate,
-        bits_per_sample: 32,
-        sample_format: hound::SampleFormat::Float,
-    };
-    if let Some(wav_data) = encode_samples_to_wav(&audio.samples, spec) {
-        if let Err(e) = app_state
-            .command_tx
-            .try_send(AppCommand::TestRecordingComplete(wav_data))
-        {
-            app_state
-                .logger
-                .error(format!("Failed to send test recording: {}", e));
-        }
+    let played = AudioOutput::open_default().and_then(|output| {
+        logger.info("Playing back test recording...");
+        output.play(convert_for_output(&audio, output.channels()))
+    });
+    match played {
+        Ok(stream) => *playback = Some(stream),
+        Err(e) => logger.error(format!("Failed to play test recording: {}", e)),
     }
 }
 
@@ -209,7 +191,7 @@ async fn run_processing_loop(
         audio_stream_info.sample_rate,
     );
     // Keep playback stream alive until playback completes
-    let mut _playback_stream: Option<cpal::Stream> = None;
+    let mut playback_stream: Option<cpal::Stream> = None;
 
     loop {
         tokio::select! {
@@ -233,20 +215,7 @@ async fn run_processing_loop(
                         test_recording.start();
                     }
                     Some(AppCommand::StopTestRecording) => {
-                        finish_test_recording(&mut test_recording, &app_state);
-                    }
-                    Some(AppCommand::TestRecordingComplete(wav_data)) => {
-                        app_state.logger.info("Playing back test recording...");
-                        match play_wav_buffer(wav_data) {
-                            Ok(stream) => {
-                                _playback_stream = Some(stream);
-                            }
-                            Err(e) => {
-                                app_state.logger.error(format!(
-                                    "Failed to play test recording: {}", e
-                                ));
-                            }
-                        }
+                        finish_test_recording(&mut test_recording, &mut playback_stream, &app_state.logger);
                     }
                     Some(AppCommand::Quit) | None => {
                         // Quit command received or channel closed
@@ -259,7 +228,7 @@ async fn run_processing_loop(
                     "Test recording reached {} s",
                     TEST_RECORDING_LIMIT.as_secs()
                 ));
-                finish_test_recording(&mut test_recording, &app_state);
+                finish_test_recording(&mut test_recording, &mut playback_stream, &app_state.logger);
             }
             Some(event) = rx.recv() => {
                 log_audio_event(&event, &app_state.logger);

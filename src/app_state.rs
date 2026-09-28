@@ -245,7 +245,6 @@ pub enum AppCommand {
     UpdateConfig(Config),
     StartTestRecording,
     StopTestRecording,
-    TestRecordingComplete(Vec<u8>), // WAV data for playback
     Quit,
 }
 
