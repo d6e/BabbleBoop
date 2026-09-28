@@ -2,6 +2,7 @@
 //! audio device.
 
 use crate::app_state::{AppState, Logger};
+use crate::audio_playback::convert_for_output;
 use crate::config::Config;
 use crate::models;
 use crate::price_estimator::PriceEstimator;
@@ -187,4 +188,17 @@ pub async fn encode_for_upload(audio: CapturedAudio) -> Result<Vec<u8>, String> 
         Ok(Err(e)) => Err(format!("cannot encode the recording: {}", e)),
         Err(e) => Err(format!("encoding the recording failed: {}", e)),
     }
+}
+
+/// Convert a test recording for the output device on a blocking thread.
+/// Resampling 30 s of 48 kHz stereo to 44.1 kHz takes about 0.1 s in a
+/// release build and 3 s in a debug build.
+pub async fn convert_for_playback(
+    audio: CapturedAudio,
+    channels: u16,
+    sample_rate: u32,
+) -> Result<Vec<f32>, String> {
+    tokio::task::spawn_blocking(move || convert_for_output(&audio, channels, sample_rate))
+        .await
+        .map_err(|e| format!("converting the test recording failed: {}", e))
 }

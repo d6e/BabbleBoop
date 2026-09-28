@@ -1,17 +1,18 @@
 use babble_boop::api_client::build_api_client;
-use babble_boop::app_state::{run_logging_failure, AppCommand, AppState, LogEntry, Logger};
-use babble_boop::audio_playback::{convert_for_output, AudioOutput};
+use babble_boop::app_state::{run_logging_failure, AppCommand, AppState, LogEntry};
+use babble_boop::audio_playback::AudioOutput;
 use babble_boop::audio_processing::process_audio;
 use babble_boop::audio_recording::{start_audio_recording, SharedAudioState};
 use babble_boop::config::{Config, CONFIG_PATH};
 use babble_boop::gui::{run_error_dialog, run_gui};
 use babble_boop::processing_loop::{
-    apply_enabled, encode_for_upload, log_audio_event, ProcessingServices, TestRecording,
-    TEST_RECORDING_LIMIT,
+    apply_enabled, convert_for_playback, encode_for_upload, log_audio_event, ProcessingServices,
+    TestRecording, TEST_RECORDING_LIMIT,
 };
 use babble_boop::types::AudioEvent;
 use babble_boop::typing_indicator::TypingIndicator;
 
+use std::ops::ControlFlow;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
@@ -19,31 +20,51 @@ use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 
 /// Stop the test recording and play it back. The stream is kept in
-/// `playback` until the next playback or the end of the loop.
-fn finish_test_recording(
+/// `playback` until the next playback or the end of the loop. Breaks if
+/// shutdown stopped the work.
+async fn finish_test_recording(
     test_recording: &mut TestRecording,
     playback: &mut Option<cpal::Stream>,
-    logger: &Logger,
-) {
+    app_state: &AppState,
+) -> ControlFlow<()> {
+    let logger = &app_state.logger;
     let Some(audio) = test_recording.stop() else {
-        return;
+        return ControlFlow::Continue(());
     };
     if audio.samples.is_empty() {
         logger.info("Test recording stopped, nothing recorded");
-        return;
+        return ControlFlow::Continue(());
     }
     logger.info(format!(
         "Test recording stopped, {} samples",
         audio.samples.len()
     ));
-    let played = AudioOutput::open_default().and_then(|output| {
-        logger.info("Playing back test recording...");
-        output.play(convert_for_output(&audio, output.channels()))
-    });
-    match played {
+    let output = match AudioOutput::open_default() {
+        Ok(output) => output,
+        Err(e) => {
+            logger.error(format!("Failed to play test recording: {}", e));
+            return ControlFlow::Continue(());
+        }
+    };
+    let converted = app_state.shutdown.run_until(convert_for_playback(
+        audio,
+        output.channels(),
+        output.sample_rate(),
+    ));
+    let samples = match converted.await {
+        Some(Ok(samples)) => samples,
+        Some(Err(e)) => {
+            logger.error(format!("Failed to play test recording: {}", e));
+            return ControlFlow::Continue(());
+        }
+        None => return ControlFlow::Break(()),
+    };
+    logger.info("Playing back test recording...");
+    match output.play(samples) {
         Ok(stream) => *playback = Some(stream),
         Err(e) => logger.error(format!("Failed to play test recording: {}", e)),
     }
+    ControlFlow::Continue(())
 }
 
 fn main() {
@@ -215,7 +236,9 @@ async fn run_processing_loop(
                         test_recording.start();
                     }
                     Some(AppCommand::StopTestRecording) => {
-                        finish_test_recording(&mut test_recording, &mut playback_stream, &app_state.logger);
+                        if finish_test_recording(&mut test_recording, &mut playback_stream, &app_state).await.is_break() {
+                            break;
+                        }
                     }
                     Some(AppCommand::Quit) | None => {
                         // Quit command received or channel closed
@@ -228,7 +251,9 @@ async fn run_processing_loop(
                     "Test recording reached {} s",
                     TEST_RECORDING_LIMIT.as_secs()
                 ));
-                finish_test_recording(&mut test_recording, &mut playback_stream, &app_state.logger);
+                if finish_test_recording(&mut test_recording, &mut playback_stream, &app_state).await.is_break() {
+                    break;
+                }
             }
             Some(event) = rx.recv() => {
                 log_audio_event(&event, &app_state.logger);

@@ -1162,6 +1162,21 @@ requests_per_minute = 50
         assert_eq!(test.stop().map(|audio| audio.samples), Some(Vec::new()));
     }
 
+    #[tokio::test]
+    async fn test_test_recording_is_converted_to_the_output_format() {
+        use crate::processing_loop::convert_for_playback;
+        use crate::types::CapturedAudio;
+
+        // Half a second of stereo audio at 48 kHz, for a mono 16 kHz output
+        let audio = CapturedAudio {
+            samples: vec![0.25; 48_000],
+            channels: 2,
+            sample_rate: 48_000,
+        };
+        let samples = convert_for_playback(audio, 1, 16_000).await.unwrap();
+        assert_eq!(samples.len(), 8_000);
+    }
+
     // ===========================================================================
     // Test: Disabling translation clears the typing indicator
     // ===========================================================================

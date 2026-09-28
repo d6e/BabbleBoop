@@ -1,3 +1,4 @@
+use crate::resample::resample;
 use crate::types::CapturedAudio;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{SampleFormat, Stream};
@@ -46,15 +47,31 @@ impl AudioOutput {
     }
 }
 
-/// Convert a recording to interleaved samples with `channels` channels.
-/// Output channel n plays recording channel n, wrapping around when the
-/// output has more channels.
-pub fn convert_for_output(audio: &CapturedAudio, channels: u16) -> Vec<f32> {
-    let in_channels = usize::from(audio.channels);
-    audio
-        .samples
-        .chunks_exact(in_channels)
-        .flat_map(|frame| (0..usize::from(channels)).map(move |ch| frame[ch % in_channels]))
+/// Convert a recording to interleaved samples with `channels` channels at
+/// `sample_rate`, so that it plays at its own speed and pitch. Output
+/// channel n plays recording channel n, wrapping around when the output
+/// has more channels. Audio with no channels, or an output with none,
+/// gives no samples.
+pub fn convert_for_output(audio: &CapturedAudio, channels: u16, sample_rate: u32) -> Vec<f32> {
+    let (in_channels, out_channels) = (usize::from(audio.channels), usize::from(channels));
+    // Only the recording channels that the output plays. None if either
+    // has no channels, so a 0 channel count is never a divisor.
+    let resampled: Vec<Vec<f32>> = (0..in_channels.min(out_channels))
+        .map(|ch| {
+            let channel: Vec<f32> = audio
+                .samples
+                .chunks_exact(in_channels)
+                .map(|frame| frame[ch])
+                .collect();
+            resample(&channel, audio.sample_rate, sample_rate)
+        })
+        .collect();
+    let frames = resampled.first().map_or(0, Vec::len);
+    (0..frames)
+        .flat_map(|frame| {
+            let resampled = &resampled;
+            (0..out_channels).map(move |ch| resampled[ch % resampled.len()][frame])
+        })
         .collect()
 }
 
@@ -115,19 +132,76 @@ mod tests {
 
     #[test]
     fn test_mono_recording_plays_on_every_output_channel() {
-        let converted = convert_for_output(&audio(&[0.1, 0.2], 1), 2);
+        let converted = convert_for_output(&audio(&[0.1, 0.2], 1), 2, 48_000);
         assert_eq!(converted, vec![0.1, 0.1, 0.2, 0.2]);
     }
 
     #[test]
     fn test_output_channels_wrap_around_the_recording_channels() {
         let stereo = audio(&[0.1, 0.2, 0.3, 0.4], 2);
-        assert_eq!(convert_for_output(&stereo, 2), stereo.samples);
+        assert_eq!(convert_for_output(&stereo, 2, 48_000), stereo.samples);
         assert_eq!(
-            convert_for_output(&stereo, 3),
+            convert_for_output(&stereo, 3, 48_000),
             vec![0.1, 0.2, 0.1, 0.3, 0.4, 0.3]
         );
-        assert_eq!(convert_for_output(&stereo, 1), vec![0.1, 0.3]);
+        assert_eq!(convert_for_output(&stereo, 1, 48_000), vec![0.1, 0.3]);
+    }
+
+    fn sine(frequency: f32, sample_rate: u32, seconds: f32) -> Vec<f32> {
+        let len = (sample_rate as f32 * seconds) as usize;
+        (0..len)
+            .map(|n| {
+                let t = n as f32 / sample_rate as f32;
+                0.5 * (2.0 * std::f32::consts::PI * frequency * t).sin()
+            })
+            .collect()
+    }
+
+    fn zero_crossings(samples: impl Iterator<Item = f32>) -> usize {
+        let signs: Vec<bool> = samples.map(|s| s < 0.0).collect();
+        signs.windows(2).filter(|pair| pair[0] != pair[1]).count()
+    }
+
+    /// Play a 440 Hz stereo tone of 1 s recorded at `from_rate` on a
+    /// stereo output at `to_rate`, and check that it still lasts 1 s at
+    /// 440 Hz on both channels.
+    fn assert_tone_keeps_its_duration_and_pitch(from_rate: u32, to_rate: u32) {
+        let tone = sine(440.0, from_rate, 1.0);
+        let recording = CapturedAudio {
+            samples: tone.iter().flat_map(|&s| [s, s]).collect(),
+            channels: 2,
+            sample_rate: from_rate,
+        };
+        let played = convert_for_output(&recording, 2, to_rate);
+
+        let frames = played.len() / 2;
+        assert!(
+            frames.abs_diff(to_rate as usize) <= 1,
+            "{} frames at {} Hz",
+            frames,
+            to_rate
+        );
+        for channel in 0..2 {
+            // 440 Hz crosses zero 880 times a second
+            let crossings = zero_crossings(played.iter().skip(channel).step_by(2).copied());
+            assert!(crossings.abs_diff(880) <= 2, "{} zero crossings", crossings);
+        }
+    }
+
+    #[test]
+    fn test_playback_on_a_44_1khz_output_keeps_the_pitch_of_48khz_audio() {
+        assert_tone_keeps_its_duration_and_pitch(48_000, 44_100);
+    }
+
+    #[test]
+    fn test_playback_on_a_48khz_output_keeps_the_pitch_of_44_1khz_audio() {
+        assert_tone_keeps_its_duration_and_pitch(44_100, 48_000);
+    }
+
+    #[test]
+    fn test_audio_without_channels_plays_nothing() {
+        assert!(convert_for_output(&audio(&[0.1, 0.2], 0), 2, 48_000).is_empty());
+        assert!(convert_for_output(&audio(&[0.1, 0.2], 2), 0, 48_000).is_empty());
     }
 
     #[test]
