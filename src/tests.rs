@@ -313,7 +313,7 @@ pub(crate) mod regression_tests {
         let loaded = Config::load(&temp_path).expect("Failed to load config");
 
         // Clean up before asserting, so a failure does not leave the file behind
-        fs::remove_file(&temp_path).ok();
+        fs::remove_file(&temp_path).unwrap();
 
         // Compare the whole struct, so every field is checked
         assert_eq!(loaded, config);
@@ -439,7 +439,9 @@ requests_per_minute = 50
 
         let dir =
             std::env::temp_dir().join(format!("babble_boop_{}_{}", test_name, std::process::id()));
-        fs::remove_dir_all(&dir).ok();
+        if dir.exists() {
+            fs::remove_dir_all(&dir).unwrap();
+        }
 
         let result = RecordingManager::new(dir.clone(), 10)
             .save_recording(vec![0u8; 4], transcription)
@@ -454,7 +456,9 @@ requests_per_minute = 50
             .unwrap_or_default();
 
         // Clean up before asserting, so a failure does not leave files behind
-        fs::remove_dir_all(&dir).ok();
+        if dir.exists() {
+            fs::remove_dir_all(&dir).unwrap();
+        }
 
         result.expect("save_recording should succeed");
         assert_eq!(names.len(), 1, "expected one recording, found {:?}", names);
@@ -1904,6 +1908,15 @@ mod gui_tests {
         }
     }
 
+    /// Run one frame with `events` for what it does to `app`.
+    fn run_with_events(ctx: &egui::Context, app: &mut BabbleBoopApp, events: Vec<egui::Event>) {
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "the tests that call this do not check the painted output"
+        )]
+        let _ = ctx.run(with_events(events), |ctx| app.ui(ctx));
+    }
+
     #[test]
     fn test_custom_translation_model_can_be_typed() {
         let (mut app, _log_tx) = test_app();
@@ -1923,7 +1936,7 @@ mod gui_tests {
             modifiers: egui::Modifiers::COMMAND,
         };
         let typed = egui::Event::Text("my-finetuned-model".to_string());
-        let _ = ctx.run(with_events(vec![select_all, typed]), |ctx| app.ui(ctx));
+        run_with_events(&ctx, &mut app, vec![select_all, typed]);
 
         assert_eq!(app.config_draft.openai.model, "my-finetuned-model");
     }
@@ -1947,7 +1960,7 @@ mod gui_tests {
             modifiers: egui::Modifiers::COMMAND,
         };
         let typed = egui::Event::Text("my-transcriber".to_string());
-        let _ = ctx.run(with_events(vec![select_all, typed]), |ctx| app.ui(ctx));
+        run_with_events(&ctx, &mut app, vec![select_all, typed]);
 
         assert_eq!(
             app.config_draft.openai.transcription_model,
@@ -2105,11 +2118,8 @@ mod gui_tests {
             pressed,
             modifiers: egui::Modifiers::NONE,
         };
-        let _ = ctx.run(
-            with_events(vec![egui::Event::PointerMoved(pos), button(true)]),
-            |ctx| app.ui(ctx),
-        );
-        let _ = ctx.run(with_events(vec![button(false)]), |ctx| app.ui(ctx));
+        run_with_events(ctx, app, vec![egui::Event::PointerMoved(pos), button(true)]);
+        run_with_events(ctx, app, vec![button(false)]);
     }
 
     // ===========================================================================

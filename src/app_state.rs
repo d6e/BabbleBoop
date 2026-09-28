@@ -34,6 +34,10 @@ pub struct GuiWaker {
 impl GuiWaker {
     /// Set the context to wake. The GUI calls this once when it starts.
     pub fn attach(&self, ctx: egui::Context) {
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "set fails only if a context is attached already, and that context stays"
+        )]
         let _ = self.ctx.set(ctx);
     }
 
@@ -88,6 +92,10 @@ impl Logger {
 
     /// Add an entry to the activity log and wake the GUI to show it.
     fn send(&self, message: String, level: LogLevel) {
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "logging does not wait: an entry is dropped if the channel is full or closed"
+        )]
         let _ = self.log_tx.try_send(LogEntry {
             timestamp: Instant::now(),
             message,

@@ -533,7 +533,7 @@ mod tests {
         std::thread::scope(|scope| {
             scope.spawn(|| {
                 s.handler.process(&LOUD, s.now);
-                let _ = done_tx.send(());
+                done_tx.send(()).unwrap();
             });
             let returned = done_rx.recv_timeout(Duration::from_secs(5)).is_ok();
             // Let a blocked callback finish so the scope can end

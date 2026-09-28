@@ -94,8 +94,10 @@ mod tests {
             std::process::id()
         ));
         // A previous run that panicked can leave the directory without permissions
-        fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).ok();
-        fs::remove_dir_all(&dir).ok();
+        if dir.exists() {
+            fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
+            fs::remove_dir_all(&dir).unwrap();
+        }
         fs::create_dir_all(&dir).unwrap();
         // Two entries, so the sort has to compare them
         let files = [dir.join("1_old.wav"), dir.join("2_new.wav")];
@@ -120,7 +122,7 @@ mod tests {
         // Restore permissions and check the file before cleaning up
         fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
         let files_kept = files.iter().all(|file| file.exists());
-        fs::remove_dir_all(&dir).ok();
+        fs::remove_dir_all(&dir).unwrap();
 
         let Some(result) = result else {
             // Running as root: permissions do not block metadata, so the

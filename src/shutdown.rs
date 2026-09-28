@@ -33,7 +33,10 @@ impl Shutdown {
     /// Resolves when shutdown is requested, at once if it already was.
     pub async fn requested(&self) {
         let mut rx = self.tx.subscribe();
-        // wait_for fails only when the sender is dropped, and self holds it.
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "wait_for fails only when the sender is dropped, and self holds it"
+        )]
         let _ = rx.wait_for(|requested| *requested).await;
     }
 

@@ -78,6 +78,10 @@ fn main() {
                 e
             );
             eprintln!("{}", message);
+            #[expect(
+                clippy::let_underscore_must_use,
+                reason = "the message is on stderr already if the dialog fails"
+            )]
             let _ = run_error_dialog("Configuration Error", &message);
             std::process::exit(1);
         }
@@ -120,12 +124,20 @@ fn main() {
     if let Err(e) = run_gui(app_state, log_rx, first_run) {
         let message = format!("Failed to start the application window: {}", e);
         eprintln!("{}", message);
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "the message is on stderr already if the dialog fails"
+        )]
         let _ = run_error_dialog("GUI Error", &message);
     }
 
     // The GUI requests shutdown on exit; request it again in case the GUI
     // failed to start, so the processing thread does not run forever.
     shutdown.request();
+    #[expect(
+        clippy::let_underscore_must_use,
+        reason = "join fails only if the thread panicked, and the program exits in both cases"
+    )]
     let _ = processing_handle.join();
 }
 
@@ -173,6 +185,10 @@ async fn run_processing_loop(
         run_logging_failure(&audio_logger, "Audio input", || {
             match start_audio_recording(shared_audio, tx) {
                 Ok((stream, stream_info)) => {
+                    #[expect(
+                        clippy::let_underscore_must_use,
+                        reason = "send fails only if the processing loop stopped waiting for the stream"
+                    )]
                     let _ = init_tx.send(Ok(stream_info));
                     let _stream = stream;
                     // Check shutdown signal periodically instead of parking forever
@@ -183,6 +199,10 @@ async fn run_processing_loop(
                 }
                 Err(e) => {
                     // The processing loop reports this as a startup error
+                    #[expect(
+                        clippy::let_underscore_must_use,
+                        reason = "send fails only if the processing loop stopped waiting for the stream"
+                    )]
                     let _ = init_tx.send(Err(e.to_string()));
                 }
             }

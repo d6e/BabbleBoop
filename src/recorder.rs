@@ -291,7 +291,8 @@ mod tests {
 
         /// Wait until the hold time is over, without feeding buffers.
         fn wait_past_hold(&mut self) {
-            self.now += Duration::from_secs_f32(SETTINGS.noise_gate_hold_time) + BUFFER;
+            self.now +=
+                Duration::try_from_secs_f32(SETTINGS.noise_gate_hold_time).unwrap() + BUFFER;
         }
     }
 
