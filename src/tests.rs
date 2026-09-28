@@ -1876,8 +1876,8 @@ mod gui_tests {
 
     #[test]
     fn test_last_part_of_a_split_recording_shows_ready_below_the_minimum() {
-        // The minimum applies only to a whole recording. The last part of a
-        // recording that reached the length limit is sent however short it is.
+        // The minimum applies only to a whole recording, not to the last
+        // part of a recording that reached the length limit.
         assert_eq!(duration_status(true), ["0.5s (ready)"]);
     }
 
