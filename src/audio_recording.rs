@@ -420,6 +420,17 @@ mod tests {
     }
 
     #[test]
+    fn test_16_bit_input_at_full_scale_is_full_scale_f32() {
+        // The input callback gives these values to the input handler, so a
+        // 16 bit device reaches the same levels as a 32 bit float device.
+        let converted = [0, i16::MAX, -i16::MAX].map(InputSample::to_f32);
+        assert_eq!(converted, [0.0, 1.0, -1.0]);
+        // i16::MIN has no positive counterpart and is a little below -1.
+        let min = i16::MIN.to_f32();
+        assert!((min + 1.0).abs() < 1e-4, "i16::MIN gives {}", min);
+    }
+
+    #[test]
     fn test_a_recording_reaches_the_processing_side_as_raw_samples() {
         let mut s = Setup::new(10);
         s.feed(&LOUD);
