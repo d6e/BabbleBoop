@@ -113,8 +113,16 @@ pub const CHAT_MODELS: &[ChatModel] = &[
     chat("gpt-4.1-mini", 0.40, 1.60, System, None, true),
     retiring_chat("gpt-4.1-nano", 0.10, 0.40, "2026-10-23", "gpt-5.6-luna"),
     chat("gpt-4o", 2.50, 10.00, System, None, false),
+    // The pricing page does not list these two snapshots. The page
+    // /api/docs/models/gpt-4o lists them as available snapshots and gives
+    // only the gpt-4o prices.
+    chat("gpt-4o-2024-11-20", 2.50, 10.00, System, None, false),
+    chat("gpt-4o-2024-08-06", 2.50, 10.00, System, None, false),
     retiring_chat("gpt-4o-2024-05-13", 5.00, 15.00, "2026-10-23", "gpt-5.6-sol"),
     chat("gpt-4o-mini", 0.15, 0.60, System, None, true),
+    // Not on the pricing page. The page /api/docs/models/gpt-4o-mini lists
+    // it as the default snapshot and gives only the gpt-4o-mini prices.
+    chat("gpt-4o-mini-2024-07-18", 0.15, 0.60, System, None, false),
     retiring_chat("gpt-4-turbo", 10.00, 30.00, "2026-10-23", "gpt-5.6-sol"),
     retiring_chat("gpt-4-turbo-2024-04-09", 10.00, 30.00, "2026-10-23", "gpt-5.6-sol"),
     retiring_chat("gpt-4", 30.00, 60.00, "2026-10-23", "gpt-5.6-sol"),

@@ -54,6 +54,30 @@ mod regression_tests {
     }
 
     #[test]
+    fn test_dated_snapshots_cost_the_same_as_their_model() {
+        // The gpt-4o and gpt-4o-mini model pages list these snapshots as
+        // available and give no other price for them.
+        for (snapshot, model) in [
+            ("gpt-4o-2024-11-20", "gpt-4o"),
+            ("gpt-4o-2024-08-06", "gpt-4o"),
+            ("gpt-4o-mini-2024-07-18", "gpt-4o-mini"),
+        ] {
+            let snapshot_cost =
+                PriceEstimator::new(snapshot, "gpt-transcribe").estimate_translation_cost(TOKENS);
+            let model_cost =
+                PriceEstimator::new(model, "gpt-transcribe").estimate_translation_cost(TOKENS);
+            assert_eq!(
+                (
+                    snapshot,
+                    snapshot_cost,
+                    PriceEstimator::unknown_pricing(snapshot, "gpt-transcribe")
+                ),
+                (snapshot, model_cost, Vec::<String>::new())
+            );
+        }
+    }
+
+    #[test]
     fn test_unknown_model_uses_default_model_pricing() {
         use std::time::Duration;
 
