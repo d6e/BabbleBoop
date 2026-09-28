@@ -105,16 +105,26 @@ mod regression_tests {
     // Regression test: Rate limiter behavior
     // ===========================================================================
 
-    #[tokio::test]
-    async fn test_rate_limiter_tracks_requests() {
+    #[tokio::test(start_paused = true)]
+    async fn test_rate_limiter_waits_only_when_the_budget_is_used_up() {
+        use std::time::Duration;
+        use tokio::time::Instant;
+
         let mut limiter = RateLimiter::new(2);
+        let mut waits = Vec::new();
+        for _ in 0..3 {
+            let start = Instant::now();
+            limiter.wait().await;
+            waits.push(start.elapsed());
+        }
 
-        // First two requests should not block
-        limiter.wait().await;
-        limiter.wait().await;
-
-        // Rate limiter should now be at capacity
-        // (would block if we called wait again within the same minute)
+        // The limiter measures the minute on the real clock, which moves a
+        // little while the paused test clock does not.
+        assert!(
+            waits[..2] == [Duration::ZERO; 2] && waits[2] >= Duration::from_secs(59),
+            "{:?}",
+            waits
+        );
     }
 
     // ===========================================================================
