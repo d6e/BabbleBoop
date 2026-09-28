@@ -894,7 +894,12 @@ impl BabbleBoopApp {
             .min_col_width(LABEL_WIDTH)
             .show(ui, |ui| {
                 ui.label("Silence Threshold:")
-                    .on_hover_text("Number of consecutive silent samples before stopping recording");
+                    .on_hover_text(
+                        "Number of silent audio buffers in a row, after the noise gate closes, \
+                        before the recording stops and is sent. The audio device sets the buffer \
+                        length. On most Windows devices one buffer is about 10 ms, so 100 is about \
+                        1 second.",
+                    );
                 ui.add(egui::DragValue::new(&mut self.config_draft.audio.silence_threshold).range(1..=200));
                 ui.end_row();
 
