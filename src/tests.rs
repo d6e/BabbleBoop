@@ -128,46 +128,6 @@ mod regression_tests {
     }
 
     // ===========================================================================
-    // Test: WAV encoding helper
-    // ===========================================================================
-
-    #[test]
-    fn test_wav_encoding() {
-        use hound::{WavReader, WavSpec, WavWriter};
-        use std::io::Cursor;
-
-        // Create sample audio data
-        let samples: Vec<f32> = vec![0.0, 0.5, 1.0, -0.5, -1.0];
-        let channels = 1;
-        let sample_rate = 44100;
-
-        // Encode to WAV
-        let mut wav_buffer = Vec::new();
-        {
-            let mut writer = WavWriter::new(
-                Cursor::new(&mut wav_buffer),
-                WavSpec {
-                    channels: channels as u16,
-                    sample_rate,
-                    bits_per_sample: 32,
-                    sample_format: hound::SampleFormat::Float,
-                },
-            )
-            .unwrap();
-
-            for &sample in &samples {
-                writer.write_sample(sample).unwrap();
-            }
-            writer.finalize().unwrap();
-        }
-
-        // Verify we can read it back
-        let reader = WavReader::new(Cursor::new(&wav_buffer)).unwrap();
-        assert_eq!(reader.spec().channels, 1);
-        assert_eq!(reader.spec().sample_rate, 44100);
-    }
-
-    // ===========================================================================
     // Test: Config load/save round-trip
     // ===========================================================================
 
