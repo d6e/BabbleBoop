@@ -24,6 +24,7 @@ pub struct SharedAudioState {
     pub noise_gate_active: Arc<AtomicBool>,
     pub noise_gate_hold_remaining: Arc<AtomicU32>,
     pub recording_duration: Arc<AtomicU32>,
+    pub recording_split: Arc<AtomicBool>,
 }
 
 impl SharedAudioState {
@@ -38,6 +39,7 @@ impl SharedAudioState {
             noise_gate_active: Arc::clone(&app_state.noise_gate_active),
             noise_gate_hold_remaining: Arc::clone(&app_state.noise_gate_hold_remaining),
             recording_duration: Arc::clone(&app_state.recording_duration),
+            recording_split: Arc::clone(&app_state.recording_split),
         }
     }
 
@@ -60,6 +62,7 @@ impl SharedAudioState {
             .store(status.silent_frames, Ordering::Relaxed);
         self.recording_duration
             .store(status.recording_duration.to_bits(), Ordering::Relaxed);
+        self.recording_split.store(status.split, Ordering::Relaxed);
     }
 }
 
@@ -572,6 +575,11 @@ mod tests {
         assert_eq!(part.samples.len(), 30 * 2 * 48_000);
         assert_eq!((part.channels, part.sample_rate), (2, 48_000));
         assert!(s.app_state.is_recording.load(Ordering::Relaxed));
+        // The GUI shows the rest as ready to transcribe
+        assert!(s.app_state.recording_split.load(Ordering::Relaxed));
+        s.feed(&QUIET);
+        s.feed(&QUIET);
+        assert!(!s.app_state.recording_split.load(Ordering::Relaxed));
     }
 
     #[test]

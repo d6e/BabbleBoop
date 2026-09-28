@@ -828,6 +828,7 @@ impl BabbleBoopApp {
         );
         let recording_duration =
             f32::from_bits(self.app_state.recording_duration.load(Ordering::Relaxed));
+        let recording_split = self.app_state.recording_split.load(Ordering::Relaxed);
 
         // Noise gate state visualization
         ui.horizontal(|ui| {
@@ -872,10 +873,16 @@ impl BabbleBoopApp {
             );
             ui.add_space(4.0);
 
-            // Recording duration
+            // Recording duration. The last part of a recording that
+            // reached the length limit is transcribed whatever its length.
+            let min_duration_shown = if recording_split {
+                0.0
+            } else {
+                self.config_draft.audio.min_transcription_duration
+            };
             ui.horizontal(|ui| {
                 ui.label("Duration:");
-                let min_dur = self.config_draft.audio.min_transcription_duration;
+                let min_dur = min_duration_shown;
                 let status = if recording_duration >= min_dur {
                     format!("{:.1}s (ready)", recording_duration)
                 } else {
@@ -883,12 +890,7 @@ impl BabbleBoopApp {
                 };
                 ui.label(egui::RichText::new(status).small());
             });
-            draw_recording_duration(
-                ui,
-                recording_duration,
-                self.config_draft.audio.min_transcription_duration,
-                &colors,
-            );
+            draw_recording_duration(ui, recording_duration, min_duration_shown, &colors);
             ui.add_space(4.0);
         }
 

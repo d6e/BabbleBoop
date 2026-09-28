@@ -56,6 +56,9 @@ pub struct RecorderStatus {
     pub hold_remaining: f32,
     /// Seconds since the recording started, 0 when not recording
     pub recording_duration: f32,
+    /// Whether the recording reached the length limit. Its last part is
+    /// then transcribed whatever its length.
+    pub split: bool,
 }
 
 /// Peak absolute sample value of a buffer.
@@ -232,6 +235,7 @@ impl Recorder {
                 .recording_start
                 .map(|start| now.duration_since(start).as_secs_f32())
                 .unwrap_or(0.0),
+            split: self.split,
         }
     }
 }
@@ -416,6 +420,7 @@ mod tests {
         // The recording goes on, and its duration counts from the split
         assert!(status.is_recording);
         assert_eq!(status.recording_duration, BUFFER.as_secs_f32());
+        assert!(status.split);
 
         h.wait_past_hold();
         for _ in 0..SETTINGS.silence_threshold {
@@ -436,7 +441,7 @@ mod tests {
         for _ in 0..SETTINGS.silence_threshold {
             h.feed(&QUIET);
         }
-        h.feed(&LOUD);
+        assert!(!h.feed(&LOUD).split);
         h.wait_past_hold();
         for _ in 0..SETTINGS.silence_threshold {
             h.feed(&QUIET);

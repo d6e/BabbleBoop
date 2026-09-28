@@ -235,6 +235,8 @@ pub struct AppState {
     pub noise_gate_hold_remaining: Arc<AtomicU32>,
     /// Current recording duration in seconds (f32 stored as bits)
     pub recording_duration: Arc<AtomicU32>,
+    /// Whether the current recording reached the length limit
+    pub recording_split: Arc<AtomicBool>,
     /// Set when the processing thread ends
     processing_stopped: AtomicBool,
 }
@@ -275,6 +277,7 @@ impl AppState {
             noise_gate_active: Arc::new(AtomicBool::new(false)),
             noise_gate_hold_remaining: Arc::new(AtomicU32::new(0)),
             recording_duration: Arc::new(AtomicU32::new(0)),
+            recording_split: Arc::new(AtomicBool::new(false)),
             processing_stopped: AtomicBool::new(false),
         }
     }
