@@ -20,7 +20,7 @@ include_original_message = false
 silence_threshold = 100           # determines the time for the silence detection
 noise_gate_threshold = 0.3        # adjust based on your microphone and environment
 noise_gate_hold_time = 0.20       # adjust based on preference
-min_transcription_duration = 1.0  # Minimum duration in seconds for transcription
+min_transcription_duration = 1.0  # Minimum duration in seconds for transcription, not applied to a recording that reaches the 30 s limit
 
 [rate_limit]
 requests_per_minute = 50          # adjust based on your API limits, it should continue to record even while waiting

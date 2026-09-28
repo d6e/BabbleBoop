@@ -85,7 +85,10 @@ pub async fn process_audio(
 /// `Duration::from_secs_f32` panics if its argument is negative, not finite
 /// or too large for `Duration` (see its documentation). A negative or NaN
 /// minimum means no minimum. A minimum too large for `Duration`, such as
-/// `inf`, skips every recording.
+/// `inf`, skips every whole recording. The minimum does not apply to the
+/// parts of a recording that reached the length limit: `process_audio`
+/// checks it only when `extent == Extent::Whole`, so those parts are sent
+/// whatever the minimum is.
 fn min_transcription_duration(seconds: f32) -> Duration {
     match Duration::try_from_secs_f32(seconds) {
         Ok(duration) => duration,
