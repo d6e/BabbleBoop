@@ -1,5 +1,6 @@
 use crate::app_state::{panic_reason, AppState, AudioParams};
 use crate::recorder::{peak_level, Recorder, RecorderEvent, RecorderSettings, RecorderStatus};
+use crate::stream_errors::StreamErrorReporter;
 use crate::types::{AudioEvent, CapturedAudio};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::Stream;
@@ -268,39 +269,13 @@ impl PanicGuard {
     }
 }
 
-/// Passes stream errors from cpal to the processing side. cpal can call
-/// the error callback in a loop with the same error, for example while a
-/// device is unplugged, so an error is sent again only after a different
-/// one. On WASAPI cpal 0.15.3 calls it once and then ends the stream
-/// thread, which drops this reporter (`run_input` in
+/// Reports the stream errors of the input stream as `InputError` events.
+/// On WASAPI cpal 0.15.3 calls the error callback once and then ends the
+/// stream thread, which drops this reporter (`run_input` in
 /// `src/host/wasapi/stream.rs`). An error that did not fit is then lost,
 /// and `AudioEvents` in the processing loop reports the closed channel.
-struct StreamErrorReporter {
-    tx: mpsc::Sender<AudioEvent>,
-    last_sent: Option<String>,
-}
-
-impl StreamErrorReporter {
-    fn new(tx: mpsc::Sender<AudioEvent>) -> Self {
-        Self {
-            tx,
-            last_sent: None,
-        }
-    }
-
-    fn report(&mut self, error: impl std::fmt::Display) {
-        let message = format!("Audio input error: {}", error);
-        if self.last_sent.as_ref() == Some(&message) {
-            return;
-        }
-        if self
-            .tx
-            .try_send(AudioEvent::InputError(message.clone()))
-            .is_ok()
-        {
-            self.last_sent = Some(message);
-        }
-    }
+fn input_error_reporter(tx: mpsc::Sender<AudioEvent>) -> StreamErrorReporter<AudioEvent> {
+    StreamErrorReporter::new(tx, "Audio input error", AudioEvent::InputError)
 }
 
 fn build_input_stream<T: InputSample>(
@@ -311,7 +286,7 @@ fn build_input_stream<T: InputSample>(
 ) -> Result<Stream, cpal::BuildStreamError> {
     let mut samples = Vec::new();
     let mut guard = PanicGuard::new(tx.clone());
-    let mut errors = StreamErrorReporter::new(tx);
+    let mut errors = input_error_reporter(tx);
     device.build_input_stream(
         config,
         move |data: &[T], _: &cpal::InputCallbackInfo| {
@@ -706,7 +681,7 @@ mod tests {
     #[test]
     fn test_a_repeated_stream_error_is_reported_once() {
         let (tx, mut rx) = mpsc::channel(10);
-        let mut reporter = StreamErrorReporter::new(tx);
+        let mut reporter = input_error_reporter(tx);
         reporter.report("device unplugged");
         reporter.report("device unplugged");
         reporter.report("buffer overrun");
@@ -723,7 +698,7 @@ mod tests {
     fn test_a_stream_error_that_did_not_fit_is_sent_again() {
         let (tx, mut rx) = mpsc::channel(1);
         tx.try_send(AudioEvent::StartRecording).unwrap();
-        let mut reporter = StreamErrorReporter::new(tx);
+        let mut reporter = input_error_reporter(tx);
         reporter.report("device unplugged");
         assert_eq!(rx.try_recv().unwrap(), AudioEvent::StartRecording);
         reporter.report("device unplugged");

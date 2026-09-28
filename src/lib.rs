@@ -14,6 +14,7 @@ pub mod recorder;
 pub mod recording_manager;
 mod resample;
 pub mod shutdown;
+mod stream_errors;
 pub mod theme;
 pub mod transcription;
 pub mod translation;
