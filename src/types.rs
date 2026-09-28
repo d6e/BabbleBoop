@@ -2,6 +2,8 @@
 #[derive(Debug, PartialEq)]
 pub enum AudioEvent {
     StartRecording,
+    /// The recording ended. `AudioEvents` in the processing loop also
+    /// returns one after an input error and after the end of the input.
     StopRecording,
     /// A whole recording (`Extent::Whole`), or the last part of one that
     /// reached the length limit (`Extent::Part`). StopRecording follows.

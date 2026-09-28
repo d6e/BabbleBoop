@@ -163,9 +163,30 @@ pub async fn apply_enabled(enabled: bool, typing_indicator: &TypingIndicator, lo
 
 /// The events from the audio callback, as the processing loop receives
 /// them.
+///
+/// An input error or the end of the input also ends the recording that
+/// runs: a StopRecording follows, so the loop turns the typing indicator
+/// off. The callback does not send one, as it may not run again:
+/// - After a panic, `PanicGuard` in `audio_recording.rs` runs nothing of
+///   the callback.
+/// - On WASAPI, cpal 0.15.3 ends the stream thread after the first stream
+///   error (`src/host/wasapi/stream.rs` lines 343 to 360 and 388 to 390),
+///   and the channel closes.
+/// - On CoreAudio, cpal pauses the stream when the device is disconnected
+///   and then reports the error (`src/host/coreaudio/macos/mod.rs` lines
+///   465 to 468).
+/// - On ALSA, cpal reports an error and polls the device again
+///   (`src/host/alsa/mod.rs` lines 586 to 596), so an unplugged device
+///   gives errors and no data.
+///
+/// If the input goes on after a stream error, the indicator is off until
+/// the next recording starts.
 pub struct AudioEvents {
     /// `None` after every sender is gone
     rx: Option<mpsc::Receiver<AudioEvent>>,
+    /// An input error was returned, and the StopRecording that follows it
+    /// was not
+    stop_pending: bool,
     logger: Logger,
 }
 
@@ -173,24 +194,34 @@ impl AudioEvents {
     pub fn new(rx: mpsc::Receiver<AudioEvent>, logger: Logger) -> Self {
         Self {
             rx: Some(rx),
+            stop_pending: false,
             logger,
         }
     }
 
     /// The next event, after its line in the activity log. When every
-    /// sender is gone, logs an error once and then never resolves. The
-    /// senders go when the audio thread of cpal ends, which on WASAPI
-    /// follows the first stream error, possibly before its report fits in
-    /// the channel.
+    /// sender is gone, logs an error once, returns StopRecording and then
+    /// never resolves. The senders go when the audio thread of cpal ends,
+    /// which on WASAPI follows the first stream error, possibly before its
+    /// report fits in the channel.
+    ///
+    /// Cancel safe: `mpsc::Receiver::recv` is (tokio 1.48.0,
+    /// `src/sync/mpsc/bounded.rs` lines 199 to 204), and this future
+    /// changes the state only in the poll that returns the event.
     pub async fn recv(&mut self) -> AudioEvent {
+        if std::mem::take(&mut self.stop_pending) {
+            return AudioEvent::StopRecording;
+        }
         if let Some(rx) = &mut self.rx {
             if let Some(event) = rx.recv().await {
                 log_audio_event(&event, &self.logger);
+                self.stop_pending = matches!(event, AudioEvent::InputError(_));
                 return event;
             }
             self.rx = None;
             self.logger
                 .error("Audio input stopped. Restart BabbleBoop to record again.");
+            return AudioEvent::StopRecording;
         }
         std::future::pending().await
     }

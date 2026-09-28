@@ -869,12 +869,28 @@ requests_per_minute = 50
         );
     }
 
+    /// The events that `events` returns before it waits 60 s for the next
+    /// one.
+    async fn events_until_quiet(
+        events: &mut crate::processing_loop::AudioEvents,
+    ) -> Vec<crate::types::AudioEvent> {
+        use std::time::Duration;
+
+        let mut received = Vec::new();
+        while let Ok(event) = tokio::time::timeout(Duration::from_secs(60), events.recv()).await {
+            received.push(event);
+        }
+        received
+    }
+
+    /// When the audio input ends in a recording, no StopRecording comes from
+    /// the callback. The processing loop turns the typing indicator off only
+    /// on StopRecording, so it would stay on in VRChat.
     #[tokio::test(start_paused = true)]
-    async fn test_the_end_of_audio_input_is_logged_once() {
+    async fn test_the_end_of_audio_input_ends_the_recording_and_is_logged_once() {
         use crate::app_state::{LogLevel, Logger};
         use crate::processing_loop::AudioEvents;
         use crate::types::AudioEvent;
-        use std::time::Duration;
 
         let (tx, rx) = tokio::sync::mpsc::channel(10);
         let (log_tx, mut log_rx) = tokio::sync::mpsc::channel(10);
@@ -883,12 +899,12 @@ requests_per_minute = 50
         // The audio thread ends and drops every sender
         drop(tx);
 
-        assert_eq!(events.recv().await, AudioEvent::StartRecording);
+        assert_eq!(
+            events_until_quiet(&mut events).await,
+            vec![AudioEvent::StartRecording, AudioEvent::StopRecording]
+        );
         // After that, no event comes; the loop waits for its other branches
-        for _ in 0..2 {
-            let next = tokio::time::timeout(Duration::from_secs(60), events.recv()).await;
-            assert!(next.is_err(), "got {:?} after the channel closed", next);
-        }
+        assert_eq!(events_until_quiet(&mut events).await, vec![]);
         let logged: Vec<(String, LogLevel)> = std::iter::from_fn(|| log_rx.try_recv().ok())
             .map(|entry| (entry.message, entry.level))
             .collect();
@@ -902,6 +918,45 @@ requests_per_minute = 50
                 ),
             ]
         );
+    }
+
+    /// A crash of the callback, or a stream error such as an unplugged
+    /// device, can end the input while the channel stays open. The recording
+    /// then ends with no StopRecording from the callback.
+    #[tokio::test(start_paused = true)]
+    async fn test_an_audio_input_error_ends_the_recording() {
+        use crate::processing_loop::AudioEvents;
+        use crate::types::AudioEvent;
+
+        for message in [
+            "Audio input crashed: index out of bounds. Restart BabbleBoop to record again.",
+            "Audio input error: device unplugged",
+        ] {
+            let (tx, rx) = tokio::sync::mpsc::channel(10);
+            let mut events = AudioEvents::new(rx, test_logger());
+            let error = || AudioEvent::InputError(message.to_string());
+            tx.try_send(AudioEvent::StartRecording).unwrap();
+            tx.try_send(error()).unwrap();
+
+            assert_eq!(
+                events_until_quiet(&mut events).await,
+                vec![
+                    AudioEvent::StartRecording,
+                    error(),
+                    AudioEvent::StopRecording
+                ],
+                "{}",
+                message
+            );
+            // The recording ends once, and later events come as sent
+            tx.try_send(AudioEvent::StartRecording).unwrap();
+            assert_eq!(
+                events_until_quiet(&mut events).await,
+                vec![AudioEvent::StartRecording],
+                "{}",
+                message
+            );
+        }
     }
 
     #[tokio::test]

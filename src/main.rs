@@ -275,7 +275,8 @@ async fn run_processing_loop(
                         typing_indicator.stop_typing().await;
                         continue;
                     }
-                    // Logged above
+                    // Logged above. AudioEvents follows an input error
+                    // with StopRecording.
                     AudioEvent::EventsDropped(_) | AudioEvent::InputError(_) => continue,
                     AudioEvent::AudioData(audio, extent) => (audio, extent),
                     AudioEvent::AudioPart(audio) => (audio, Extent::Part),
