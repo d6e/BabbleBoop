@@ -172,7 +172,7 @@ async fn run_processing_loop(
         audio_stream_info.channels, audio_stream_info.sample_rate
     ));
 
-    let mut services = ProcessingServices::new(&config);
+    let mut services = ProcessingServices::new(&config, &app_state.logger);
     // Initialize the shared cost from the loaded value
     app_state.set_total_cost(services.price_estimator.total_cost);
 
@@ -208,7 +208,7 @@ async fn run_processing_loop(
                         app_state.logger.info("Config updated");
                         // Update hot-reloadable audio params
                         app_state.audio_params.update(&new_config.audio);
-                        services.apply_config(&new_config);
+                        services.apply_config(&new_config, &app_state.logger);
                     }
                     Some(AppCommand::StartTestRecording) => {
                         app_state.logger.info("Test recording started...");

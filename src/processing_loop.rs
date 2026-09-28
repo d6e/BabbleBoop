@@ -20,7 +20,8 @@ pub struct ProcessingServices {
 }
 
 impl ProcessingServices {
-    pub fn new(config: &Config) -> Self {
+    pub fn new(config: &Config, logger: &Logger) -> Self {
+        log_unknown_pricing(config, logger);
         Self {
             rate_limiter: RateLimiter::new(config.rate_limit.requests_per_minute),
             price_estimator: PriceEstimator::new(
@@ -32,13 +33,24 @@ impl ProcessingServices {
     }
 
     /// Apply settings saved in the GUI.
-    pub fn apply_config(&mut self, config: &Config) {
+    pub fn apply_config(&mut self, config: &Config, logger: &Logger) {
         // Keep the requests already counted; a new limiter would reset them.
         self.rate_limiter
             .set_max_requests(config.rate_limit.requests_per_minute);
         self.price_estimator
             .set_models(&config.openai.model, &config.openai.transcription_model);
         self.recording_manager = recording_manager(config);
+        log_unknown_pricing(config, logger);
+    }
+}
+
+/// Tell the user when the cost display cannot be accurate. The GUI accepts
+/// any model name.
+fn log_unknown_pricing(config: &Config, logger: &Logger) {
+    for warning in
+        PriceEstimator::unknown_pricing(&config.openai.model, &config.openai.transcription_model)
+    {
+        logger.info(warning);
     }
 }
 

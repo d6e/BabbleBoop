@@ -25,30 +25,33 @@ impl PriceEstimator {
     }
 
     /// Use the prices of these models for new estimates. The total cost is
-    /// kept.
+    /// kept. See `unknown_pricing` for models without a known price.
     pub fn set_models(&mut self, model: &str, transcription_model: &str) {
-        let (input_price, output_price, known) = Self::get_model_pricing(model);
-
-        if !known {
-            eprintln!(
-                "Warning: Unknown model '{}' for pricing. Cost estimates will be inaccurate.",
-                model
-            );
-        }
-
-        let (whisper_price, transcription_known) =
-            Self::get_transcription_pricing(transcription_model);
-
-        if !transcription_known {
-            eprintln!(
-                "Warning: Unknown transcription model '{}' for pricing. Cost estimates will be inaccurate.",
-                transcription_model
-            );
-        }
+        let (input_price, output_price, _) = Self::get_model_pricing(model);
+        let (whisper_price, _) = Self::get_transcription_pricing(transcription_model);
 
         self.whisper_price_per_minute = whisper_price;
         self.gpt_input_price_per_million_tokens = input_price;
         self.gpt_output_price_per_million_tokens = output_price;
+    }
+
+    /// A warning for each model that has no known price, for the activity
+    /// log. Cost estimates use default prices for these models.
+    pub fn unknown_pricing(model: &str, transcription_model: &str) -> Vec<String> {
+        let mut warnings = Vec::new();
+        if !Self::get_model_pricing(model).2 {
+            warnings.push(format!(
+                "No price known for model '{}'. The cost uses gpt-4o-mini prices.",
+                model
+            ));
+        }
+        if !Self::get_transcription_pricing(transcription_model).1 {
+            warnings.push(format!(
+                "No price known for transcription model '{}'. The cost uses whisper-1 prices.",
+                transcription_model
+            ));
+        }
+        warnings
     }
 
     fn get_transcription_pricing(model: &str) -> (f64, bool) {

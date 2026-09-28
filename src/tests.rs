@@ -541,12 +541,12 @@ requests_per_minute = 50
         let mut config = Config::default();
         config.openai.model = "gpt-4o-mini".to_string();
         config.openai.transcription_model = "whisper-1".to_string();
-        let mut services = ProcessingServices::new(&config);
+        let mut services = ProcessingServices::new(&config, &test_logger());
         services.price_estimator.total_cost = 1.25;
 
         config.openai.model = "gpt-4o".to_string();
         config.openai.transcription_model = "gpt-4o-mini-transcribe".to_string();
-        services.apply_config(&config);
+        services.apply_config(&config, &test_logger());
 
         let expected = PriceEstimator::new("gpt-4o", "gpt-4o-mini-transcribe");
         let old = PriceEstimator::new("gpt-4o-mini", "whisper-1");
@@ -572,6 +572,52 @@ requests_per_minute = 50
         assert_eq!(estimator.total_cost, 1.25);
     }
 
+    /// Logger whose entries nobody reads.
+    fn test_logger() -> crate::app_state::Logger {
+        let (log_tx, _log_rx) = tokio::sync::mpsc::channel(10);
+        crate::app_state::Logger::new(log_tx, Default::default())
+    }
+
+    /// Activity log entries written by `body`.
+    fn entries_logged_by(
+        body: impl FnOnce(&crate::app_state::Logger),
+    ) -> Vec<crate::app_state::LogEntry> {
+        let (log_tx, mut log_rx) = tokio::sync::mpsc::channel(10);
+        body(&crate::app_state::Logger::new(log_tx, Default::default()));
+        std::iter::from_fn(|| log_rx.try_recv().ok()).collect()
+    }
+
+    #[test]
+    fn test_unknown_model_pricing_is_logged() {
+        use crate::processing_loop::ProcessingServices;
+
+        let mut config = Config::default();
+        config.openai.model = "my-finetuned-model".to_string();
+        let entries = entries_logged_by(|logger| {
+            ProcessingServices::new(&config, logger);
+        });
+        assert_eq!(entries.len(), 1, "{:?}", entries);
+        assert!(entries[0].message.contains("'my-finetuned-model'"));
+
+        let mut services = ProcessingServices::new(&Config::default(), &test_logger());
+        config.openai.model = "gpt-4o".to_string();
+        config.openai.transcription_model = "my-transcriber".to_string();
+        let entries = entries_logged_by(|logger| services.apply_config(&config, logger));
+        assert_eq!(entries.len(), 1, "{:?}", entries);
+        assert!(entries[0].message.contains("'my-transcriber'"));
+    }
+
+    #[test]
+    fn test_known_model_pricing_is_not_logged() {
+        use crate::processing_loop::ProcessingServices;
+
+        let config = Config::default();
+        let entries = entries_logged_by(|logger| {
+            ProcessingServices::new(&config, logger).apply_config(&config, logger);
+        });
+        assert!(entries.is_empty(), "{:?}", entries);
+    }
+
     /// Time one more rate limiter wait after using up a budget of two
     /// requests and saving settings with `requests_per_minute` set to `limit`.
     async fn wait_after_saving_limit(limit: usize) -> std::time::Duration {
@@ -580,12 +626,12 @@ requests_per_minute = 50
 
         let mut config = Config::default();
         config.rate_limit.requests_per_minute = 2;
-        let mut services = ProcessingServices::new(&config);
+        let mut services = ProcessingServices::new(&config, &test_logger());
         services.rate_limiter.wait().await;
         services.rate_limiter.wait().await;
 
         config.rate_limit.requests_per_minute = limit;
-        services.apply_config(&config);
+        services.apply_config(&config, &test_logger());
 
         let start = Instant::now();
         services.rate_limiter.wait().await;
@@ -614,11 +660,9 @@ requests_per_minute = 50
     fn logged_entries(
         body: impl FnOnce() -> Result<(), String>,
     ) -> Vec<crate::app_state::LogEntry> {
-        use crate::app_state::{run_logging_failure, Logger};
-
-        let (log_tx, mut log_rx) = tokio::sync::mpsc::channel(10);
-        run_logging_failure(&Logger::new(log_tx, Default::default()), "Processing", body);
-        std::iter::from_fn(|| log_rx.try_recv().ok()).collect()
+        entries_logged_by(|logger| {
+            crate::app_state::run_logging_failure(logger, "Processing", body)
+        })
     }
 
     #[test]
