@@ -6,7 +6,7 @@ use babble_boop::audio_recording::{start_audio_recording, SharedAudioState};
 use babble_boop::config::{Config, CONFIG_PATH};
 use babble_boop::gui::{run_error_dialog, run_gui};
 use babble_boop::processing_loop::{
-    apply_enabled, encode_for_upload, log_audio_event, ProcessingServices,
+    apply_enabled, encode_for_upload, log_audio_event, test_recording_samples, ProcessingServices,
 };
 use babble_boop::types::AudioEvent;
 use babble_boop::typing_indicator::TypingIndicator;
@@ -203,9 +203,13 @@ async fn run_processing_loop(
                     }
                     Some(AppCommand::StartTestRecording) => {
                         app_state.logger.info("Test recording started...");
-                        // Clear the shared buffer
+                        // The callback adds samples only up to this capacity
+                        let reserved = Vec::with_capacity(test_recording_samples(
+                            audio_stream_info.channels,
+                            audio_stream_info.sample_rate,
+                        ));
                         if let Ok(mut buffer) = app_state.test_recording_buffer.lock() {
-                            buffer.clear();
+                            *buffer = reserved;
                         }
                         test_recording_start = Some(Instant::now());
                         app_state.test_mode_active.store(true, Ordering::SeqCst);

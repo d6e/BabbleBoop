@@ -94,9 +94,9 @@ impl EventQueue {
 ///
 /// This runs on the audio thread, which can be real time. It updates
 /// atomics, copies samples and queues events with `try_send`; it allocates
-/// only when a recording or a part starts. In test mode it also locks the
-/// test buffer. Logging and encoding happen on the processing side when it
-/// receives the events.
+/// only when a recording or a part starts. In test mode it copies the
+/// samples into the test buffer if its lock is free (`try_lock`). Logging
+/// and encoding happen on the processing side when it receives the events.
 struct InputHandler {
     shared: SharedAudioState,
     recorder: Recorder,
@@ -130,8 +130,11 @@ impl InputHandler {
 
         // If test mode is active, write raw samples to the test buffer and skip normal processing
         if self.shared.test_mode_active.load(Ordering::Relaxed) {
-            if let Ok(mut buffer) = self.shared.test_recording_buffer.lock() {
-                buffer.extend_from_slice(data);
+            // The processing side holds the lock only to swap the buffer.
+            // If it does so now, this buffer is lost; waiting could make the
+            // audio thread miss its deadline.
+            if let Ok(mut buffer) = self.shared.test_recording_buffer.try_lock() {
+                append_within_capacity(&mut buffer, data, self.channels);
             }
             return;
         }
@@ -163,6 +166,15 @@ impl InputHandler {
         });
         self.shared.publish(&self.recorder.status(now));
     }
+}
+
+/// Append the whole frames of `data` that fit in the capacity of `buffer`.
+/// The processing side reserves the capacity when a test recording starts,
+/// so the audio thread does not allocate and the buffer has a fixed limit.
+fn append_within_capacity(buffer: &mut Vec<f32>, data: &[f32], channels: u16) {
+    let room = buffer.capacity() - buffer.len();
+    let room = room - room % usize::from(channels.max(1));
+    buffer.extend_from_slice(data.get(..room).unwrap_or(data));
 }
 
 /// Sample formats the input stream accepts.
@@ -363,6 +375,19 @@ mod tests {
             self.handler.process(data, self.now);
         }
 
+        /// Turn on test mode with room for `capacity` samples, as the
+        /// processing side does.
+        fn start_test_mode(&self, capacity: usize) {
+            *self.app_state.test_recording_buffer.lock().unwrap() = Vec::with_capacity(capacity);
+            self.app_state
+                .test_mode_active
+                .store(true, Ordering::Relaxed);
+        }
+
+        fn test_buffer(&self) -> Vec<f32> {
+            self.app_state.test_recording_buffer.lock().unwrap().clone()
+        }
+
         fn events(&mut self) -> Vec<AudioEvent> {
             std::iter::from_fn(|| self.rx.try_recv().ok()).collect()
         }
@@ -404,7 +429,7 @@ mod tests {
     #[test]
     fn test_test_mode_diverts_the_samples_and_sends_nothing() {
         let mut s = Setup::new(10);
-        s.app_state.test_mode_active.store(true, Ordering::Relaxed);
+        s.start_test_mode(100);
         s.feed(&LOUD);
         s.feed(&QUIET);
         assert!(s.events().is_empty());
@@ -413,6 +438,52 @@ mod tests {
         assert_eq!(buffer, [LOUD, QUIET].concat());
         let level = f32::from_bits(s.app_state.current_audio_level.load(Ordering::Relaxed));
         assert_eq!(level, 0.05);
+    }
+
+    #[test]
+    fn test_test_mode_stops_adding_samples_when_the_buffer_is_full() {
+        let mut s = Setup::new(10);
+        s.start_test_mode(8);
+        for _ in 0..3 {
+            s.feed(&LOUD);
+        }
+        assert_eq!(s.test_buffer(), [LOUD, LOUD].concat());
+        // The callback did not allocate a larger buffer
+        assert_eq!(
+            s.app_state.test_recording_buffer.lock().unwrap().capacity(),
+            8
+        );
+    }
+
+    #[test]
+    fn test_test_mode_adds_only_whole_frames() {
+        let mut s = Setup::new(10);
+        // Room for three and a half stereo frames
+        s.start_test_mode(7);
+        s.feed(&LOUD);
+        s.feed(&LOUD);
+        assert_eq!(s.test_buffer(), [&LOUD[..], &LOUD[..2]].concat());
+    }
+
+    #[test]
+    fn test_test_mode_does_not_wait_for_a_locked_buffer() {
+        let mut s = Setup::new(10);
+        s.start_test_mode(100);
+        let locked = s.app_state.test_recording_buffer.lock().unwrap();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                s.handler.process(&LOUD, s.now);
+                let _ = done_tx.send(());
+            });
+            let returned = done_rx.recv_timeout(Duration::from_secs(5)).is_ok();
+            // Let a blocked callback finish so the scope can end
+            drop(locked);
+            assert!(returned, "the callback waited for the test buffer lock");
+        });
+        // The samples of that buffer are lost, the next buffer is kept
+        s.feed(&QUIET);
+        assert_eq!(s.test_buffer(), QUIET.to_vec());
     }
 
     #[test]

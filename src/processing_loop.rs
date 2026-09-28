@@ -12,9 +12,18 @@ use crate::types::{AudioEvent, CapturedAudio};
 use crate::typing_indicator::TypingIndicator;
 use crate::upload_audio::encode_upload_wav;
 use std::path::PathBuf;
+use std::time::Duration;
 
 /// Directory for saved recordings when `keep_audio_files` is on.
 const RECORDINGS_DIR: &str = "recordings";
+
+/// Longest test recording. The Stop button in the GUI ends it earlier.
+pub const TEST_RECORDING_LIMIT: Duration = Duration::from_secs(30);
+
+/// Number of interleaved samples in `TEST_RECORDING_LIMIT`.
+pub fn test_recording_samples(channels: u16, sample_rate: u32) -> usize {
+    TEST_RECORDING_LIMIT.as_secs() as usize * sample_rate as usize * usize::from(channels)
+}
 
 /// Processing loop state that depends on the settings.
 pub struct ProcessingServices {
