@@ -45,6 +45,12 @@ pub async fn process_audio(
     app_state
         .logger
         .info(format!("Transcription: {}", transcription));
+    // The transcription is paid for even when a later step fails.
+    price_estimator.add_cost(
+        price_estimator.estimate_transcription_cost(audio_duration),
+        &app_state.logger,
+    );
+    app_state.set_total_cost(price_estimator.total_cost);
 
     // Save the audio recording if debug mode is enabled
     if let Some(manager) = recording_manager {
@@ -62,11 +68,8 @@ pub async fn process_audio(
         .logger
         .success(format!("Translation: {}", translation.text));
 
-    let transcription_cost = price_estimator.estimate_transcription_cost(audio_duration);
     let translation_cost = price_estimator.estimate_translation_cost(translation.tokens);
-    let op_cost = transcription_cost + translation_cost;
-
-    price_estimator.add_cost(op_cost, &app_state.logger);
+    price_estimator.add_cost(translation_cost, &app_state.logger);
     app_state.set_total_cost(price_estimator.total_cost);
 
     let mut final_response = translation.text;
