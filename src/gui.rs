@@ -359,6 +359,10 @@ impl BabbleBoopApp {
     }
 
     fn validate_config(&self) -> Result<(), String> {
+        if self.config_draft.osc.address.trim().is_empty() {
+            return Err("OSC address is required".to_string());
+        }
+
         // Validate ports
         if self.config_draft.osc.input_port == 0 {
             return Err("Input port cannot be 0".to_string());

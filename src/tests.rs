@@ -2143,6 +2143,16 @@ mod gui_tests {
         assert!(app.config_to_save().is_err());
     }
 
+    #[test]
+    fn test_blank_osc_address_is_not_saved() {
+        let (mut app, _log_tx) = test_app();
+        app.config_draft.openai.api_key = "test-key".to_string();
+        app.config_draft.osc.address = " \n".to_string();
+
+        let error = app.config_to_save().unwrap_err();
+        assert!(error.contains("address"), "{:?}", error);
+    }
+
     /// The settings window clamps a value to the range of its field when it
     /// draws the field, even if the user does not touch it. A config that
     /// loads unchanged must also stay unchanged in the window.
