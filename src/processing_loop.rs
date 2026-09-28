@@ -6,6 +6,7 @@ use crate::config::Config;
 use crate::models;
 use crate::price_estimator::PriceEstimator;
 use crate::rate_limiter::RateLimiter;
+use crate::recorder::MAX_RECORDING;
 use crate::recording_manager::RecordingManager;
 use crate::types::{AudioEvent, CapturedAudio};
 use crate::typing_indicator::TypingIndicator;
@@ -86,6 +87,10 @@ pub async fn apply_enabled(enabled: bool, typing_indicator: &TypingIndicator, lo
 pub fn log_audio_event(event: &AudioEvent, logger: &Logger) {
     match event {
         AudioEvent::StartRecording => logger.info("Sound detected, recording..."),
+        AudioEvent::AudioPart(_) => logger.info(format!(
+            "Recording reached {} s, processing it while recording goes on...",
+            MAX_RECORDING.as_secs()
+        )),
         AudioEvent::AudioData(_) => logger.info("Silence detected, processing..."),
         AudioEvent::StopRecording => {}
         AudioEvent::EventsDropped(count) => logger.error(format!(

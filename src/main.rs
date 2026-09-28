@@ -283,6 +283,9 @@ async fn run_processing_loop(
                     continue;
                 }
 
+                // A part of a long recording: the typing indicator is to stay
+                // on after process_audio turns it off.
+                let recording_goes_on = matches!(event, AudioEvent::AudioPart(_));
                 match event {
                     AudioEvent::StartRecording => {
                         typing_indicator.start_typing().await;
@@ -291,7 +294,7 @@ async fn run_processing_loop(
                         typing_indicator.stop_typing().await;
                     }
                     AudioEvent::EventsDropped(_) => {}
-                    AudioEvent::AudioData(audio) => {
+                    AudioEvent::AudioData(audio) | AudioEvent::AudioPart(audio) => {
                         let audio_data = match app_state.shutdown.run_until(encode_for_upload(audio)).await {
                             Some(Ok(wav)) => wav,
                             Some(Err(e)) => {
@@ -320,6 +323,9 @@ async fn run_processing_loop(
                             Some(Ok(())) => {}
                             Some(Err(e)) => app_state.logger.error_api(format!("Error: {}", e)),
                             None => break,
+                        }
+                        if recording_goes_on {
+                            typing_indicator.start_typing().await;
                         }
                     }
                 }

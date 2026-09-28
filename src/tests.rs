@@ -892,7 +892,7 @@ requests_per_minute = 50
         use crate::processing_loop::log_audio_event;
         use crate::types::{AudioEvent, CapturedAudio};
 
-        let audio = CapturedAudio {
+        let audio = || CapturedAudio {
             samples: vec![0.5; 4],
             channels: 1,
             sample_rate: 16_000,
@@ -900,7 +900,8 @@ requests_per_minute = 50
         let entries = entries_logged_by(|logger| {
             for event in [
                 AudioEvent::StartRecording,
-                AudioEvent::AudioData(audio),
+                AudioEvent::AudioPart(audio()),
+                AudioEvent::AudioData(audio()),
                 AudioEvent::StopRecording,
                 AudioEvent::EventsDropped(3),
             ] {
@@ -915,6 +916,10 @@ requests_per_minute = 50
             logged,
             vec![
                 ("Sound detected, recording...", LogLevel::Info),
+                (
+                    "Recording reached 30 s, processing it while recording goes on...",
+                    LogLevel::Info
+                ),
                 ("Silence detected, processing...", LogLevel::Info),
                 (
                     "Lost 3 audio events because the processing queue was full",

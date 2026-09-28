@@ -2,7 +2,20 @@
 //! callback feeds it each buffer; it has no device, clock or channel of its
 //! own, so it can be tested with plain sample buffers.
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
+
+/// Longest recording sent as one upload. Longer speech is sent in parts of
+/// this length while recording goes on. This keeps each upload far below
+/// the 25 MB limit of the transcription API in any format (30 s of 32 bit
+/// float stereo at 96 kHz is 23 MB; the 16 kHz mono upload is 0.96 MB),
+/// and the first translation of a long speech appears after 30 s instead
+/// of after the speech ends.
+pub const MAX_RECORDING: Duration = Duration::from_secs(30);
+
+/// Number of interleaved samples in `MAX_RECORDING`.
+pub fn max_recording_samples(channels: u16, sample_rate: u32) -> usize {
+    MAX_RECORDING.as_secs() as usize * sample_rate as usize * usize::from(channels)
+}
 
 /// Settings the GUI can change while the stream runs. The callback reads
 /// them for each buffer.
@@ -23,6 +36,9 @@ pub enum RecorderEvent {
     Started,
     /// Silence ended the recording. Holds its samples, interleaved.
     Ended(Vec<f32>),
+    /// The recording reached the maximum length. Holds its samples so far;
+    /// the recording goes on with a new part.
+    LimitReached(Vec<f32>),
 }
 
 /// State the GUI shows in the audio settings.
@@ -84,17 +100,45 @@ pub struct Recorder {
     silent_frames: u32,
     recording_start: Option<Instant>,
     samples: Vec<f32>,
+    max_samples: usize,
 }
 
 impl Recorder {
-    pub fn new(now: Instant) -> Self {
+    /// `max_samples` is the length at which a recording is split. It must
+    /// be a whole number of frames, so that a split does not fall inside a
+    /// frame.
+    pub fn new(now: Instant, max_samples: usize) -> Self {
         Recorder {
             gate: NoiseGate::new(now),
             is_recording: false,
             silent_frames: 0,
             recording_start: None,
             samples: Vec::new(),
+            max_samples: max_samples.max(1),
         }
+    }
+
+    /// Add samples to the recording, and send a part each time it reaches
+    /// the maximum length.
+    fn record(&mut self, mut data: &[f32], now: Instant, emit: &mut impl FnMut(RecorderEvent)) {
+        while !data.is_empty() {
+            let room = self.max_samples - self.samples.len();
+            let (part, rest) = data.split_at(room.min(data.len()));
+            self.samples.extend_from_slice(part);
+            data = rest;
+            if self.samples.len() == self.max_samples {
+                self.recording_start = Some(now);
+                let next = self.new_buffer();
+                let samples = std::mem::replace(&mut self.samples, next);
+                emit(RecorderEvent::LimitReached(samples));
+            }
+        }
+    }
+
+    /// Buffer for a new recording. It holds a whole part, so that the audio
+    /// callback does not copy the samples each time the buffer grows.
+    fn new_buffer(&self) -> Vec<f32> {
+        Vec::with_capacity(self.max_samples)
     }
 
     /// Process one input buffer received at `now`, and pass each resulting
@@ -110,9 +154,10 @@ impl Recorder {
             if !self.is_recording {
                 self.is_recording = true;
                 self.recording_start = Some(now);
+                self.samples = self.new_buffer();
                 emit(RecorderEvent::Started);
             }
-            self.samples.extend_from_slice(data);
+            self.record(data, now, &mut emit);
             self.silent_frames = 0;
         } else if self.is_recording {
             self.silent_frames += 1;
@@ -123,7 +168,7 @@ impl Recorder {
                 emit(RecorderEvent::Ended(std::mem::take(&mut self.samples)));
             } else {
                 // Keep recording during short pauses
-                self.samples.extend_from_slice(data);
+                self.record(data, now, &mut emit);
             }
         }
     }
@@ -166,9 +211,14 @@ mod tests {
 
     impl Harness {
         fn new() -> Self {
+            Self::with_limit(1000)
+        }
+
+        /// A recorder that splits recordings at `max_samples`.
+        fn with_limit(max_samples: usize) -> Self {
             let now = Instant::now();
             Harness {
-                recorder: Recorder::new(now),
+                recorder: Recorder::new(now, max_samples),
                 now,
                 events: Vec::new(),
             }
@@ -293,5 +343,75 @@ mod tests {
         assert_eq!(h.events.len(), 4);
         assert_eq!(h.events[2], RecorderEvent::Started);
         assert_eq!(h.events[3], RecorderEvent::Ended(second));
+    }
+
+    #[test]
+    fn test_a_long_recording_is_split_at_the_limit() {
+        let mut h = Harness::with_limit(4 * LOUD.len());
+        for _ in 0..8 {
+            h.feed(&LOUD);
+        }
+        let status = h.feed(&LOUD);
+        let part: Vec<f32> = [LOUD, LOUD, LOUD, LOUD].concat();
+        assert_eq!(
+            h.events,
+            vec![
+                RecorderEvent::Started,
+                RecorderEvent::LimitReached(part.clone()),
+                RecorderEvent::LimitReached(part),
+            ]
+        );
+        // The recording goes on, and its duration counts from the split
+        assert!(status.is_recording);
+        assert_eq!(status.recording_duration, BUFFER.as_secs_f32());
+
+        h.wait_past_hold();
+        for _ in 0..SETTINGS.silence_threshold {
+            h.feed(&QUIET);
+        }
+        let last: Vec<f32> = [&LOUD[..], &QUIET, &QUIET].concat();
+        assert_eq!(h.events.len(), 4);
+        assert_eq!(h.events[3], RecorderEvent::Ended(last));
+    }
+
+    #[test]
+    fn test_a_buffer_across_the_limit_is_split_between_parts() {
+        // Stereo: the limit of 7 frames falls inside the fourth buffer
+        let mut h = Harness::with_limit(14);
+        for _ in 0..4 {
+            h.feed(&LOUD);
+        }
+        h.wait_past_hold();
+        for _ in 0..SETTINGS.silence_threshold {
+            h.feed(&QUIET);
+        }
+        let first: Vec<f32> = [&LOUD[..], &LOUD, &LOUD, &LOUD[..2]].concat();
+        let rest: Vec<f32> = [&LOUD[2..], &QUIET, &QUIET].concat();
+        assert_eq!(
+            h.events,
+            vec![
+                RecorderEvent::Started,
+                RecorderEvent::LimitReached(first),
+                RecorderEvent::Ended(rest),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_the_pause_before_the_end_counts_toward_the_limit() {
+        let mut h = Harness::with_limit(2 * LOUD.len());
+        h.feed(&LOUD);
+        h.wait_past_hold();
+        h.feed(&QUIET);
+        h.feed(&QUIET);
+        h.feed(&QUIET);
+        assert_eq!(
+            h.events,
+            vec![
+                RecorderEvent::Started,
+                RecorderEvent::LimitReached([LOUD, QUIET].concat()),
+                RecorderEvent::Ended(QUIET.to_vec()),
+            ]
+        );
     }
 }

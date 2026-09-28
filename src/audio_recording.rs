@@ -1,5 +1,7 @@
 use crate::app_state::{AppState, AudioParams};
-use crate::recorder::{peak_level, Recorder, RecorderEvent, RecorderSettings, RecorderStatus};
+use crate::recorder::{
+    max_recording_samples, peak_level, Recorder, RecorderEvent, RecorderSettings, RecorderStatus,
+};
 use crate::types::{AudioEvent, CapturedAudio};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::Stream;
@@ -111,7 +113,7 @@ impl InputHandler {
     ) -> Self {
         Self {
             shared,
-            recorder: Recorder::new(now),
+            recorder: Recorder::new(now, max_recording_samples(channels, sample_rate)),
             events: EventQueue { tx, dropped: 0 },
             channels,
             sample_rate,
@@ -140,15 +142,19 @@ impl InputHandler {
             sample_rate,
             ..
         } = self;
+        let captured = |samples| CapturedAudio {
+            samples,
+            channels: *channels,
+            sample_rate: *sample_rate,
+        };
         recorder.process(data, &settings, now, |event| match event {
             RecorderEvent::Started => events.send(AudioEvent::StartRecording),
+            RecorderEvent::LimitReached(samples) => {
+                events.send(AudioEvent::AudioPart(captured(samples)))
+            }
             RecorderEvent::Ended(samples) => {
                 if !samples.is_empty() {
-                    events.send(AudioEvent::AudioData(CapturedAudio {
-                        samples,
-                        channels: *channels,
-                        sample_rate: *sample_rate,
-                    }));
+                    events.send(AudioEvent::AudioData(captured(samples)));
                 }
                 events.send(AudioEvent::StopRecording);
             }
@@ -350,5 +356,24 @@ mod tests {
         assert_eq!(s.events(), vec![AudioEvent::EventsDropped(2)]);
         s.feed(&QUIET);
         assert!(s.events().is_empty());
+    }
+
+    #[test]
+    fn test_speech_longer_than_30_seconds_is_sent_in_parts() {
+        let mut s = Setup::new(10);
+        // One second of stereo audio at 48 kHz
+        let second = vec![0.5; 2 * 48_000];
+        for _ in 0..31 {
+            s.feed(&second);
+        }
+        let events = s.events();
+        assert_eq!(events.len(), 2, "{:?}", events.first());
+        assert_eq!(events[0], AudioEvent::StartRecording);
+        let AudioEvent::AudioPart(part) = &events[1] else {
+            panic!("expected AudioPart");
+        };
+        assert_eq!(part.samples.len(), 30 * 2 * 48_000);
+        assert_eq!((part.channels, part.sample_rate), (2, 48_000));
+        assert!(s.app_state.is_recording.load(Ordering::Relaxed));
     }
 }
