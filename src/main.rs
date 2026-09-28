@@ -352,5 +352,9 @@ async fn run_processing_loop(
         }
     }
 
+    // Shutdown can stop processing between StartRecording and the end of
+    // process_audio. Do not leave VRChat showing the typing indicator.
+    typing_indicator.stop_typing().await;
+
     Ok(())
 }
