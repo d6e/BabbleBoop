@@ -5,7 +5,7 @@ use crate::price_estimator::PriceEstimator;
 use crate::rate_limiter::RateLimiter;
 use crate::recording_manager::RecordingManager;
 use crate::transcription::transcribe_audio;
-use crate::translation::ask_chatgpt;
+use crate::translation::{ask_chatgpt, ChatGptRequest};
 use crate::typing_indicator::TypingIndicator;
 
 use std::error::Error;
@@ -49,18 +49,19 @@ pub async fn process_audio(
         manager.save_recording(audio_data, &transcription).await?;
     }
 
-    let translation_prompt = format!(
-        "You are a language translation app for VRChat. Do not answer the user. Only translate the words the user said. Answer only in the target language. Do not quote the translation. target_language={} Text:\n\n{}",
-        config.translation.target_language, transcription
+    let request = ChatGptRequest::translation(
+        &config.openai.model,
+        &config.translation.target_language,
+        &transcription,
     );
 
-    let response = ask_chatgpt(client, &translation_prompt, &config.openai, rate_limiter).await?;
+    let response = ask_chatgpt(client, &request, &config.openai, rate_limiter).await?;
     app_state
         .logger
         .success(format!("Translation: {}", response));
 
     let transcription_cost = price_estimator.estimate_transcription_cost(audio_duration);
-    let input_tokens = translation_prompt.len() / 4;
+    let input_tokens = request.approx_input_tokens();
     let output_tokens = response.len() / 4;
     let translation_cost = price_estimator.estimate_translation_cost(input_tokens, output_tokens);
     let op_cost = transcription_cost + translation_cost;

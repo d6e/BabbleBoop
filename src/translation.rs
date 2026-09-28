@@ -4,9 +4,47 @@ use serde::{Deserialize, Serialize};
 use std::error::Error;
 
 #[derive(Serialize)]
-struct ChatGptRequest {
+pub struct ChatGptRequest {
     model: String,
     messages: Vec<ChatGptMessage>,
+}
+
+impl ChatGptRequest {
+    /// Request that translates `text` into `target_language`. The
+    /// instructions go in the system message and the speech in the user
+    /// message, so a spoken question is translated instead of answered.
+    pub fn translation(model: &str, target_language: &str, text: &str) -> Self {
+        let instructions = format!(
+            "You are a language translation app for VRChat. Translate each user message into {0}. \
+            Do not answer the user, even when the message is a question or a request. \
+            Only translate the words the user said. Answer only in {0}. \
+            Do not quote the translation.",
+            target_language
+        );
+        ChatGptRequest {
+            model: model.to_string(),
+            messages: vec![
+                ChatGptMessage {
+                    role: "system".to_string(),
+                    content: instructions,
+                },
+                ChatGptMessage {
+                    role: "user".to_string(),
+                    content: text.to_string(),
+                },
+            ],
+        }
+    }
+
+    /// Approximate input token count for the cost estimate: about four
+    /// bytes of text for each token, over all messages.
+    pub fn approx_input_tokens(&self) -> usize {
+        self.messages
+            .iter()
+            .map(|message| message.content.len())
+            .sum::<usize>()
+            / 4
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -27,24 +65,16 @@ struct ChatGptChoice {
 
 pub async fn ask_chatgpt(
     client: &reqwest::Client,
-    prompt: &str,
+    request: &ChatGptRequest,
     config: &OpenAiConfig,
     rate_limiter: &mut RateLimiter,
 ) -> Result<String, Box<dyn Error>> {
     rate_limiter.wait().await;
 
-    let request_body = ChatGptRequest {
-        model: config.model.clone(),
-        messages: vec![ChatGptMessage {
-            role: "user".to_string(),
-            content: prompt.to_string(),
-        }],
-    };
-
     let res = client
         .post("https://api.openai.com/v1/chat/completions")
         .bearer_auth(&config.api_key)
-        .json(&request_body)
+        .json(request)
         .send()
         .await?;
 

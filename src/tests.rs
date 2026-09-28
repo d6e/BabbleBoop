@@ -490,4 +490,42 @@ requests_per_minute = 50
         assert_eq!(shutdown.run_until(async { 7 }).await, Some(7));
         assert!(!shutdown.is_requested());
     }
+
+    // ===========================================================================
+    // Test: Translation request shape
+    // ===========================================================================
+
+    #[test]
+    fn test_translation_request_sends_speech_as_user_message() {
+        use crate::translation::ChatGptRequest;
+        use serde_json::json;
+
+        let spoken = "What time is it?";
+        let request = ChatGptRequest::translation("gpt-4o-mini", "Japanese", spoken);
+        let body = serde_json::to_value(&request).unwrap();
+
+        assert_eq!(body["model"], "gpt-4o-mini");
+        let messages = body["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0]["role"], "system");
+        let instructions = messages[0]["content"].as_str().unwrap();
+        assert!(instructions.contains("Japanese"));
+        assert!(!instructions.contains(spoken));
+        assert_eq!(messages[1], json!({"role": "user", "content": spoken}));
+    }
+
+    #[test]
+    fn test_translation_request_token_estimate_counts_all_messages() {
+        use crate::translation::ChatGptRequest;
+
+        let silent = ChatGptRequest::translation("gpt-4o-mini", "Japanese", "");
+        let spoken = ChatGptRequest::translation("gpt-4o-mini", "Japanese", &"a".repeat(400));
+
+        // The instructions count, and so does the speech at 4 bytes a token.
+        assert!(silent.approx_input_tokens() > 0);
+        assert_eq!(
+            spoken.approx_input_tokens() - silent.approx_input_tokens(),
+            100
+        );
+    }
 }
