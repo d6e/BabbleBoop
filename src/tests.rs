@@ -1012,6 +1012,82 @@ requests_per_minute = 50
         );
     }
 
+    #[test]
+    fn test_wav_with_a_sample_rate_of_zero_is_an_error() {
+        // The duration check reads the sample rate from the WAV header.
+        // hound cannot write a rate of 0, so build the file here: a PCM fmt
+        // chunk with 1 channel, a rate of 0 (and so 0 bytes per second), a
+        // block of 2 bytes and 16 bits, then one sample.
+        let mut wav = Vec::new();
+        wav.extend_from_slice(b"RIFF");
+        wav.extend_from_slice(&38u32.to_le_bytes());
+        wav.extend_from_slice(b"WAVEfmt ");
+        wav.extend_from_slice(&16u32.to_le_bytes());
+        for field in [1u16, 1] {
+            wav.extend_from_slice(&field.to_le_bytes());
+        }
+        for field in [0u32, 0] {
+            wav.extend_from_slice(&field.to_le_bytes());
+        }
+        for field in [2u16, 16] {
+            wav.extend_from_slice(&field.to_le_bytes());
+        }
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&2u32.to_le_bytes());
+        wav.extend_from_slice(&0i16.to_le_bytes());
+        assert_eq!(
+            hound::WavReader::new(wav.as_slice())
+                .unwrap()
+                .spec()
+                .sample_rate,
+            0
+        );
+
+        let duration = crate::audio_processing::calculate_audio_duration(&wav);
+        assert!(duration.is_err(), "{:?}", duration);
+    }
+
+    /// Duration conversions from a float that panic on a negative, NaN or
+    /// too large value. Production code uses the `try_` forms instead.
+    #[test]
+    fn test_no_float_to_duration_conversion_can_panic() {
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut hits = Vec::new();
+        for entry in std::fs::read_dir(&src).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension() != Some("rs".as_ref()) {
+                continue;
+            }
+            let name = path.file_name().unwrap().to_string_lossy().into_owned();
+            let text = std::fs::read_to_string(&path).unwrap();
+            for (index, line) in text.lines().enumerate() {
+                let line = line.trim_start();
+                // Test code follows the first cfg(test) attribute of a file
+                if line.starts_with("#[cfg(") && line.contains("test") {
+                    break;
+                }
+                if line.starts_with("//") {
+                    continue;
+                }
+                let code = line.replace("try_from_secs_f", "");
+                let panicking = [
+                    "from_secs_f32(",
+                    "from_secs_f64(",
+                    ".mul_f32(",
+                    ".mul_f64(",
+                    ".div_f32(",
+                    ".div_f64(",
+                ]
+                .iter()
+                .any(|call| code.contains(call));
+                if panicking {
+                    hits.push(format!("{}:{}: {}", name, index + 1, line));
+                }
+            }
+        }
+        assert!(hits.is_empty(), "{:#?}", hits);
+    }
+
     // ===========================================================================
     // Test: Any minimum transcription duration in config.toml is safe
     // ===========================================================================

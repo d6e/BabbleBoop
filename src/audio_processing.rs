@@ -95,6 +95,6 @@ fn min_transcription_duration(seconds: f32) -> Duration {
 pub(crate) fn calculate_audio_duration(audio_data: &[u8]) -> Result<Duration, Box<dyn Error>> {
     let reader = hound::WavReader::new(std::io::Cursor::new(audio_data))?;
     let spec = reader.spec();
-    let duration = Duration::from_secs_f32(reader.duration() as f32 / spec.sample_rate as f32);
+    let duration = Duration::try_from_secs_f32(reader.duration() as f32 / spec.sample_rate as f32)?;
     Ok(duration)
 }
