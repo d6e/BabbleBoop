@@ -1825,6 +1825,46 @@ mod gui_tests {
         }
     }
 
+    // ===========================================================================
+    // Test: The duration line shows when a recording can be sent
+    // ===========================================================================
+
+    /// The painted "Duration:" status of a recording that is 0.5 s long,
+    /// with a minimum transcription duration of 1 s.
+    fn duration_status(recording_split: bool) -> Vec<String> {
+        use std::sync::atomic::Ordering;
+
+        let (mut app, app_state) = test_app_with_state();
+        app.config_draft.audio.min_transcription_duration = 1.0;
+        app_state.is_recording.store(true, Ordering::Relaxed);
+        app_state
+            .recording_duration
+            .store(0.5_f32.to_bits(), Ordering::Relaxed);
+        app_state
+            .recording_split
+            .store(recording_split, Ordering::Relaxed);
+        let output = egui::Context::default().run(raw_input(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| app.audio_settings_ui(ui));
+        });
+
+        painted_text(&output)
+            .into_iter()
+            .filter(|text| text.starts_with("0.5s"))
+            .collect()
+    }
+
+    #[test]
+    fn test_last_part_of_a_split_recording_shows_ready_below_the_minimum() {
+        // The minimum applies only to a whole recording. The last part of a
+        // recording that reached the length limit is sent however short it is.
+        assert_eq!(duration_status(true), ["0.5s (ready)"]);
+    }
+
+    #[test]
+    fn test_whole_recording_below_the_minimum_shows_not_ready() {
+        assert_eq!(duration_status(false), ["0.5s / 1.0s"]);
+    }
+
     #[test]
     fn test_toggle_off_track_follows_the_theme() {
         use crate::config::ThemeMode;
