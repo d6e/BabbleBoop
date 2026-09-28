@@ -6,7 +6,8 @@ use babble_boop::audio_recording::{start_audio_recording, SharedAudioState};
 use babble_boop::config::{Config, CONFIG_PATH};
 use babble_boop::gui::{run_error_dialog, run_gui};
 use babble_boop::processing_loop::{
-    apply_enabled, encode_for_upload, log_audio_event, test_recording_samples, ProcessingServices,
+    apply_enabled, encode_for_upload, log_audio_event, ProcessingServices, TestRecording,
+    TEST_RECORDING_LIMIT,
 };
 use babble_boop::types::AudioEvent;
 use babble_boop::typing_indicator::TypingIndicator;
@@ -14,7 +15,7 @@ use babble_boop::typing_indicator::TypingIndicator;
 use std::io::Cursor;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 
@@ -28,6 +29,39 @@ fn encode_samples_to_wav(samples: &[f32], spec: hound::WavSpec) -> Option<Vec<u8
     }
     writer.finalize().ok()?;
     Some(buffer)
+}
+
+/// Stop the test recording and queue it for playback.
+fn finish_test_recording(test_recording: &mut TestRecording, app_state: &AppState) {
+    let Some(audio) = test_recording.stop() else {
+        return;
+    };
+    if audio.samples.is_empty() {
+        app_state
+            .logger
+            .info("Test recording stopped, nothing recorded");
+        return;
+    }
+    app_state.logger.info(format!(
+        "Test recording stopped, {} samples",
+        audio.samples.len()
+    ));
+    let spec = hound::WavSpec {
+        channels: audio.channels,
+        sample_rate: audio.sample_rate,
+        bits_per_sample: 32,
+        sample_format: hound::SampleFormat::Float,
+    };
+    if let Some(wav_data) = encode_samples_to_wav(&audio.samples, spec) {
+        if let Err(e) = app_state
+            .command_tx
+            .try_send(AppCommand::TestRecordingComplete(wav_data))
+        {
+            app_state
+                .logger
+                .error(format!("Failed to send test recording: {}", e));
+        }
+    }
 }
 
 fn main() {
@@ -169,20 +203,14 @@ async fn run_processing_loop(
 
     let typing_indicator = TypingIndicator::new(Arc::clone(&socket), Arc::clone(&app_state.config));
 
-    // Test recording state
-    let mut test_recording_start: Option<Instant> = None;
-    let test_recording_duration = Duration::from_secs(3);
+    let mut test_recording = TestRecording::new(
+        &app_state,
+        audio_stream_info.channels,
+        audio_stream_info.sample_rate,
+    );
     // Keep playback stream alive until playback completes
     let mut _playback_stream: Option<cpal::Stream> = None;
     let playback_active = Arc::new(AtomicBool::new(false));
-
-    // WAV spec for encoding test recordings
-    let test_wav_spec = hound::WavSpec {
-        channels: audio_stream_info.channels,
-        sample_rate: audio_stream_info.sample_rate,
-        bits_per_sample: 32,
-        sample_format: hound::SampleFormat::Float,
-    };
 
     loop {
         tokio::select! {
@@ -203,40 +231,10 @@ async fn run_processing_loop(
                     }
                     Some(AppCommand::StartTestRecording) => {
                         app_state.logger.info("Test recording started...");
-                        // The callback adds samples only up to this capacity
-                        let reserved = Vec::with_capacity(test_recording_samples(
-                            audio_stream_info.channels,
-                            audio_stream_info.sample_rate,
-                        ));
-                        if let Ok(mut buffer) = app_state.test_recording_buffer.lock() {
-                            *buffer = reserved;
-                        }
-                        test_recording_start = Some(Instant::now());
-                        app_state.test_mode_active.store(true, Ordering::SeqCst);
+                        test_recording.start();
                     }
                     Some(AppCommand::StopTestRecording) => {
-                        if app_state.test_mode_active.load(Ordering::Relaxed) {
-                            app_state.test_mode_active.store(false, Ordering::SeqCst);
-                            test_recording_start = None;
-
-                            // Get samples from shared buffer and encode to WAV
-                            if let Ok(mut buffer) = app_state.test_recording_buffer.lock() {
-                                if !buffer.is_empty() {
-                                    let samples: Vec<f32> = buffer.drain(..).collect();
-                                    app_state.logger.info(format!(
-                                        "Test recording stopped, {} samples",
-                                        samples.len()
-                                    ));
-                                    if let Some(wav_data) = encode_samples_to_wav(&samples, test_wav_spec) {
-                                        if let Err(e) = app_state.command_tx.try_send(AppCommand::TestRecordingComplete(wav_data)) {
-                                            app_state.logger.error(format!(
-                                                "Failed to send test recording: {}", e
-                                            ));
-                                        }
-                                    }
-                                }
-                            }
-                        }
+                        finish_test_recording(&mut test_recording, &app_state);
                     }
                     Some(AppCommand::TestRecordingComplete(wav_data)) => {
                         app_state.logger.info("Playing back test recording...");
@@ -258,35 +256,14 @@ async fn run_processing_loop(
                     }
                 }
             }
+            _ = test_recording.limit_reached() => {
+                app_state.logger.info(format!(
+                    "Test recording reached {} s",
+                    TEST_RECORDING_LIMIT.as_secs()
+                ));
+                finish_test_recording(&mut test_recording, &app_state);
+            }
             Some(event) = rx.recv() => {
-                // Check if test recording is active and has timed out
-                if let Some(start_time) = test_recording_start {
-                    if start_time.elapsed() >= test_recording_duration {
-                        app_state.test_mode_active.store(false, Ordering::SeqCst);
-                        test_recording_start = None;
-
-                        // Get samples from shared buffer and encode to WAV
-                        if let Ok(mut buffer) = app_state.test_recording_buffer.lock() {
-                            if !buffer.is_empty() {
-                                let samples: Vec<f32> = buffer.drain(..).collect();
-                                app_state.logger.info(format!(
-                                    "Test recording complete, {} samples",
-                                    samples.len()
-                                ));
-                                if let Some(wav_data) = encode_samples_to_wav(&samples, test_wav_spec) {
-                                    if let Err(e) = app_state.command_tx.try_send(AppCommand::TestRecordingComplete(wav_data)) {
-                                        app_state.logger.error(format!(
-                                            "Failed to send test recording: {}", e
-                                        ));
-                                    }
-                                }
-                            } else {
-                                app_state.logger.info("Test recording complete, 0 samples");
-                            }
-                        }
-                    }
-                }
-
                 log_audio_event(&event, &app_state.logger);
 
                 // Ignore speech while translation is off. SetEnabled(false)

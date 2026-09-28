@@ -1,7 +1,7 @@
 //! Parts of the processing loop in `main.rs` that can be tested without an
 //! audio device.
 
-use crate::app_state::Logger;
+use crate::app_state::{AppState, Logger};
 use crate::config::Config;
 use crate::models;
 use crate::price_estimator::PriceEstimator;
@@ -12,7 +12,10 @@ use crate::types::{AudioEvent, CapturedAudio};
 use crate::typing_indicator::TypingIndicator;
 use crate::upload_audio::encode_upload_wav;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
+use tokio::time::Instant;
 
 /// Directory for saved recordings when `keep_audio_files` is on.
 const RECORDINGS_DIR: &str = "recordings";
@@ -21,8 +24,73 @@ const RECORDINGS_DIR: &str = "recordings";
 pub const TEST_RECORDING_LIMIT: Duration = Duration::from_secs(30);
 
 /// Number of interleaved samples in `TEST_RECORDING_LIMIT`.
-pub fn test_recording_samples(channels: u16, sample_rate: u32) -> usize {
+fn test_recording_samples(channels: u16, sample_rate: u32) -> usize {
     TEST_RECORDING_LIMIT.as_secs() as usize * sample_rate as usize * usize::from(channels)
+}
+
+/// The test microphone recording. While it runs, the audio callback copies
+/// the input into the test buffer instead of the recorder. The Stop button
+/// in the GUI or `TEST_RECORDING_LIMIT` ends it.
+pub struct TestRecording {
+    active: Arc<AtomicBool>,
+    buffer: Arc<Mutex<Vec<f32>>>,
+    channels: u16,
+    sample_rate: u32,
+    /// When the running test recording reaches the limit
+    deadline: Option<Instant>,
+}
+
+impl TestRecording {
+    /// Test recordings of the input stream with this format.
+    pub fn new(app_state: &AppState, channels: u16, sample_rate: u32) -> Self {
+        Self {
+            active: Arc::clone(&app_state.test_mode_active),
+            buffer: Arc::clone(&app_state.test_recording_buffer),
+            channels,
+            sample_rate,
+            deadline: None,
+        }
+    }
+
+    /// Start a test recording. A test recording that runs starts again.
+    pub fn start(&mut self) {
+        // The callback adds samples only up to this capacity
+        let reserved = Vec::with_capacity(test_recording_samples(self.channels, self.sample_rate));
+        let previous = std::mem::replace(&mut *self.lock_buffer(), reserved);
+        drop(previous);
+        self.deadline = Some(Instant::now() + TEST_RECORDING_LIMIT);
+        self.active.store(true, Ordering::SeqCst);
+    }
+
+    /// Stop the test recording and return what it recorded. Returns `None`
+    /// if no test recording runs.
+    pub fn stop(&mut self) -> Option<CapturedAudio> {
+        self.deadline.take()?;
+        self.active.store(false, Ordering::SeqCst);
+        // Leaves a buffer with no capacity, so the callback adds nothing
+        // if it still sees test mode on.
+        let samples = std::mem::take(&mut *self.lock_buffer());
+        Some(CapturedAudio {
+            samples,
+            channels: self.channels,
+            sample_rate: self.sample_rate,
+        })
+    }
+
+    /// Resolves when the running test recording reaches the limit. Never
+    /// resolves while no test recording runs.
+    pub async fn limit_reached(&self) {
+        match self.deadline {
+            Some(deadline) => tokio::time::sleep_until(deadline).await,
+            None => std::future::pending().await,
+        }
+    }
+
+    /// The callback only copies samples while it holds the lock, so a
+    /// poisoned lock still holds a valid buffer.
+    fn lock_buffer(&self) -> MutexGuard<'_, Vec<f32>> {
+        self.buffer.lock().unwrap_or_else(PoisonError::into_inner)
+    }
 }
 
 /// Processing loop state that depends on the settings.

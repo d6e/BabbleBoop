@@ -1064,6 +1064,105 @@ requests_per_minute = 50
     }
 
     // ===========================================================================
+    // Test: The test microphone recording stops at its limit
+    // ===========================================================================
+
+    /// App state with its command and log channels kept open.
+    fn app_state_for_test() -> (
+        crate::app_state::AppState,
+        tokio::sync::mpsc::Receiver<crate::app_state::AppCommand>,
+        tokio::sync::mpsc::Receiver<crate::app_state::LogEntry>,
+    ) {
+        let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel(10);
+        let (log_tx, log_rx) = tokio::sync::mpsc::channel(10);
+        let app_state = crate::app_state::AppState::new(Config::default(), cmd_tx, log_tx);
+        (app_state, cmd_rx, log_rx)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_test_recording_reaches_its_limit_after_30_seconds() {
+        use crate::processing_loop::{TestRecording, TEST_RECORDING_LIMIT};
+        use std::time::Duration;
+        use tokio::time::{timeout, Instant};
+
+        let (app_state, _cmd_rx, _log_rx) = app_state_for_test();
+        let mut test = TestRecording::new(&app_state, 2, 48_000);
+        test.start();
+        let started = Instant::now();
+
+        timeout(Duration::from_secs(60), test.limit_reached())
+            .await
+            .expect("the test recording has no time limit");
+        assert_eq!(started.elapsed(), TEST_RECORDING_LIMIT);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_no_limit_is_reached_while_no_test_recording_runs() {
+        use crate::processing_loop::TestRecording;
+        use std::time::Duration;
+        use tokio::time::timeout;
+
+        let (app_state, _cmd_rx, _log_rx) = app_state_for_test();
+        let mut test = TestRecording::new(&app_state, 2, 48_000);
+        let hour = Duration::from_secs(3600);
+        assert!(timeout(hour, test.limit_reached()).await.is_err());
+
+        test.start();
+        test.stop();
+        assert!(timeout(hour, test.limit_reached()).await.is_err());
+    }
+
+    #[test]
+    fn test_test_recording_returns_the_samples_the_callback_wrote() {
+        use crate::processing_loop::TestRecording;
+        use crate::types::CapturedAudio;
+        use std::sync::atomic::Ordering;
+
+        let (app_state, _cmd_rx, _log_rx) = app_state_for_test();
+        let mut test = TestRecording::new(&app_state, 2, 48_000);
+        assert_eq!(test.stop(), None);
+
+        test.start();
+        assert!(app_state.test_mode_active.load(Ordering::SeqCst));
+        // As the callback does, within the reserved capacity
+        let reserved = {
+            let mut buffer = app_state.test_recording_buffer.lock().unwrap();
+            buffer.extend_from_slice(&[0.1, 0.2, 0.3, 0.4]);
+            buffer.capacity()
+        };
+        // Room for 30 s of 48 kHz stereo
+        assert_eq!(reserved, 30 * 48_000 * 2);
+
+        assert_eq!(
+            test.stop(),
+            Some(CapturedAudio {
+                samples: vec![0.1, 0.2, 0.3, 0.4],
+                channels: 2,
+                sample_rate: 48_000,
+            })
+        );
+        assert!(!app_state.test_mode_active.load(Ordering::SeqCst));
+        // A callback that still sees test mode on has no room to write
+        assert_eq!(
+            app_state.test_recording_buffer.lock().unwrap().capacity(),
+            0
+        );
+        assert_eq!(test.stop(), None);
+    }
+
+    #[test]
+    fn test_a_new_test_recording_starts_empty() {
+        use crate::processing_loop::TestRecording;
+
+        let (app_state, _cmd_rx, _log_rx) = app_state_for_test();
+        let mut test = TestRecording::new(&app_state, 1, 16_000);
+        test.start();
+        app_state.test_recording_buffer.lock().unwrap().push(0.5);
+        test.start();
+        assert_eq!(test.stop().map(|audio| audio.samples), Some(Vec::new()));
+    }
+
+    // ===========================================================================
     // Test: Disabling translation clears the typing indicator
     // ===========================================================================
 

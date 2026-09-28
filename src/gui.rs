@@ -1,6 +1,7 @@
 use crate::app_state::{AppCommand, AppState, LogEntry, LogLevel};
 use crate::config::{Config, ThemeMode, CONFIG_PATH};
 use crate::models;
+use crate::processing_loop::TEST_RECORDING_LIMIT;
 use crate::theme::{self, AppColors};
 use eframe::egui;
 use std::sync::atomic::Ordering;
@@ -898,7 +899,10 @@ impl BabbleBoopApp {
                 }
             } else if ui
                 .button("Test Microphone")
-                .on_hover_text("Record audio and play it back (click again to stop)")
+                .on_hover_text(format!(
+                    "Record up to {} s of audio and play it back (click again to stop)",
+                    TEST_RECORDING_LIMIT.as_secs()
+                ))
                 .clicked()
             {
                 if let Err(e) = self.send_command(AppCommand::StartTestRecording) {
