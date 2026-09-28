@@ -758,3 +758,166 @@ requests_per_minute = 50
         );
     }
 }
+
+#[cfg(test)]
+mod gui_tests {
+    use crate::app_state::{AppState, LogEntry, LogLevel};
+    use crate::config::Config;
+    use crate::gui::BabbleBoopApp;
+    use eframe::egui;
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    fn test_app_with_state() -> (BabbleBoopApp, Arc<AppState>) {
+        let (cmd_tx, _cmd_rx) = tokio::sync::mpsc::channel(10);
+        let (log_tx, log_rx) = tokio::sync::mpsc::channel(100);
+        let app_state = Arc::new(AppState::new(Config::default(), cmd_tx, log_tx));
+        (
+            BabbleBoopApp::new(Arc::clone(&app_state), log_rx),
+            app_state,
+        )
+    }
+
+    fn test_app() -> (BabbleBoopApp, tokio::sync::mpsc::Sender<LogEntry>) {
+        let (app, app_state) = test_app_with_state();
+        (app, app_state.log_tx.clone())
+    }
+
+    fn raw_input() -> egui::RawInput {
+        egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(400.0, 600.0),
+            )),
+            ..Default::default()
+        }
+    }
+
+    /// Run a few frames, so that the first frame layout passes are over,
+    /// and return how long the GUI asks to wait before the next frame.
+    /// `Duration::MAX` means it waits for input or a wake up.
+    fn repaint_delay_after_frames(
+        ctx: &egui::Context,
+        mut run_ui: impl FnMut(&egui::Context),
+    ) -> Duration {
+        let mut output = ctx.run(raw_input(), &mut run_ui);
+        for _ in 0..4 {
+            output = ctx.run(raw_input(), &mut run_ui);
+        }
+        output.viewport_output[&egui::ViewportId::ROOT].repaint_delay
+    }
+
+    #[test]
+    fn test_idle_gui_with_log_entries_does_not_repaint() {
+        let (mut app, log_tx) = test_app();
+        log_tx
+            .try_send(LogEntry {
+                timestamp: Instant::now(),
+                message: "Starting audio recording...".to_string(),
+                level: LogLevel::Info,
+            })
+            .unwrap();
+
+        let delay = repaint_delay_after_frames(&egui::Context::default(), |ctx| app.ui(ctx));
+
+        assert_eq!(delay, Duration::MAX);
+    }
+
+    #[test]
+    fn test_status_message_repaints_when_it_expires() {
+        let (mut app, _log_tx) = test_app();
+        app.set_status_info("Settings saved successfully");
+
+        let delay = repaint_delay_after_frames(&egui::Context::default(), |ctx| app.ui(ctx));
+
+        assert!(delay > Duration::from_secs(2), "delay {:?}", delay);
+        assert!(delay <= Duration::from_secs(3), "delay {:?}", delay);
+    }
+
+    #[test]
+    fn test_audio_settings_keep_meters_live() {
+        let (mut app, _log_tx) = test_app();
+
+        let delay = repaint_delay_after_frames(&egui::Context::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| app.audio_settings_ui(ui));
+        });
+
+        assert!(delay <= Duration::from_millis(50), "delay {:?}", delay);
+    }
+
+    #[test]
+    fn test_audio_settings_do_not_repaint_while_minimized() {
+        let (mut app, _log_tx) = test_app();
+        let ctx = egui::Context::default();
+        let minimized = || {
+            let mut input = raw_input();
+            input
+                .viewports
+                .entry(egui::ViewportId::ROOT)
+                .or_default()
+                .minimized = Some(true);
+            input
+        };
+        let mut run_ui = |ctx: &egui::Context| {
+            egui::CentralPanel::default().show(ctx, |ui| app.audio_settings_ui(ui));
+        };
+
+        let mut output = ctx.run(minimized(), &mut run_ui);
+        for _ in 0..4 {
+            output = ctx.run(minimized(), &mut run_ui);
+        }
+
+        assert_eq!(
+            output.viewport_output[&egui::ViewportId::ROOT].repaint_delay,
+            Duration::MAX
+        );
+    }
+
+    /// Text of all labels painted in `output`. Labels outside the visible
+    /// part of a scroll area are not painted.
+    fn painted_text(output: &egui::FullOutput) -> Vec<String> {
+        output
+            .shapes
+            .iter()
+            .filter_map(|clipped| match &clipped.shape {
+                egui::Shape::Text(text) => Some(text.galley.text().to_string()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Run frames the way eframe does: one, then one more for each frame
+    /// that asks for a repaint at once. Returns the last frame's output.
+    fn run_until_idle(ctx: &egui::Context, app: &mut BabbleBoopApp) -> egui::FullOutput {
+        for _ in 0..10 {
+            let output = ctx.run(raw_input(), |ctx| app.ui(ctx));
+            if output.viewport_output[&egui::ViewportId::ROOT].repaint_delay != Duration::ZERO {
+                return output;
+            }
+        }
+        panic!("the GUI still repaints continuously after 10 frames");
+    }
+
+    #[test]
+    fn test_new_log_entry_is_visible_when_gui_goes_idle() {
+        let (mut app, app_state) = test_app_with_state();
+        let ctx = egui::Context::default();
+        app_state.gui_waker.attach(ctx.clone());
+        // More entries than the log shows, so the log scrolls.
+        for i in 0..20 {
+            app_state.logger.info(format!("entry {}", i));
+        }
+        run_until_idle(&ctx, &mut app);
+
+        // The GUI is idle. The processing thread logs one more line.
+        app_state.logger.info("Translation: hallo");
+        assert!(ctx.has_requested_repaint());
+        let output = run_until_idle(&ctx, &mut app);
+
+        assert!(
+            painted_text(&output).contains(&"Translation: hallo".to_string()),
+            "{:?}",
+            painted_text(&output)
+        );
+    }
+}

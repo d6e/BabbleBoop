@@ -4,6 +4,7 @@ use crate::theme::{self, AppColors};
 use eframe::egui;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::mpsc;
 
 /// Draw an audio level meter with draggable threshold indicator
@@ -170,6 +171,13 @@ fn draw_recording_duration(ui: &mut egui::Ui, duration: f32, min_duration: f32) 
 
 const MAX_LOG_ENTRIES: usize = 50;
 
+/// How long a status message stays in the status bar.
+const STATUS_MESSAGE_TIME: Duration = Duration::from_secs(3);
+
+/// Time between frames while the audio meters are visible, about 30 per
+/// second.
+const METER_REFRESH_INTERVAL: Duration = Duration::from_millis(33);
+
 /// Spacing and label column width of the settings grids.
 const GRID_SPACING: [f32; 2] = [10.0, 6.0];
 const LABEL_WIDTH: f32 = 160.0;
@@ -332,7 +340,7 @@ impl BabbleBoopApp {
 
     fn show_status(&mut self, ctx: &egui::Context) {
         if let Some((msg, status_type, time)) = &self.status_message {
-            if time.elapsed().as_secs() < 3 {
+            if time.elapsed() < STATUS_MESSAGE_TIME {
                 let colors = self.colors;
                 egui::TopBottomPanel::bottom("status_bar").show(ctx, |ui| {
                     let color = match status_type {
@@ -356,7 +364,7 @@ impl BabbleBoopApp {
         self.status_message = Some((msg.into(), StatusType::Error, std::time::Instant::now()));
     }
 
-    fn set_status_info(&mut self, msg: impl Into<String>) {
+    pub(crate) fn set_status_info(&mut self, msg: impl Into<String>) {
         self.status_message = Some((msg.into(), StatusType::Info, std::time::Instant::now()));
     }
 
@@ -685,12 +693,8 @@ impl BabbleBoopApp {
                 ui.add_space(5.0);
 
                 // Audio Settings
-                let audio_header = egui::CollapsingHeader::new("Audio Settings")
+                egui::CollapsingHeader::new("Audio Settings")
                     .show(ui, |ui| self.audio_settings_ui(ui));
-                // Request repaint when audio settings is open to update the level meter
-                if audio_header.body_returned.is_some() {
-                    ctx.request_repaint();
-                }
 
                 ui.add_space(5.0);
 
@@ -747,15 +751,25 @@ impl BabbleBoopApp {
             ctx.set_visuals(theme::get_visuals(new_theme));
         }
 
-        // Request repaint for status message timeout and log polling
-        if self.status_message.is_some() || !self.log_entries.is_empty() {
-            ctx.request_repaint();
+        // Other frames come from input and from GuiWaker, which wakes the
+        // GUI for new log entries and cost. The status message needs one
+        // more frame to hide it when it expires.
+        if let Some((_, _, shown_at)) = &self.status_message {
+            ctx.request_repaint_after(STATUS_MESSAGE_TIME.saturating_sub(shown_at.elapsed()));
         }
     }
 
     /// Body of the Audio Settings section: live meters, the test button and
     /// the audio settings.
-    fn audio_settings_ui(&mut self, ui: &mut egui::Ui) {
+    pub(crate) fn audio_settings_ui(&mut self, ui: &mut egui::Ui) {
+        // The meters show state of the audio thread, which does not wake the
+        // GUI. Not while minimized: nothing is visible, and eframe still runs
+        // a frame for each request.
+        let minimized = ui.ctx().input(|i| i.viewport().minimized == Some(true));
+        if !minimized {
+            ui.ctx().request_repaint_after(METER_REFRESH_INTERVAL);
+        }
+
         let colors = self.colors;
         // Audio level meter at the top
         ui.label("Input Level:");
