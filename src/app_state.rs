@@ -207,7 +207,7 @@ fn parse_api_error_for_display(error: &str) -> String {
 pub struct AudioParams {
     pub noise_gate_threshold: AtomicU32, // f32 stored as bits
     pub noise_gate_hold_time: AtomicU32, // f32 stored as bits
-    pub silence_threshold: AtomicU32,
+    pub silence_duration: AtomicU32,     // f32 stored as bits
 }
 
 impl AudioParams {
@@ -215,7 +215,7 @@ impl AudioParams {
         Self {
             noise_gate_threshold: AtomicU32::new(config.noise_gate_threshold.to_bits()),
             noise_gate_hold_time: AtomicU32::new(config.noise_gate_hold_time.to_bits()),
-            silence_threshold: AtomicU32::new(config.silence_threshold),
+            silence_duration: AtomicU32::new(config.silence_duration.to_bits()),
         }
     }
 
@@ -224,8 +224,8 @@ impl AudioParams {
             .store(config.noise_gate_threshold.to_bits(), Ordering::Relaxed);
         self.noise_gate_hold_time
             .store(config.noise_gate_hold_time.to_bits(), Ordering::Relaxed);
-        self.silence_threshold
-            .store(config.silence_threshold, Ordering::Relaxed);
+        self.silence_duration
+            .store(config.silence_duration.to_bits(), Ordering::Relaxed);
     }
 
     pub fn get_noise_gate_threshold(&self) -> f32 {
@@ -236,8 +236,8 @@ impl AudioParams {
         f32::from_bits(self.noise_gate_hold_time.load(Ordering::Relaxed))
     }
 
-    pub fn get_silence_threshold(&self) -> u32 {
-        self.silence_threshold.load(Ordering::Relaxed)
+    pub fn get_silence_duration(&self) -> f32 {
+        f32::from_bits(self.silence_duration.load(Ordering::Relaxed))
     }
 }
 
@@ -263,8 +263,9 @@ pub struct AppState {
     pub total_cost: Arc<std::sync::atomic::AtomicU64>,
     /// Whether audio is currently being recorded
     pub is_recording: Arc<AtomicBool>,
-    /// Current count of consecutive silent frames
-    pub silent_frames: Arc<AtomicU32>,
+    /// Seconds of input since the noise gate closed during the current
+    /// recording (f32 stored as bits)
+    pub quiet_time: Arc<AtomicU32>,
     /// Whether the noise gate is currently active/open
     pub noise_gate_active: Arc<AtomicBool>,
     /// Remaining hold time in seconds (f32 stored as bits)
@@ -309,7 +310,7 @@ impl AppState {
             test_recording_buffer: Arc::new(std::sync::Mutex::new(Vec::new())),
             total_cost: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             is_recording: Arc::new(AtomicBool::new(false)),
-            silent_frames: Arc::new(AtomicU32::new(0)),
+            quiet_time: Arc::new(AtomicU32::new(0)),
             noise_gate_active: Arc::new(AtomicBool::new(false)),
             noise_gate_hold_remaining: Arc::new(AtomicU32::new(0)),
             recording_duration: Arc::new(AtomicU32::new(0)),

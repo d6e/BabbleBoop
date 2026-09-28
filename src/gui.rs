@@ -2,7 +2,7 @@ use crate::app_state::{AppCommand, AppState, LogEntry, LogLevel};
 use crate::config::{
     Config, ConfigWarning, ThemeMode, CONFIG_PATH, DISPLAY_TIME_MS_RANGE, MAX_AUDIO_FILES_RANGE,
     MAX_MESSAGE_CHUNKS_RANGE, MIN_TRANSCRIPTION_DURATION_RANGE, NOISE_GATE_HOLD_TIME_RANGE,
-    NOISE_GATE_THRESHOLD_RANGE, PORT_RANGE, REQUESTS_PER_MINUTE_RANGE, SILENCE_THRESHOLD_RANGE,
+    NOISE_GATE_THRESHOLD_RANGE, PORT_RANGE, REQUESTS_PER_MINUTE_RANGE, SILENCE_DURATION_RANGE,
 };
 use crate::models;
 use crate::processing_loop::TEST_RECORDING_LIMIT;
@@ -116,8 +116,14 @@ fn draw_noise_gate_state(
     }
 }
 
-/// Draw a progress bar showing silent frames toward silence threshold
-fn draw_silence_counter(ui: &mut egui::Ui, silent_frames: u32, threshold: u32, colors: &AppColors) {
+/// Draw a progress bar showing the seconds of quiet input toward the
+/// silence duration that ends the recording
+fn draw_silence_counter(
+    ui: &mut egui::Ui,
+    quiet_time: f32,
+    silence_duration: f32,
+    colors: &AppColors,
+) {
     let meter_size = egui::vec2(ui.available_width().min(200.0), 10.0);
     let (rect, _response) = ui.allocate_exact_size(meter_size, egui::Sense::hover());
 
@@ -128,8 +134,8 @@ fn draw_silence_counter(ui: &mut egui::Ui, silent_frames: u32, threshold: u32, c
         painter.rect_filled(rect, 2.0, colors.meter_background);
 
         // Progress bar
-        let progress = if threshold > 0 {
-            (silent_frames as f32 / threshold as f32).min(1.0)
+        let progress = if silence_duration > 0.0 {
+            (quiet_time / silence_duration).min(1.0)
         } else {
             0.0
         };
@@ -857,7 +863,7 @@ impl BabbleBoopApp {
 
         // Read audio state from atomics
         let is_recording = self.app_state.is_recording.load(Ordering::Relaxed);
-        let silent_frames = self.app_state.silent_frames.load(Ordering::Relaxed);
+        let quiet_time = f32::from_bits(self.app_state.quiet_time.load(Ordering::Relaxed));
         let noise_gate_active = self.app_state.noise_gate_active.load(Ordering::Relaxed);
         let hold_remaining = f32::from_bits(
             self.app_state
@@ -893,22 +899,18 @@ impl BabbleBoopApp {
 
         // Silence counter (only visible when recording)
         if is_recording {
+            let silence_duration = self.config_draft.audio.silence_duration;
             ui.horizontal(|ui| {
-                ui.label("Silence:");
+                ui.label("Silence:").on_hover_text(
+                    "Seconds of silence since the noise gate closed, and the silence duration \
+                    that ends the recording",
+                );
                 ui.label(
-                    egui::RichText::new(format!(
-                        "{}/{}",
-                        silent_frames, self.config_draft.audio.silence_threshold
-                    ))
-                    .small(),
+                    egui::RichText::new(format!("{:.1}s / {:.1}s", quiet_time, silence_duration))
+                        .small(),
                 );
             });
-            draw_silence_counter(
-                ui,
-                silent_frames,
-                self.config_draft.audio.silence_threshold,
-                &colors,
-            );
+            draw_silence_counter(ui, quiet_time, silence_duration, &colors);
             ui.add_space(4.0);
 
             // Recording duration. The minimum transcription duration does
@@ -966,14 +968,15 @@ impl BabbleBoopApp {
             .spacing(GRID_SPACING)
             .min_col_width(LABEL_WIDTH)
             .show(ui, |ui| {
-                ui.label("Silence Threshold:")
-                    .on_hover_text(
-                        "Number of silent audio buffers in a row, after the noise gate closes, \
-                        before the recording stops and is sent. The audio device sets the buffer \
-                        length. On most Windows devices one buffer is about 10 ms, so 100 is about \
-                        1 second.",
-                    );
-                ui.add(egui::DragValue::new(&mut self.config_draft.audio.silence_threshold).range(SILENCE_THRESHOLD_RANGE));
+                ui.label("Silence Duration (s):").on_hover_text(
+                    "Seconds of silence, after the noise gate closes, before the recording \
+                    stops and is sent",
+                );
+                ui.add(
+                    egui::DragValue::new(&mut self.config_draft.audio.silence_duration)
+                        .speed(0.05)
+                        .range(SILENCE_DURATION_RANGE),
+                );
                 ui.end_row();
 
                 ui.label("Noise Gate Threshold:")

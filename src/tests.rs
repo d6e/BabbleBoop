@@ -284,7 +284,7 @@ pub(crate) mod regression_tests {
                 include_original_message: false,
             },
             audio: AudioConfig {
-                silence_threshold: 100,
+                silence_duration: 2.5,
                 noise_gate_threshold: 0.3,
                 noise_gate_hold_time: 0.20,
                 min_transcription_duration: 1.0,
@@ -374,7 +374,10 @@ requests_per_minute = 50
             config.openai.transcription_model,
             Config::default().openai.transcription_model
         );
-        // Removed fields (passthrough_enabled, passthrough_port) should be silently ignored
+        // Removed fields (passthrough_enabled, passthrough_port,
+        // silence_threshold) should be ignored. `Config::from_toml` gives a
+        // warning for silence_threshold.
+        assert_eq!(config.audio.silence_duration, 1.0);
     }
 
     // ===========================================================================
@@ -2755,11 +2758,16 @@ mod gui_tests {
     }
 
     /// Widths of the filled parts of the 10 point high meters in the frame
-    /// from `recording_frame`. The noise gate is closed and there are no
-    /// silent frames, so only the duration meter has a filled part.
+    /// from `recording_frame`. The noise gate is closed and there is no
+    /// quiet time, so only the duration meter has a filled part.
     fn duration_bar_fill_widths(recording_split: bool) -> Vec<f32> {
+        small_meter_fill_widths(&recording_frame(recording_split))
+    }
+
+    /// Widths of the filled parts of the 10 point high meters in `output`.
+    fn small_meter_fill_widths(output: &egui::FullOutput) -> Vec<f32> {
         let track = crate::theme::get_colors(Config::default().theme).meter_background;
-        recording_frame(recording_split)
+        output
             .shapes
             .iter()
             .filter_map(|clipped| match &clipped.shape {
@@ -2793,6 +2801,40 @@ mod gui_tests {
     fn test_whole_recording_below_the_minimum_half_fills_the_duration_bar() {
         // 0.5 s of the 1 s minimum fills half of the 200 point bar.
         assert_eq!(duration_bar_fill_widths(false), [100.0]);
+    }
+
+    // ===========================================================================
+    // Test: The silence line shows seconds
+    // ===========================================================================
+
+    /// One frame of the audio settings while a recording is in progress,
+    /// 0.5 s after the noise gate closed, with a silence duration of 2 s.
+    fn silence_frame() -> egui::FullOutput {
+        use std::sync::atomic::Ordering;
+
+        let (mut app, app_state) = test_app_with_state();
+        app.config_draft.audio.silence_duration = 2.0;
+        app_state.is_recording.store(true, Ordering::Relaxed);
+        app_state
+            .quiet_time
+            .store(0.5_f32.to_bits(), Ordering::Relaxed);
+        egui::Context::default().run(raw_input(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| app.audio_settings_ui(ui));
+        })
+    }
+
+    #[test]
+    fn test_silence_line_shows_the_seconds_of_silence_and_the_duration() {
+        let text = painted_text(&silence_frame());
+        assert!(text.contains(&"0.5s / 2.0s".to_string()), "{:?}", text);
+    }
+
+    #[test]
+    fn test_silence_bar_fills_by_seconds() {
+        // 0.5 s of the 2 s duration fills a quarter of the 200 point bar.
+        // The gate is closed and the duration is 0, so only the silence
+        // meter has a filled part.
+        assert_eq!(small_meter_fill_widths(&silence_frame()), [50.0]);
     }
 
     #[test]

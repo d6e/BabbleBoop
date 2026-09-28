@@ -21,7 +21,12 @@ pub const MAX_MESSAGE_CHUNKS_RANGE: RangeInclusive<usize> = 1..=10;
 // max_audio_files deletes saved recordings at the next recording.
 pub const REQUESTS_PER_MINUTE_RANGE: RangeInclusive<usize> = 1..=10000;
 pub const MAX_AUDIO_FILES_RANGE: RangeInclusive<usize> = 1..=10000;
-pub const SILENCE_THRESHOLD_RANGE: RangeInclusive<u32> = 1..=200;
+// Seconds of silence after the noise gate closes that end a recording. The
+// setting it replaces counted audio buffers from 1 to 200, about 0.01 to 2 s
+// with 10 ms buffers. The settings window shows the silence with one
+// decimal, so 0.1 s is the shortest value it can show. The silence is
+// recorded and uploaded, so the maximum of 10 s fills a third of a 30 s part.
+pub const SILENCE_DURATION_RANGE: RangeInclusive<f32> = 0.1..=10.0;
 pub const NOISE_GATE_THRESHOLD_RANGE: RangeInclusive<f32> = 0.0..=1.0;
 pub const NOISE_GATE_HOLD_TIME_RANGE: RangeInclusive<f32> = 0.0..=2.0;
 pub const MIN_TRANSCRIPTION_DURATION_RANGE: RangeInclusive<f32> = 0.0..=10.0;
@@ -111,9 +116,25 @@ impl Config {
     }
 
     /// Parse the text of a config file, with the replacements of `load`.
+    /// A key that `Config` does not have is ignored. A key that an earlier
+    /// version used gives a warning.
     pub fn from_toml(text: &str) -> Result<LoadedConfig, toml::de::Error> {
         let mut config: Config = toml::from_str(text)?;
-        let warnings = config.normalize();
+        let mut warnings = config.normalize();
+        let table: toml::Table = toml::from_str(text)?;
+        // Up to v0.5.0 the silence length was a number of audio buffers,
+        // and the buffer length depends on the device
+        let old_silence = table
+            .get("audio")
+            .and_then(|audio| audio.get("silence_threshold"));
+        if let Some(old) = old_silence {
+            warnings.push(ConfigWarning {
+                field: "audio.silence_threshold",
+                found: old.to_string(),
+                reason: "no longer used, audio.silence_duration in seconds replaces it".to_string(),
+                used: format!("audio.silence_duration = {}", config.audio.silence_duration),
+            });
+        }
         Ok(LoadedConfig { config, warnings })
     }
 
@@ -212,10 +233,11 @@ impl Config {
         );
 
         let audio = &mut self.audio;
-        w.clamp(
-            "audio.silence_threshold",
-            &mut audio.silence_threshold,
-            SILENCE_THRESHOLD_RANGE,
+        w.number(
+            "audio.silence_duration",
+            &mut audio.silence_duration,
+            SILENCE_DURATION_RANGE,
+            default.audio.silence_duration,
         );
         w.number(
             "audio.noise_gate_threshold",
@@ -406,7 +428,9 @@ impl Default for TranslationConfig {
 
 #[derive(Deserialize, Serialize, Clone, Debug, PartialEq)]
 pub struct AudioConfig {
-    pub silence_threshold: u32,
+    /// Seconds of input with the noise gate closed that end a recording
+    #[serde(default = "default_silence_duration")]
+    pub silence_duration: f32,
     pub noise_gate_threshold: f32,
     pub noise_gate_hold_time: f32,
     pub min_transcription_duration: f32,
@@ -415,12 +439,16 @@ pub struct AudioConfig {
 impl Default for AudioConfig {
     fn default() -> Self {
         Self {
-            silence_threshold: 100,
+            silence_duration: default_silence_duration(),
             noise_gate_threshold: 0.3,
             noise_gate_hold_time: 0.20,
             min_transcription_duration: 1.0,
         }
     }
+}
+
+fn default_silence_duration() -> f32 {
+    1.0
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug, PartialEq)]
@@ -472,10 +500,12 @@ min_transcription_duration = 1.0  # Minimum duration in seconds for transcriptio
 requests_per_minute = 50          # adjust based on your API limits, it should continue to record even while waiting
 "#;
 
-    /// The v0.5.0 config with the line of `key` replaced by `key = value`.
-    fn v0_5_0_with(key: &str, value: &str) -> String {
+    const EXAMPLE: &str = include_str!("../config.toml.example");
+
+    /// The example config with the line of `key` replaced by `key = value`.
+    fn example_with(key: &str, value: &str) -> String {
         let mut replaced = false;
-        let lines: Vec<String> = V0_5_0
+        let lines: Vec<String> = EXAMPLE
             .lines()
             .map(|line| {
                 if line.split('=').next().map(str::trim) == Some(key) {
@@ -490,21 +520,80 @@ requests_per_minute = 50          # adjust based on your API limits, it should c
         lines.join("\n")
     }
 
-    fn v0_5_0_config() -> Config {
-        toml::from_str(V0_5_0).unwrap()
+    fn example_config() -> Config {
+        toml::from_str(EXAMPLE).unwrap()
+    }
+
+    /// The warning for `audio.silence_threshold`, the setting of v0.5.0
+    /// that `audio.silence_duration` replaces.
+    fn old_silence_warning(found: &str, used: &str) -> ConfigWarning {
+        ConfigWarning {
+            field: "audio.silence_threshold",
+            found: found.to_string(),
+            reason: "no longer used, audio.silence_duration in seconds replaces it".to_string(),
+            used: format!("audio.silence_duration = {}", used),
+        }
     }
 
     #[test]
-    fn v0_5_0_config_loads_unchanged() {
+    fn v0_5_0_config_loads_with_a_warning_for_the_old_silence_setting() {
         let loaded = Config::from_toml(V0_5_0).unwrap();
-        assert_eq!(loaded.warnings, []);
-        assert_eq!(loaded.config, v0_5_0_config());
+        assert_eq!(loaded.warnings, [old_silence_warning("100", "1")]);
+        assert_eq!(loaded.config.audio.silence_duration, 1.0);
+        // Every other value as in the file
+        let mut expected: Config = toml::from_str(V0_5_0).unwrap();
+        expected.audio.silence_duration = 1.0;
+        assert_eq!(loaded.config, expected);
+    }
+
+    #[test]
+    fn old_silence_setting_warning_names_the_setting_in_use() {
+        let loaded = Config::from_toml(V0_5_0).unwrap();
+        assert_eq!(
+            loaded.warnings[0].to_string(),
+            "Config file: audio.silence_threshold = 100: no longer used, \
+            audio.silence_duration in seconds replaces it. BabbleBoop uses \
+            audio.silence_duration = 1. Click Save Settings to write it to the file."
+        );
+    }
+
+    #[test]
+    fn both_silence_settings_use_the_new_one_with_a_warning() {
+        let text = example_with("silence_duration", "2.5")
+            .replace("[audio]", "[audio]\nsilence_threshold = 40");
+        let loaded = Config::from_toml(&text).unwrap();
+        assert_eq!(loaded.config.audio.silence_duration, 2.5);
+        assert_eq!(loaded.warnings, [old_silence_warning("40", "2.5")]);
+    }
+
+    #[test]
+    fn old_silence_setting_warning_shows_the_replaced_new_value() {
+        let text = example_with("silence_duration", "nan")
+            .replace("[audio]", "[audio]\nsilence_threshold = 40");
+        let loaded = Config::from_toml(&text).unwrap();
+        assert_eq!(loaded.config.audio.silence_duration, 1.0);
+        let fields: Vec<&str> = loaded.warnings.iter().map(|w| w.field).collect();
+        assert_eq!(
+            fields,
+            ["audio.silence_duration", "audio.silence_threshold"]
+        );
+        assert_eq!(loaded.warnings[1], old_silence_warning("40", "1"));
+    }
+
+    #[test]
+    fn saved_config_does_not_keep_the_old_silence_setting() {
+        let loaded = Config::from_toml(V0_5_0).unwrap();
+        let saved = toml::to_string(&loaded.config).unwrap();
+        let reloaded = Config::from_toml(&saved).unwrap();
+        assert_eq!(reloaded.warnings, []);
+        assert_eq!(reloaded.config, loaded.config);
     }
 
     #[test]
     fn example_and_default_configs_load_without_warnings() {
-        let example = Config::from_toml(include_str!("../config.toml.example")).unwrap();
+        let example = Config::from_toml(EXAMPLE).unwrap();
         assert_eq!(example.warnings, []);
+        assert_eq!(example.config.audio.silence_duration, 1.0);
 
         let default = Config::default();
         let loaded = Config::from_toml(&toml::to_string(&default).unwrap()).unwrap();
@@ -581,16 +670,34 @@ requests_per_minute = 50          # adjust based on your API limits, it should c
         },
         // 0 stops every recording at the first quiet buffer
         BadValue {
-            field: "audio.silence_threshold",
-            key: "silence_threshold",
-            value: "0",
-            expect: |c| c.audio.silence_threshold = 1,
+            field: "audio.silence_duration",
+            key: "silence_duration",
+            value: "0.0",
+            expect: |c| c.audio.silence_duration = 0.1,
         },
         BadValue {
-            field: "audio.silence_threshold",
-            key: "silence_threshold",
-            value: "1000",
-            expect: |c| c.audio.silence_threshold = 200,
+            field: "audio.silence_duration",
+            key: "silence_duration",
+            value: "-2.0",
+            expect: |c| c.audio.silence_duration = 0.1,
+        },
+        BadValue {
+            field: "audio.silence_duration",
+            key: "silence_duration",
+            value: "60.0",
+            expect: |c| c.audio.silence_duration = 10.0,
+        },
+        BadValue {
+            field: "audio.silence_duration",
+            key: "silence_duration",
+            value: "nan",
+            expect: |c| c.audio.silence_duration = 1.0,
+        },
+        BadValue {
+            field: "audio.silence_duration",
+            key: "silence_duration",
+            value: "inf",
+            expect: |c| c.audio.silence_duration = 1.0,
         },
         // 0 deletes every saved recording
         BadValue {
@@ -732,8 +839,8 @@ requests_per_minute = 50          # adjust based on your API limits, it should c
     fn bad_values_load_as_usable_values_with_a_warning() {
         let mut failures = Vec::new();
         for bad in BAD_VALUES {
-            let loaded = Config::from_toml(&v0_5_0_with(bad.key, bad.value)).unwrap();
-            let mut expected = v0_5_0_config();
+            let loaded = Config::from_toml(&example_with(bad.key, bad.value)).unwrap();
+            let mut expected = example_config();
             (bad.expect)(&mut expected);
             let fields: Vec<&str> = loaded.warnings.iter().map(|w| w.field).collect();
             if loaded.config != expected || fields != [bad.field] {
@@ -749,8 +856,8 @@ requests_per_minute = 50          # adjust based on your API limits, it should c
     /// Values above the limits of earlier versions of the settings window
     /// (100 recordings, 120 requests per minute), as a user can have set
     /// them in the file.
-    fn v0_5_0_with_high_limits() -> LoadedConfig {
-        let text = v0_5_0_with("max_audio_files", "500")
+    fn example_with_high_limits() -> LoadedConfig {
+        let text = example_with("max_audio_files", "500")
             .replace("keep_audio_files = false", "keep_audio_files = true")
             .replace("requests_per_minute = 50", "requests_per_minute = 500");
         Config::from_toml(&text).unwrap()
@@ -758,7 +865,7 @@ requests_per_minute = 50          # adjust based on your API limits, it should c
 
     #[test]
     fn high_limits_load_unchanged() {
-        let loaded = v0_5_0_with_high_limits();
+        let loaded = example_with_high_limits();
         assert_eq!(loaded.warnings, []);
         assert_eq!(loaded.config.max_audio_files, 500);
         assert_eq!(loaded.config.rate_limit.requests_per_minute, 500);
@@ -766,7 +873,7 @@ requests_per_minute = 50          # adjust based on your API limits, it should c
 
     #[tokio::test]
     async fn more_than_100_saved_recordings_are_kept() {
-        let loaded = v0_5_0_with_high_limits();
+        let loaded = example_with_high_limits();
         let dir = std::env::temp_dir().join(format!(
             "babble_boop_more_than_100_recordings_{}",
             std::process::id()
@@ -790,7 +897,7 @@ requests_per_minute = 50          # adjust based on your API limits, it should c
 
     #[tokio::test(start_paused = true)]
     async fn more_than_120_requests_per_minute_do_not_wait() {
-        let loaded = v0_5_0_with_high_limits();
+        let loaded = example_with_high_limits();
         let mut limiter = RateLimiter::new(loaded.config.rate_limit.requests_per_minute);
 
         let start = tokio::time::Instant::now();
@@ -804,7 +911,7 @@ requests_per_minute = 50          # adjust based on your API limits, it should c
 
     #[test]
     fn warning_names_the_field_the_value_found_and_the_value_used() {
-        let loaded = Config::from_toml(&v0_5_0_with("display_time", "999999")).unwrap();
+        let loaded = Config::from_toml(&example_with("display_time", "999999")).unwrap();
         let message = loaded.warnings[0].to_string();
         for part in ["osc.display_time", "999999", "30000"] {
             assert!(message.contains(part), "{:?} not in {:?}", part, message);
@@ -813,7 +920,7 @@ requests_per_minute = 50          # adjust based on your API limits, it should c
 
     #[test]
     fn api_key_warning_does_not_show_the_key() {
-        let loaded = Config::from_toml(&v0_5_0_with("api_key", r#""sk-secret\n""#)).unwrap();
+        let loaded = Config::from_toml(&example_with("api_key", r#""sk-secret\n""#)).unwrap();
         assert_eq!(loaded.warnings.len(), 1);
         let message = loaded.warnings[0].to_string();
         assert!(!message.contains("sk-secret"), "{:?}", message);
@@ -821,7 +928,7 @@ requests_per_minute = 50          # adjust based on your API limits, it should c
 
     #[test]
     fn api_key_of_only_spaces_warning_says_the_key_is_blank() {
-        let loaded = Config::from_toml(&v0_5_0_with("api_key", r#""  \n""#)).unwrap();
+        let loaded = Config::from_toml(&example_with("api_key", r#""  \n""#)).unwrap();
         assert_eq!(loaded.config.openai.api_key, "");
         let used: Vec<&str> = loaded.warnings.iter().map(|w| w.used.as_str()).collect();
         assert_eq!(used, ["a blank text"]);
@@ -829,7 +936,7 @@ requests_per_minute = 50          # adjust based on your API limits, it should c
 
     #[tokio::test]
     async fn max_audio_files_zero_keeps_the_saved_recording() {
-        let text = v0_5_0_with("max_audio_files", "0")
+        let text = example_with("max_audio_files", "0")
             .replace("keep_audio_files = false", "keep_audio_files = true");
         let loaded = Config::from_toml(&text).unwrap();
         assert!(loaded.config.keep_audio_files);

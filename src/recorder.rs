@@ -33,8 +33,8 @@ pub struct RecorderSettings {
     pub noise_gate_threshold: f32,
     /// Seconds the gate stays open after the level drops below the threshold
     pub noise_gate_hold_time: f32,
-    /// Number of buffers with the gate closed that end a recording
-    pub silence_threshold: u32,
+    /// Seconds of input with the gate closed that end a recording
+    pub silence_duration: f32,
 }
 
 /// What the callback must pass on to the processing side.
@@ -57,7 +57,9 @@ pub enum RecorderEvent {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct RecorderStatus {
     pub is_recording: bool,
-    pub silent_frames: u32,
+    /// Seconds of input since the gate closed, 0 while it is open or when
+    /// not recording
+    pub quiet_time: f32,
     pub gate_open: bool,
     /// Seconds until the gate closes if the level stays low
     pub hold_remaining: f32,
@@ -113,7 +115,13 @@ impl NoiseGate {
 pub struct Recorder {
     gate: NoiseGate,
     is_recording: bool,
-    silent_frames: u32,
+    channels: usize,
+    sample_rate: u32,
+    /// Frames received since the gate closed. The recording ends when they
+    /// reach `silence_duration`. Counting frames, not buffers or clock
+    /// time, makes the silence as long as the setting with every buffer
+    /// size.
+    quiet_frames: usize,
     recording_start: Option<Instant>,
     samples: Vec<f32>,
     /// Whether `samples` holds a sample above the gate threshold
@@ -130,21 +138,32 @@ impl Recorder {
     pub fn for_stream(now: Instant, channels: u16, sample_rate: u32) -> Self {
         Self::new(
             now,
+            channels,
+            sample_rate,
             samples_in(INITIAL_RESERVE, channels, sample_rate),
             samples_in(MAX_RECORDING, channels, sample_rate),
         )
     }
 
-    /// `initial_samples` is the capacity a recording or part reserves when
-    /// it starts. `max_samples` is the length at which a recording is
-    /// split. It must be a whole number of frames, so that a split does not
-    /// fall inside a frame.
-    pub fn new(now: Instant, initial_samples: usize, max_samples: usize) -> Self {
+    /// `channels` and `sample_rate` give the length of the input in
+    /// seconds. `initial_samples` is the capacity a recording or part
+    /// reserves when it starts. `max_samples` is the length at which a
+    /// recording is split. It must be a whole number of frames, so that a
+    /// split does not fall inside a frame.
+    pub fn new(
+        now: Instant,
+        channels: u16,
+        sample_rate: u32,
+        initial_samples: usize,
+        max_samples: usize,
+    ) -> Self {
         let max_samples = max_samples.max(1);
         Recorder {
             gate: NoiseGate::new(now),
             is_recording: false,
-            silent_frames: 0,
+            channels: usize::from(channels.max(1)),
+            sample_rate: sample_rate.max(1),
+            quiet_frames: 0,
             recording_start: None,
             samples: Vec::new(),
             has_sound: false,
@@ -243,12 +262,12 @@ impl Recorder {
                 emit(RecorderEvent::Started);
             }
             self.record(data, loud, threshold, now, &mut emit);
-            self.silent_frames = 0;
+            self.quiet_frames = 0;
         } else if self.is_recording {
-            self.silent_frames += 1;
-            if self.silent_frames >= settings.silence_threshold {
+            self.quiet_frames += data.len() / self.channels;
+            if self.quiet_frames >= self.frames_in(settings.silence_duration) {
                 self.is_recording = false;
-                self.silent_frames = 0;
+                self.quiet_frames = 0;
                 self.recording_start = None;
                 let extent = if std::mem::take(&mut self.split) {
                     Extent::Part
@@ -272,10 +291,21 @@ impl Recorder {
         }
     }
 
+    /// Number of frames in `seconds` of input, to the nearest frame. f32
+    /// holds most decimal values only approximately: 0.7 is 0.69999999,
+    /// which is 13.99999 frames at 20 Hz, not 14. A value that is not a
+    /// number gives 0 frames: the recording then ends at the first quiet
+    /// buffer instead of never.
+    fn frames_in(&self, seconds: f32) -> usize {
+        let frames = (f64::from(seconds) * f64::from(self.sample_rate)).round();
+        // `as` saturates: NaN and negative values give 0
+        frames as usize
+    }
+
     pub fn status(&self, now: Instant) -> RecorderStatus {
         RecorderStatus {
             is_recording: self.is_recording,
-            silent_frames: self.silent_frames,
+            quiet_time: self.quiet_frames as f32 / self.sample_rate as f32,
             gate_open: self.gate.is_active,
             hold_remaining: self.gate.hold_remaining,
             recording_duration: self
@@ -295,12 +325,18 @@ mod tests {
     const SETTINGS: RecorderSettings = RecorderSettings {
         noise_gate_threshold: 0.1,
         noise_gate_hold_time: 0.5,
-        silence_threshold: 3,
+        silence_duration: 0.3,
     };
+    /// Buffers of 2 stereo frames at 20 Hz: 0.1 s each
+    const CHANNELS: u16 = 2;
+    const SAMPLE_RATE: u32 = 20;
     const LOUD: [f32; 4] = [0.0, 0.5, -0.5, 0.0];
     const QUIET: [f32; 4] = [0.0, 0.05, -0.05, 0.0];
-    /// Time between two buffers in these tests
+    /// Time between two buffers in these tests, the length of `LOUD` and
+    /// `QUIET`
     const BUFFER: Duration = Duration::from_millis(100);
+    /// Quiet buffers that end a recording with `SETTINGS`: 0.3 s
+    const QUIET_BUFFERS_TO_END: usize = 3;
 
     /// Feeds buffers to a recorder, one `BUFFER` apart, and keeps the events.
     struct Harness {
@@ -318,7 +354,9 @@ mod tests {
         /// recording or part starts with room for one buffer, so the
         /// buffer grows while it records.
         fn with_limit(max_samples: usize) -> Self {
-            Self::with_recorder(|now| Recorder::new(now, LOUD.len(), max_samples))
+            Self::with_recorder(|now| {
+                Recorder::new(now, CHANNELS, SAMPLE_RATE, LOUD.len(), max_samples)
+            })
         }
 
         fn with_recorder(recorder: impl FnOnce(Instant) -> Recorder) -> Self {
@@ -375,7 +413,7 @@ mod tests {
         h.feed(&LOUD);
         let status = h.feed(&QUIET);
         assert!(status.gate_open);
-        assert_eq!(status.silent_frames, 0);
+        assert_eq!(status.quiet_time, 0.0);
         let expected_hold = SETTINGS.noise_gate_hold_time - BUFFER.as_secs_f32();
         assert!((status.hold_remaining - expected_hold).abs() < 1e-4);
     }
@@ -388,13 +426,13 @@ mod tests {
         h.wait_past_hold();
         let first_silent = h.feed(&QUIET);
         assert!(!first_silent.gate_open);
-        assert_eq!(first_silent.silent_frames, 1);
+        assert_eq!(first_silent.quiet_time, BUFFER.as_secs_f32());
         assert!(first_silent.is_recording);
         h.feed(&QUIET);
         let ended = h.feed(&QUIET);
 
-        // The buffer that reaches the threshold is not recorded; the silent
-        // buffers before it are.
+        // The buffer that reaches the silence duration is not recorded; the
+        // quiet buffers before it are.
         let expected: Vec<f32> = [&LOUD[..], &QUIET, &QUIET, &QUIET].concat();
         assert_eq!(
             h.events,
@@ -404,19 +442,19 @@ mod tests {
             ]
         );
         assert!(!ended.is_recording);
-        assert_eq!(ended.silent_frames, 0);
+        assert_eq!(ended.quiet_time, 0.0);
         assert_eq!(ended.recording_duration, 0.0);
     }
 
     #[test]
-    fn test_sound_during_the_silence_count_resets_it() {
+    fn test_sound_during_the_silence_resets_the_quiet_time() {
         let mut h = Harness::new();
         h.feed(&LOUD);
         h.wait_past_hold();
         h.feed(&QUIET);
         h.feed(&QUIET);
         let status = h.feed(&LOUD);
-        assert_eq!(status.silent_frames, 0);
+        assert_eq!(status.quiet_time, 0.0);
         h.wait_past_hold();
         h.feed(&QUIET);
         h.feed(&QUIET);
@@ -441,12 +479,12 @@ mod tests {
         let mut h = Harness::new();
         h.feed(&LOUD);
         h.wait_past_hold();
-        for _ in 0..SETTINGS.silence_threshold {
+        for _ in 0..QUIET_BUFFERS_TO_END {
             h.feed(&QUIET);
         }
         h.feed(&LOUD);
         h.wait_past_hold();
-        for _ in 0..SETTINGS.silence_threshold {
+        for _ in 0..QUIET_BUFFERS_TO_END {
             h.feed(&QUIET);
         }
         let second: Vec<f32> = [&LOUD[..], &QUIET, &QUIET].concat();
@@ -477,7 +515,7 @@ mod tests {
         assert!(status.split);
 
         h.wait_past_hold();
-        for _ in 0..SETTINGS.silence_threshold {
+        for _ in 0..QUIET_BUFFERS_TO_END {
             h.feed(&QUIET);
         }
         let last: Vec<f32> = [&LOUD[..], &QUIET, &QUIET].concat();
@@ -492,12 +530,12 @@ mod tests {
             h.feed(&LOUD);
         }
         h.wait_past_hold();
-        for _ in 0..SETTINGS.silence_threshold {
+        for _ in 0..QUIET_BUFFERS_TO_END {
             h.feed(&QUIET);
         }
         assert!(!h.feed(&LOUD).split);
         h.wait_past_hold();
-        for _ in 0..SETTINGS.silence_threshold {
+        for _ in 0..QUIET_BUFFERS_TO_END {
             h.feed(&QUIET);
         }
         let last = [&LOUD[..], &QUIET, &QUIET].concat();
@@ -521,7 +559,7 @@ mod tests {
             h.feed(&LOUD);
         }
         h.wait_past_hold();
-        for _ in 0..SETTINGS.silence_threshold {
+        for _ in 0..QUIET_BUFFERS_TO_END {
             h.feed(&QUIET);
         }
         let first: Vec<f32> = [&LOUD[..], &LOUD, &LOUD, &LOUD[..2]].concat();
@@ -563,7 +601,7 @@ mod tests {
             h.feed(&LOUD);
         }
         h.wait_past_hold();
-        for _ in 0..SETTINGS.silence_threshold {
+        for _ in 0..QUIET_BUFFERS_TO_END {
             h.feed(&QUIET);
         }
         assert_eq!(
@@ -587,7 +625,7 @@ mod tests {
         }
         h.feed(&loud_start);
         h.wait_past_hold();
-        for _ in 0..SETTINGS.silence_threshold {
+        for _ in 0..QUIET_BUFFERS_TO_END {
             h.feed(&QUIET);
         }
         let first: Vec<f32> = [&LOUD[..], &LOUD, &LOUD, &loud_start[..2]].concat();
@@ -605,7 +643,7 @@ mod tests {
     fn test_a_quiet_part_of_a_long_pause_is_not_sent() {
         // A pause longer than a part
         let patient = RecorderSettings {
-            silence_threshold: 10,
+            silence_duration: 1.0,
             ..SETTINGS
         };
         let mut h = Harness::with_limit(2 * LOUD.len());
@@ -620,7 +658,8 @@ mod tests {
         assert_eq!(status.recording_duration, 0.0);
         h.feed_with(&LOUD, &patient);
         h.wait_past_hold();
-        for _ in 0..patient.silence_threshold {
+        // 1 s of quiet buffers
+        for _ in 0..10 {
             h.feed_with(&QUIET, &patient);
         }
         assert_eq!(
@@ -690,14 +729,15 @@ mod tests {
         }
         h.wait_past_hold();
         let quiet = vec![0.0; buffer_len];
-        for _ in 0..SETTINGS.silence_threshold {
+        for _ in 0..per_second {
             h.feed(&quiet);
-        }
-        // The buffer that ends the recording is not recorded
-        for _ in 1..SETTINGS.silence_threshold {
+            if matches!(h.events.last(), Some(RecorderEvent::Ended(..))) {
+                return (fed, growths);
+            }
+            // The buffer that ends the recording is not recorded
             fed.extend_from_slice(&quiet);
         }
-        (fed, growths)
+        panic!("the recording did not end");
     }
 
     fn short_recording_reserves_about_five_seconds(channels: u16, sample_rate: u32) {
@@ -804,7 +844,7 @@ mod tests {
 
     fn end_after_long_hold(h: &mut Harness) {
         h.now += Duration::from_secs(3);
-        for _ in 0..LONG_HOLD.silence_threshold {
+        for _ in 0..QUIET_BUFFERS_TO_END {
             h.feed_with(&QUIET, &LONG_HOLD);
         }
     }
@@ -852,5 +892,130 @@ mod tests {
         };
         assert_eq!(samples, &last);
         assert!(samples.capacity() <= 2 * last.len());
+    }
+
+    /// Record loud input from a stream, then feed quiet buffers of
+    /// `buffer_frames` frames until the recording ends. Returns the number
+    /// of quiet frames fed, with the buffer that ended the recording.
+    fn quiet_frames_that_end_a_recording(
+        channels: u16,
+        sample_rate: u32,
+        buffer_frames: usize,
+        silence_duration: f32,
+    ) -> usize {
+        // The gate closes at the first quiet buffer
+        let settings = RecorderSettings {
+            noise_gate_hold_time: 0.0,
+            silence_duration,
+            ..SETTINGS
+        };
+        let buffer_len = buffer_frames * usize::from(channels);
+        let mut h = Harness::with_recorder(|now| Recorder::for_stream(now, channels, sample_rate));
+        h.feed_with(&loud_samples(0, buffer_len), &settings);
+        let quiet = vec![0.0; buffer_len];
+        let mut frames = 0;
+        while !matches!(h.events.last(), Some(RecorderEvent::Ended(..))) {
+            assert!(frames < 20 * sample_rate as usize, "no end after 20 s");
+            h.feed_with(&quiet, &settings);
+            frames += buffer_frames;
+        }
+        frames
+    }
+
+    /// The recording ends with the buffer during which the quiet input
+    /// reaches the silence duration, whatever the buffer size, sample rate
+    /// and channel count. The harness clock moves 0.1 s per buffer, so the
+    /// end does not come from the clock.
+    #[test]
+    fn test_silence_duration_is_the_same_with_every_buffer_size() {
+        // Channels, sample rate, silence duration, and its frames
+        let streams = [
+            (2, 48_000, 1.0, 48_000),
+            (2, 48_000, 0.3, 14_400),
+            (1, 44_100, 1.0, 44_100),
+            (1, 44_100, 0.3, 13_230),
+        ];
+        for (channels, sample_rate, silence_duration, expected) in streams {
+            for buffer_frames in [480, 441, 1024] {
+                let fed = quiet_frames_that_end_a_recording(
+                    channels,
+                    sample_rate,
+                    buffer_frames,
+                    silence_duration,
+                );
+                assert!(
+                    fed >= expected && fed - buffer_frames < expected,
+                    "{channels} channels, {sample_rate} Hz, {buffer_frames} frame buffers, \
+                    {silence_duration} s: ended after {fed} quiet frames, not with the \
+                    buffer that reaches {expected}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_silence_duration_is_rounded_to_the_nearest_frame() {
+        // 0.7 in f32 is 0.69999999, so 0.7 s at 20 Hz is 13.99999 frames.
+        // Buffers of one frame end the recording at the 14th.
+        let settings = RecorderSettings {
+            silence_duration: 0.7,
+            noise_gate_hold_time: 0.0,
+            ..SETTINGS
+        };
+        let mut h = Harness::new();
+        h.feed_with(&LOUD, &settings);
+        for _ in 0..13 {
+            h.feed_with(&QUIET[..2], &settings);
+        }
+        assert_eq!(h.events, vec![RecorderEvent::Started]);
+        h.feed_with(&QUIET[..2], &settings);
+        assert!(matches!(h.events.last(), Some(RecorderEvent::Ended(..))));
+    }
+
+    #[test]
+    fn test_quiet_time_shows_the_seconds_of_quiet_input() {
+        let mut h = Harness::with_recorder(|now| Recorder::for_stream(now, 2, 48_000));
+        let settings = RecorderSettings {
+            noise_gate_hold_time: 0.0,
+            ..SETTINGS
+        };
+        h.feed_with(&[0.5; 2 * 4800], &settings);
+        // 0.1 s and 0.15 s of quiet stereo input
+        h.feed_with(&[0.0; 2 * 4800], &settings);
+        let status = h.feed_with(&[0.0; 2 * 7200], &settings);
+        assert!(status.is_recording);
+        assert_eq!(status.quiet_time, 0.25);
+    }
+
+    #[test]
+    fn test_a_changed_silence_duration_applies_to_the_silence_in_progress() {
+        let mut h = Harness::new();
+        let patient = RecorderSettings {
+            silence_duration: 1.0,
+            ..SETTINGS
+        };
+        h.feed(&LOUD);
+        h.wait_past_hold();
+        h.feed(&QUIET);
+        h.feed(&QUIET);
+        // 0.3 s of silence does not end the recording with 1 s set
+        assert!(h.feed_with(&QUIET, &patient).is_recording);
+        assert_eq!(h.events, vec![RecorderEvent::Started]);
+        // The shorter duration ends it at the next quiet buffer
+        assert!(!h.feed(&QUIET).is_recording);
+        let expected = [&LOUD[..], &QUIET, &QUIET, &QUIET].concat();
+        assert_eq!(h.events[1], RecorderEvent::Ended(expected, Extent::Whole));
+    }
+
+    #[test]
+    fn test_a_silence_duration_that_is_not_a_number_ends_at_the_first_quiet_buffer() {
+        let mut h = Harness::new();
+        let broken = RecorderSettings {
+            silence_duration: f32::NAN,
+            ..SETTINGS
+        };
+        h.feed_with(&LOUD, &broken);
+        h.wait_past_hold();
+        assert!(!h.feed_with(&QUIET, &broken).is_recording);
     }
 }

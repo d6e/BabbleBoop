@@ -19,7 +19,8 @@ pub struct SharedAudioState {
     pub test_mode_active: Arc<AtomicBool>,
     pub test_recording_buffer: Arc<Mutex<Vec<f32>>>,
     pub is_recording: Arc<AtomicBool>,
-    pub silent_frames: Arc<AtomicU32>,
+    /// Seconds of quiet input in the recording (f32 stored as bits)
+    pub quiet_time: Arc<AtomicU32>,
     pub noise_gate_active: Arc<AtomicBool>,
     pub noise_gate_hold_remaining: Arc<AtomicU32>,
     pub recording_duration: Arc<AtomicU32>,
@@ -34,7 +35,7 @@ impl SharedAudioState {
             test_mode_active: Arc::clone(&app_state.test_mode_active),
             test_recording_buffer: Arc::clone(&app_state.test_recording_buffer),
             is_recording: Arc::clone(&app_state.is_recording),
-            silent_frames: Arc::clone(&app_state.silent_frames),
+            quiet_time: Arc::clone(&app_state.quiet_time),
             noise_gate_active: Arc::clone(&app_state.noise_gate_active),
             noise_gate_hold_remaining: Arc::clone(&app_state.noise_gate_hold_remaining),
             recording_duration: Arc::clone(&app_state.recording_duration),
@@ -46,7 +47,7 @@ impl SharedAudioState {
         RecorderSettings {
             noise_gate_threshold: self.audio_params.get_noise_gate_threshold(),
             noise_gate_hold_time: self.audio_params.get_noise_gate_hold_time(),
-            silence_threshold: self.audio_params.get_silence_threshold(),
+            silence_duration: self.audio_params.get_silence_duration(),
         }
     }
 
@@ -57,8 +58,8 @@ impl SharedAudioState {
             .store(status.hold_remaining.to_bits(), Ordering::Relaxed);
         self.is_recording
             .store(status.is_recording, Ordering::Relaxed);
-        self.silent_frames
-            .store(status.silent_frames, Ordering::Relaxed);
+        self.quiet_time
+            .store(status.quiet_time.to_bits(), Ordering::Relaxed);
         self.recording_duration
             .store(status.recording_duration.to_bits(), Ordering::Relaxed);
         self.recording_split.store(status.split, Ordering::Relaxed);
@@ -353,6 +354,8 @@ mod tests {
 
     const LOUD: [f32; 4] = [0.0, 0.5, -0.5, 0.0];
     const QUIET: [f32; 4] = [0.0, 0.05, -0.05, 0.0];
+    /// Two buffers of `QUIET`: 4 stereo frames at 48 kHz
+    const TWO_QUIET_BUFFERS: f32 = 4.0 / 48_000.0;
 
     struct Setup {
         app_state: AppState,
@@ -367,14 +370,14 @@ mod tests {
     }
 
     impl Setup {
-        /// A stereo 48 kHz handler whose recording ends after two silent
+        /// A stereo 48 kHz handler whose recording ends after two quiet
         /// buffers, with events queued in a channel of `capacity`.
         fn new(capacity: usize) -> Self {
             let (cmd_tx, cmd_rx) = mpsc::channel(1);
             let (log_tx, log_rx) = mpsc::channel(10);
             let app_state = AppState::new(Config::default(), cmd_tx, log_tx);
             app_state.audio_params.update(&AudioConfig {
-                silence_threshold: 2,
+                silence_duration: TWO_QUIET_BUFFERS,
                 noise_gate_threshold: 0.1,
                 noise_gate_hold_time: 0.0,
                 min_transcription_duration: 0.0,
@@ -455,10 +458,35 @@ mod tests {
         assert!(s.app_state.is_recording.load(Ordering::Relaxed));
         assert!(s.app_state.noise_gate_active.load(Ordering::Relaxed));
         s.feed(&QUIET);
-        assert_eq!(s.app_state.silent_frames.load(Ordering::Relaxed), 1);
+        let quiet_time = f32::from_bits(s.app_state.quiet_time.load(Ordering::Relaxed));
+        assert_eq!(quiet_time, 2.0 / 48_000.0);
         assert!(!s.app_state.noise_gate_active.load(Ordering::Relaxed));
         let level = f32::from_bits(s.app_state.current_audio_level.load(Ordering::Relaxed));
         assert_eq!(level, 0.05);
+    }
+
+    #[test]
+    fn test_a_changed_silence_duration_applies_to_the_recording_in_progress() {
+        let mut s = Setup::new(10);
+        let mut audio = AudioConfig {
+            silence_duration: 1.0,
+            noise_gate_threshold: 0.1,
+            noise_gate_hold_time: 0.0,
+            min_transcription_duration: 0.0,
+        };
+        s.feed(&LOUD);
+        s.app_state.audio_params.update(&audio);
+        for _ in 0..3 {
+            s.feed(&QUIET);
+        }
+        assert!(s.app_state.is_recording.load(Ordering::Relaxed));
+        // Saved settings with a shorter duration: the next quiet buffer
+        // makes 8 quiet frames, more than 4
+        audio.silence_duration = TWO_QUIET_BUFFERS;
+        s.app_state.audio_params.update(&audio);
+        s.feed(&QUIET);
+        assert!(!s.app_state.is_recording.load(Ordering::Relaxed));
+        assert_eq!(s.events().last(), Some(&AudioEvent::StopRecording));
     }
 
     #[test]
