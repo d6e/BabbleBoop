@@ -208,6 +208,22 @@ const OPENAI_MODELS: &[&str] = &[
 
 const TRANSCRIPTION_MODELS: &[&str] = &["whisper-1", "gpt-4o-transcribe", "gpt-4o-mini-transcribe"];
 
+/// Text field for a model name, with a list of suggested models next to it.
+/// The config takes any model name, for example a new or fine-tuned model.
+fn model_name_edit(ui: &mut egui::Ui, id_salt: &str, model: &mut String, presets: &[&str]) {
+    ui.horizontal(|ui| {
+        ui.add(egui::TextEdit::singleline(model).desired_width(150.0));
+        egui::ComboBox::from_id_salt(id_salt)
+            .selected_text("")
+            .width(0.0)
+            .show_ui(ui, |ui| {
+                for preset in presets {
+                    ui.selectable_value(model, preset.to_string(), *preset);
+                }
+            });
+    });
+}
+
 /// Custom toggle switch widget
 fn toggle_switch<'a>(on: &'a mut bool, colors: &'a AppColors) -> impl egui::Widget + 'a {
     move |ui: &mut egui::Ui| {
@@ -248,7 +264,7 @@ fn toggle_switch<'a>(on: &'a mut bool, colors: &'a AppColors) -> impl egui::Widg
 
 pub struct BabbleBoopApp {
     app_state: Arc<AppState>,
-    config_draft: Config,
+    pub(crate) config_draft: Config,
     saved_config: Config,
     status_message: Option<(String, StatusType, std::time::Instant)>,
     log_rx: mpsc::Receiver<LogEntry>,
@@ -637,19 +653,15 @@ impl BabbleBoopApp {
                             );
                             ui.end_row();
 
-                            ui.label("Model:")
-                                .on_hover_text("OpenAI model for translation (gpt-4o recommended)");
-                            egui::ComboBox::from_id_salt("model_combo")
-                                .selected_text(&self.config_draft.openai.model)
-                                .show_ui(ui, |ui| {
-                                    for model in OPENAI_MODELS {
-                                        ui.selectable_value(
-                                            &mut self.config_draft.openai.model,
-                                            model.to_string(),
-                                            *model,
-                                        );
-                                    }
-                                });
+                            ui.label("Model:").on_hover_text(
+                                "OpenAI model for translation. Type a model name, or select one from the list.",
+                            );
+                            model_name_edit(
+                                ui,
+                                "model_presets",
+                                &mut self.config_draft.openai.model,
+                                OPENAI_MODELS,
+                            );
                             ui.end_row();
 
                             ui.label("Transcription:")

@@ -1054,4 +1054,102 @@ mod gui_tests {
             assert_eq!(is_light(toggle[0]), window_is_light, "{:?} theme", theme);
         }
     }
+
+    // ===========================================================================
+    // Test: The translation model takes a custom name
+    // ===========================================================================
+
+    /// Centre of the first painted text that reads `text`.
+    fn text_center(output: &egui::FullOutput, text: &str) -> egui::Pos2 {
+        output
+            .shapes
+            .iter()
+            .find_map(|clipped| match &clipped.shape {
+                egui::Shape::Text(shape) if shape.galley.text() == text => {
+                    Some(egui::Rect::from_min_size(shape.pos, shape.galley.size()).center())
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("no painted text {:?}", text))
+    }
+
+    fn with_events(events: Vec<egui::Event>) -> egui::RawInput {
+        egui::RawInput {
+            events,
+            ..raw_input()
+        }
+    }
+
+    #[test]
+    fn test_custom_translation_model_can_be_typed() {
+        let (mut app, _log_tx) = test_app();
+        let ctx = egui::Context::default();
+        let mut output = ctx.run(raw_input(), |ctx| app.ui(ctx));
+        for _ in 0..2 {
+            output = ctx.run(raw_input(), |ctx| app.ui(ctx));
+        }
+        let model = text_center(&output, &Config::default().openai.model);
+
+        click(&ctx, &mut app, model);
+        let select_all = egui::Event::Key {
+            key: egui::Key::A,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::COMMAND,
+        };
+        let typed = egui::Event::Text("my-finetuned-model".to_string());
+        let _ = ctx.run(with_events(vec![select_all, typed]), |ctx| app.ui(ctx));
+
+        assert_eq!(app.config_draft.openai.model, "my-finetuned-model");
+    }
+
+    #[test]
+    fn test_translation_model_preset_can_be_selected() {
+        let (mut app, _log_tx) = test_app();
+        app.config_draft.openai.model = "my-finetuned-model".to_string();
+        let ctx = egui::Context::default();
+        let mut output = ctx.run(raw_input(), |ctx| app.ui(ctx));
+        for _ in 0..2 {
+            output = ctx.run(raw_input(), |ctx| app.ui(ctx));
+        }
+        let model = text_center(&output, "my-finetuned-model");
+        // The preset list button is the next widget right of the text field.
+        let list_button = output
+            .shapes
+            .iter()
+            .filter_map(|clipped| match &clipped.shape {
+                egui::Shape::Rect(rect)
+                    if rect.rect.x_range().min > model.x
+                        && rect.rect.y_range().contains(model.y) =>
+                {
+                    Some(rect.rect)
+                }
+                _ => None,
+            })
+            .min_by(|a, b| a.min.x.total_cmp(&b.min.x))
+            .expect("no preset list button")
+            .center();
+
+        click(&ctx, &mut app, list_button);
+        let output = ctx.run(raw_input(), |ctx| app.ui(ctx));
+        click(&ctx, &mut app, text_center(&output, "gpt-4o"));
+
+        assert_eq!(app.config_draft.openai.model, "gpt-4o");
+    }
+
+    /// Press and release the primary button at `pos`, in two frames.
+    fn click(ctx: &egui::Context, app: &mut BabbleBoopApp, pos: egui::Pos2) {
+        let button = |pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        let _ = ctx.run(
+            with_events(vec![egui::Event::PointerMoved(pos), button(true)]),
+            |ctx| app.ui(ctx),
+        );
+        let _ = ctx.run(with_events(vec![button(false)]), |ctx| app.ui(ctx));
+    }
 }
