@@ -3,6 +3,7 @@
 
 use crate::app_state::Logger;
 use crate::config::Config;
+use crate::models;
 use crate::price_estimator::PriceEstimator;
 use crate::rate_limiter::RateLimiter;
 use crate::recording_manager::RecordingManager;
@@ -21,7 +22,7 @@ pub struct ProcessingServices {
 
 impl ProcessingServices {
     pub fn new(config: &Config, logger: &Logger) -> Self {
-        log_unknown_pricing(config, logger);
+        log_model_warnings(config, logger);
         Self {
             rate_limiter: RateLimiter::new(config.rate_limit.requests_per_minute),
             price_estimator: PriceEstimator::new(
@@ -40,15 +41,17 @@ impl ProcessingServices {
         self.price_estimator
             .set_models(&config.openai.model, &config.openai.transcription_model);
         self.recording_manager = recording_manager(config);
-        log_unknown_pricing(config, logger);
+        log_model_warnings(config, logger);
     }
 }
 
-/// Tell the user when the cost display cannot be accurate. The GUI accepts
-/// any model name.
-fn log_unknown_pricing(config: &Config, logger: &Logger) {
-    for warning in
-        PriceEstimator::unknown_pricing(&config.openai.model, &config.openai.transcription_model)
+/// Tell the user when a model is scheduled to shut down, or when the cost
+/// display cannot be accurate. The GUI accepts any model name.
+fn log_model_warnings(config: &Config, logger: &Logger) {
+    let (model, transcription_model) = (&config.openai.model, &config.openai.transcription_model);
+    for warning in models::shutdown_warnings(model, transcription_model)
+        .into_iter()
+        .chain(PriceEstimator::unknown_pricing(model, transcription_model))
     {
         logger.info(warning);
     }

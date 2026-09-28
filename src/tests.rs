@@ -662,6 +662,47 @@ requests_per_minute = 50
     }
 
     #[test]
+    fn test_model_shutdown_date_is_logged_at_start_and_on_save() {
+        use crate::processing_loop::ProcessingServices;
+
+        let mut config = Config::default();
+        config.openai.model = "gpt-3.5-turbo".to_string();
+        let entries = entries_logged_by(|logger| {
+            ProcessingServices::new(&config, logger);
+        });
+        assert_eq!(entries.len(), 1, "{:?}", entries);
+        for text in ["'gpt-3.5-turbo'", "2026-10-23", "gpt-5.6-terra"] {
+            assert!(entries[0].message.contains(text), "{:?}", entries[0]);
+        }
+
+        let mut services = ProcessingServices::new(&Config::default(), &test_logger());
+        config.openai.model = Config::default().openai.model;
+        config.openai.transcription_model = "whisper-1".to_string();
+        let entries = entries_logged_by(|logger| services.apply_config(&config, logger));
+        assert_eq!(entries.len(), 1, "{:?}", entries);
+        for text in ["'whisper-1'", "2027-02-26", "gpt-transcribe"] {
+            assert!(entries[0].message.contains(text), "{:?}", entries[0]);
+        }
+    }
+
+    #[test]
+    fn test_suggested_models_are_not_scheduled_to_shut_down() {
+        use crate::processing_loop::ProcessingServices;
+
+        for model in crate::models::suggested_chat_models() {
+            for transcription_model in crate::models::suggested_transcription_models() {
+                let mut config = Config::default();
+                config.openai.model = model.to_string();
+                config.openai.transcription_model = transcription_model.to_string();
+                let entries = entries_logged_by(|logger| {
+                    ProcessingServices::new(&config, logger);
+                });
+                assert!(entries.is_empty(), "{:?}", entries);
+            }
+        }
+    }
+
+    #[test]
     fn test_known_model_pricing_is_not_logged() {
         use crate::processing_loop::ProcessingServices;
 

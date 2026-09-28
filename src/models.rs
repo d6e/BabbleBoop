@@ -4,8 +4,17 @@
 //! prices and no extra request options.
 //!
 //! Source: developers.openai.com, checked 2026-09-28. Prices from
-//! /api/docs/pricing (Standard tier, short context), reasoning effort
-//! support from each model page under /api/docs/models.
+//! /api/docs/pricing (Standard tier, short context), shutdown dates and
+//! replacements from /api/docs/deprecations, reasoning effort support from
+//! each model page under /api/docs/models.
+
+/// Scheduled removal of a model from the API.
+pub struct Shutdown {
+    /// Shutdown date as YYYY-MM-DD.
+    pub date: &'static str,
+    /// Model that OpenAI recommends instead.
+    pub replacement: &'static str,
+}
 
 /// Message role for the translation instructions.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -33,6 +42,7 @@ pub struct ChatModel {
     pub reasoning_effort: Option<&'static str>,
     /// Shown in the model list of the settings.
     pub suggested: bool,
+    pub shutdown: Option<Shutdown>,
 }
 
 /// A model for the audio transcriptions API.
@@ -42,6 +52,7 @@ pub struct TranscriptionModel {
     pub price_per_minute: f64,
     /// Shown in the model list of the settings.
     pub suggested: bool,
+    pub shutdown: Option<Shutdown>,
 }
 
 const fn chat(
@@ -59,6 +70,22 @@ const fn chat(
         instructions_role,
         reasoning_effort,
         suggested,
+        shutdown: None,
+    }
+}
+
+/// Row of `CHAT_MODELS` for a GPT-4.1, GPT-4o or older model that is
+/// scheduled to shut down.
+const fn retiring_chat(
+    name: &'static str,
+    input_price: f64,
+    output_price: f64,
+    date: &'static str,
+    replacement: &'static str,
+) -> ChatModel {
+    ChatModel {
+        shutdown: Some(Shutdown { date, replacement }),
+        ..chat(name, input_price, output_price, System, None, false)
     }
 }
 
@@ -69,6 +96,7 @@ use InstructionsRole::{Developer, System};
 pub const DEFAULT_CHAT_MODEL: ChatModel =
     chat("gpt-6-luna", 0.10, 0.50, Developer, Some("none"), true);
 
+#[rustfmt::skip]
 pub const CHAT_MODELS: &[ChatModel] = &[
     // GPT-6 Luna (the default) and Sol support reasoning effort `none`.
     DEFAULT_CHAT_MODEL,
@@ -82,17 +110,17 @@ pub const CHAT_MODELS: &[ChatModel] = &[
     chat("gpt-5.6-sol", 4.00, 20.00, Developer, None, false),
     chat("gpt-4.1", 2.00, 8.00, System, None, false),
     chat("gpt-4.1-mini", 0.40, 1.60, System, None, true),
-    chat("gpt-4.1-nano", 0.10, 0.40, System, None, false),
+    retiring_chat("gpt-4.1-nano", 0.10, 0.40, "2026-10-23", "gpt-5.6-luna"),
     chat("gpt-4o", 2.50, 10.00, System, None, false),
-    chat("gpt-4o-2024-05-13", 5.00, 15.00, System, None, false),
+    retiring_chat("gpt-4o-2024-05-13", 5.00, 15.00, "2026-10-23", "gpt-5.6-sol"),
     chat("gpt-4o-mini", 0.15, 0.60, System, None, true),
-    chat("gpt-4-turbo", 10.00, 30.00, System, None, false),
-    chat("gpt-4-turbo-2024-04-09", 10.00, 30.00, System, None, false),
-    chat("gpt-4", 30.00, 60.00, System, None, false),
-    chat("gpt-4-0613", 30.00, 60.00, System, None, false),
-    chat("gpt-3.5-turbo", 0.50, 1.50, System, None, false),
-    chat("gpt-3.5-turbo-0125", 0.50, 1.50, System, None, false),
-    chat("gpt-3.5-turbo-1106", 1.00, 2.00, System, None, false),
+    retiring_chat("gpt-4-turbo", 10.00, 30.00, "2026-10-23", "gpt-5.6-sol"),
+    retiring_chat("gpt-4-turbo-2024-04-09", 10.00, 30.00, "2026-10-23", "gpt-5.6-sol"),
+    retiring_chat("gpt-4", 30.00, 60.00, "2026-10-23", "gpt-5.6-sol"),
+    retiring_chat("gpt-4-0613", 30.00, 60.00, "2026-10-23", "gpt-5.6-sol"),
+    retiring_chat("gpt-3.5-turbo", 0.50, 1.50, "2026-10-23", "gpt-5.6-terra"),
+    retiring_chat("gpt-3.5-turbo-0125", 0.50, 1.50, "2026-10-23", "gpt-5.6-terra"),
+    retiring_chat("gpt-3.5-turbo-1106", 1.00, 2.00, "2026-09-28", "gpt-5.6-terra"),
 ];
 
 const fn transcription(
@@ -104,6 +132,7 @@ const fn transcription(
         name,
         price_per_minute,
         suggested,
+        shutdown: None,
     }
 }
 
@@ -112,11 +141,22 @@ const fn transcription(
 pub const DEFAULT_TRANSCRIPTION_MODEL: TranscriptionModel =
     transcription("gpt-transcribe", 0.0045, true);
 
+/// Row of `TRANSCRIPTION_MODELS` for a model that shuts down on 2027-02-26.
+const fn retiring_transcription(name: &'static str, price_per_minute: f64) -> TranscriptionModel {
+    TranscriptionModel {
+        shutdown: Some(Shutdown {
+            date: "2027-02-26",
+            replacement: DEFAULT_TRANSCRIPTION_MODEL.name,
+        }),
+        ..transcription(name, price_per_minute, false)
+    }
+}
+
 pub const TRANSCRIPTION_MODELS: &[TranscriptionModel] = &[
     DEFAULT_TRANSCRIPTION_MODEL,
-    transcription("gpt-4o-mini-transcribe", 0.003, false),
-    transcription("gpt-4o-transcribe", 0.006, false),
-    transcription("whisper-1", 0.006, false),
+    retiring_transcription("gpt-4o-mini-transcribe", 0.003),
+    retiring_transcription("gpt-4o-transcribe", 0.006),
+    retiring_transcription("whisper-1", 0.006),
 ];
 
 pub fn chat_model(name: &str) -> Option<&'static ChatModel> {
@@ -143,4 +183,27 @@ pub fn suggested_transcription_models() -> Vec<&'static str> {
         .filter(|model| model.suggested)
         .map(|model| model.name)
         .collect()
+}
+
+/// A warning for each model that is scheduled to shut down, for the
+/// activity log. The warning gives the date and does not compare it with
+/// today, so it also shows after the date, when requests fail.
+pub fn shutdown_warnings(model: &str, transcription_model: &str) -> Vec<String> {
+    let chat = chat_model(model).and_then(|known| known.shutdown.as_ref());
+    let transcription =
+        self::transcription_model(transcription_model).and_then(|known| known.shutdown.as_ref());
+    [
+        ("Model", model, chat),
+        ("Transcription model", transcription_model, transcription),
+    ]
+    .into_iter()
+    .filter_map(|(kind, name, shutdown)| {
+        shutdown.map(|shutdown| {
+            format!(
+                "{} '{}' has an OpenAI shutdown date of {}. Use {} instead.",
+                kind, name, shutdown.date, shutdown.replacement
+            )
+        })
+    })
+    .collect()
 }
