@@ -527,7 +527,7 @@ impl BabbleBoopApp {
                         egui::RichText::new(format!("${:.4}", total_cost))
                             .color(colors.cost_text)
                             .small()
-                    ).on_hover_text("Total API cost this session");
+                    ).on_hover_text("Estimated API cost of all sessions. The total is saved in total_cost.txt.");
                 });
             });
             if let Some(e) = toggle_error {
