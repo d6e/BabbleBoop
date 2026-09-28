@@ -1,5 +1,6 @@
 use crate::config::OpenAiConfig;
 use crate::models::{self, InstructionsRole};
+use crate::price_estimator::TokenCounts;
 use crate::rate_limiter::RateLimiter;
 use serde::{Deserialize, Serialize};
 use std::error::Error;
@@ -57,6 +58,34 @@ impl ChatGptRequest {
             .sum::<usize>()
             / 4
     }
+
+    /// Reads the response body of this request. The token counts come from
+    /// the `usage` that the API reports. A count that is missing is
+    /// estimated at four bytes of text for each token, which does not
+    /// include reasoning tokens.
+    pub fn parse_response(&self, body: &str) -> Result<Translation, Box<dyn Error>> {
+        let response: ChatGptResponse = serde_json::from_str(body)?;
+        let choice = response
+            .choices
+            .into_iter()
+            .next()
+            .ok_or("ChatGPT API returned empty choices array")?;
+        let text = choice.message.content;
+        let usage = response.usage.unwrap_or_default();
+        let tokens = TokenCounts {
+            input: usage
+                .prompt_tokens
+                .unwrap_or_else(|| self.approx_input_tokens()),
+            output: usage.completion_tokens.unwrap_or(text.len() / 4),
+        };
+        Ok(Translation { text, tokens })
+    }
+}
+
+/// Translated text and the tokens that the request used.
+pub struct Translation {
+    pub text: String,
+    pub tokens: TokenCounts,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -68,6 +97,15 @@ pub struct ChatGptMessage {
 #[derive(Deserialize, Clone)]
 struct ChatGptResponse {
     choices: Vec<ChatGptChoice>,
+    usage: Option<ChatGptUsage>,
+}
+
+/// Token usage that the API reports. `completion_tokens` includes the
+/// reasoning tokens.
+#[derive(Deserialize, Clone, Default)]
+struct ChatGptUsage {
+    prompt_tokens: Option<usize>,
+    completion_tokens: Option<usize>,
 }
 
 #[derive(Deserialize, Clone)]
@@ -80,7 +118,7 @@ pub async fn ask_chatgpt(
     request: &ChatGptRequest,
     config: &OpenAiConfig,
     rate_limiter: &mut RateLimiter,
-) -> Result<String, Box<dyn Error>> {
+) -> Result<Translation, Box<dyn Error>> {
     rate_limiter.wait().await;
 
     let res = client
@@ -95,11 +133,5 @@ pub async fn ask_chatgpt(
         return Err(format!("ChatGPT API request failed: {}", error_text).into());
     }
 
-    let res_body: ChatGptResponse = res.json().await?;
-    let choice = res_body
-        .choices
-        .into_iter()
-        .next()
-        .ok_or("ChatGPT API returned empty choices array")?;
-    Ok(choice.message.content)
+    request.parse_response(&res.text().await?)
 }

@@ -7,8 +7,14 @@ mod regression_tests {
     use crate::config::{
         AudioConfig, Config, OpenAiConfig, OscConfig, RateLimitConfig, ThemeMode, TranslationConfig,
     };
-    use crate::price_estimator::PriceEstimator;
+    use crate::price_estimator::{PriceEstimator, TokenCounts};
     use crate::rate_limiter::RateLimiter;
+
+    /// Token counts for comparing translation prices.
+    const TOKENS: TokenCounts = TokenCounts {
+        input: 1000,
+        output: 500,
+    };
 
     // ===========================================================================
     // Regression test: Model pricing now covers common models
@@ -55,8 +61,8 @@ mod regression_tests {
         let unknown = PriceEstimator::new("unknown-model-xyz", "unknown-transcriber");
         let default = PriceEstimator::new(&defaults.model, &defaults.transcription_model);
         assert_eq!(
-            unknown.estimate_translation_cost(1000, 500),
-            default.estimate_translation_cost(1000, 500)
+            unknown.estimate_translation_cost(TOKENS),
+            default.estimate_translation_cost(TOKENS)
         );
         let minute = Duration::from_secs(60);
         assert_eq!(
@@ -587,6 +593,130 @@ requests_per_minute = 50
         );
     }
 
+    /// Chat Completions response body in the shape the API returns. `usage`
+    /// is the JSON of the usage field, or `None` to leave the field out.
+    fn chat_completion_body(content: &str, usage: Option<&str>) -> String {
+        let usage = usage
+            .map(|usage| format!(r#","usage":{}"#, usage))
+            .unwrap_or_default();
+        format!(
+            r#"{{
+                "id": "chatcmpl-abc123",
+                "object": "chat.completion",
+                "created": 1790000000,
+                "model": "gpt-5.6-sol-2026-08-14",
+                "choices": [{{
+                    "index": 0,
+                    "message": {{
+                        "role": "assistant",
+                        "content": {},
+                        "refusal": null,
+                        "annotations": []
+                    }},
+                    "logprobs": null,
+                    "finish_reason": "stop"
+                }}],
+                "service_tier": "default",
+                "system_fingerprint": null{}
+            }}"#,
+            serde_json::to_string(content).unwrap(),
+            usage
+        )
+    }
+
+    /// Usage of a response whose completion is mostly reasoning tokens.
+    const REASONING_USAGE: &str = r#"{
+        "prompt_tokens": 58,
+        "completion_tokens": 331,
+        "total_tokens": 389,
+        "prompt_tokens_details": {"cached_tokens": 0, "audio_tokens": 0},
+        "completion_tokens_details": {
+            "reasoning_tokens": 320,
+            "audio_tokens": 0,
+            "accepted_prediction_tokens": 0,
+            "rejected_prediction_tokens": 0
+        }
+    }"#;
+
+    #[test]
+    fn test_translation_tokens_come_from_reported_usage() {
+        use crate::translation::ChatGptRequest;
+
+        let request = ChatGptRequest::translation("gpt-5.6-sol", "French", "What time is it?");
+        let body = chat_completion_body("Quelle heure est-il ?", Some(REASONING_USAGE));
+
+        let translation = request.parse_response(&body).unwrap();
+
+        assert_eq!(translation.text, "Quelle heure est-il ?");
+        // completion_tokens includes the 320 reasoning tokens.
+        assert_eq!(
+            translation.tokens,
+            TokenCounts {
+                input: 58,
+                output: 331
+            }
+        );
+    }
+
+    #[test]
+    fn test_translation_tokens_are_estimated_without_usage() {
+        use crate::translation::ChatGptRequest;
+
+        let request = ChatGptRequest::translation("gpt-5.6-sol", "French", "What time is it?");
+        for body in [
+            chat_completion_body("Quelle heure est-il ?", None),
+            chat_completion_body("Quelle heure est-il ?", Some("null")),
+        ] {
+            let translation = request.parse_response(&body).unwrap();
+
+            assert_eq!(translation.text, "Quelle heure est-il ?");
+            // Four bytes a token: 21 bytes of translation give 5 tokens.
+            assert_eq!(
+                translation.tokens,
+                TokenCounts {
+                    input: request.approx_input_tokens(),
+                    output: 5
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn test_translation_cost_counts_reported_reasoning_tokens() {
+        use crate::translation::ChatGptRequest;
+
+        let estimator = PriceEstimator::new("gpt-5.6-sol", "gpt-transcribe");
+        let request = ChatGptRequest::translation("gpt-5.6-sol", "French", "What time is it?");
+        let text = "Quelle heure est-il ?";
+        let reported = request
+            .parse_response(&chat_completion_body(text, Some(REASONING_USAGE)))
+            .unwrap();
+        let estimated = request
+            .parse_response(&chat_completion_body(text, None))
+            .unwrap();
+
+        let reported_cost = estimator.estimate_translation_cost(reported.tokens);
+        assert_eq!(
+            reported_cost,
+            estimator.estimate_translation_cost(TokenCounts {
+                input: 58,
+                output: 331
+            })
+        );
+        // The text alone does not show the reasoning tokens.
+        assert!(reported_cost > estimator.estimate_translation_cost(estimated.tokens));
+    }
+
+    #[test]
+    fn test_translation_response_without_choices_is_an_error() {
+        use crate::translation::ChatGptRequest;
+
+        let request = ChatGptRequest::translation("gpt-5.6-sol", "French", "Hello");
+        let body = r#"{"choices": [], "usage": {"prompt_tokens": 5, "completion_tokens": 0}}"#;
+
+        assert!(request.parse_response(body).is_err());
+    }
+
     // ===========================================================================
     // Test: Saved settings reach the processing loop
     // ===========================================================================
@@ -611,16 +741,16 @@ requests_per_minute = 50
         let minute = Duration::from_secs(60);
         let estimator = &services.price_estimator;
         assert_ne!(
-            expected.estimate_translation_cost(1000, 500),
-            old.estimate_translation_cost(1000, 500)
+            expected.estimate_translation_cost(TOKENS),
+            old.estimate_translation_cost(TOKENS)
         );
         assert_ne!(
             expected.estimate_transcription_cost(minute),
             old.estimate_transcription_cost(minute)
         );
         assert_eq!(
-            estimator.estimate_translation_cost(1000, 500),
-            expected.estimate_translation_cost(1000, 500)
+            estimator.estimate_translation_cost(TOKENS),
+            expected.estimate_translation_cost(TOKENS)
         );
         assert_eq!(
             estimator.estimate_transcription_cost(minute),

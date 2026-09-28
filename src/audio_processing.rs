@@ -55,21 +55,19 @@ pub async fn process_audio(
         &transcription,
     );
 
-    let response = ask_chatgpt(client, &request, &config.openai, rate_limiter).await?;
+    let translation = ask_chatgpt(client, &request, &config.openai, rate_limiter).await?;
     app_state
         .logger
-        .success(format!("Translation: {}", response));
+        .success(format!("Translation: {}", translation.text));
 
     let transcription_cost = price_estimator.estimate_transcription_cost(audio_duration);
-    let input_tokens = request.approx_input_tokens();
-    let output_tokens = response.len() / 4;
-    let translation_cost = price_estimator.estimate_translation_cost(input_tokens, output_tokens);
+    let translation_cost = price_estimator.estimate_translation_cost(translation.tokens);
     let op_cost = transcription_cost + translation_cost;
 
     price_estimator.add_cost(op_cost);
     app_state.set_total_cost(price_estimator.total_cost);
 
-    let mut final_response = response;
+    let mut final_response = translation.text;
     if config.translation.include_original_message {
         final_response = final_response + "\n" + &transcription;
     }
