@@ -128,48 +128,6 @@ mod regression_tests {
     }
 
     // ===========================================================================
-    // Test: Translation error response structure
-    // ===========================================================================
-
-    mod translation_tests {
-        #[derive(serde::Deserialize)]
-        struct ChatGptChoice {
-            message: ChatGptMessage,
-        }
-
-        #[derive(serde::Deserialize)]
-        struct ChatGptMessage {
-            content: String,
-        }
-
-        #[derive(serde::Deserialize)]
-        struct ChatGptResponse {
-            choices: Vec<ChatGptChoice>,
-        }
-
-        #[test]
-        fn test_empty_choices_handled_with_iterator() {
-            // This test verifies the fix: using .into_iter().next() instead of [0]
-            let json = r#"{"choices": []}"#;
-            let response: ChatGptResponse = serde_json::from_str(json).unwrap();
-
-            // Using iterator pattern (the fix) - returns None instead of panicking
-            let result = response.choices.into_iter().next();
-            assert!(result.is_none(), "Empty choices should return None");
-        }
-
-        #[test]
-        fn test_valid_response_parsed_correctly() {
-            let json = r#"{"choices": [{"message": {"role": "assistant", "content": "Hello"}}]}"#;
-            let response: ChatGptResponse = serde_json::from_str(json).unwrap();
-
-            let choice = response.choices.into_iter().next();
-            assert!(choice.is_some());
-            assert_eq!(choice.unwrap().message.content, "Hello");
-        }
-    }
-
-    // ===========================================================================
     // Test: WAV encoding helper
     // ===========================================================================
 
@@ -728,7 +686,10 @@ requests_per_minute = 50
         let request = ChatGptRequest::translation("gpt-5.6-sol", "French", "Hello");
         let body = r#"{"choices": [], "usage": {"prompt_tokens": 5, "completion_tokens": 0}}"#;
 
-        assert!(request.parse_response(body).is_err());
+        let result = request
+            .parse_response(body)
+            .map(|translation| translation.text);
+        assert!(result.is_err(), "parsed as {:?}", result);
     }
 
     // ===========================================================================
