@@ -26,21 +26,42 @@ impl AudioOutput {
             config: supported_config.into(),
         })
     }
+}
 
-    pub fn channels(&self) -> u16 {
-        self.config.channels
-    }
+/// An output device that plays the test recording. The processing loop
+/// opens one for each playback.
+pub trait PlaybackOutput {
+    /// What keeps the playback going. Dropping it stops the playback.
+    type Playback;
 
-    pub fn sample_rate(&self) -> u32 {
-        self.config.sample_rate.0
-    }
+    fn channels(&self) -> u16;
+
+    fn sample_rate(&self) -> u32;
 
     /// Play interleaved samples in the channels and rate of this output
-    /// (see `convert_for_output`). Returns a Stream that must be kept alive
+    /// (see `convert_for_output`). The returned value must be kept alive
     /// until playback is complete. Stream errors go to `errors` as
     /// messages for the activity log (see `PlaybackErrors` in the
     /// processing loop).
-    pub fn play(
+    fn play(
+        &self,
+        samples: Vec<f32>,
+        errors: mpsc::Sender<String>,
+    ) -> Result<Self::Playback, Box<dyn Error + Send + Sync>>;
+}
+
+impl PlaybackOutput for AudioOutput {
+    type Playback = Stream;
+
+    fn channels(&self) -> u16 {
+        self.config.channels
+    }
+
+    fn sample_rate(&self) -> u32 {
+        self.config.sample_rate.0
+    }
+
+    fn play(
         &self,
         samples: Vec<f32>,
         errors: mpsc::Sender<String>,

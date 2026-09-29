@@ -1,8 +1,14 @@
-//! Parts of the processing loop in `main.rs` that can be tested without an
-//! audio device.
+//! The processing loop: it receives the commands from the GUI and the
+//! events from the audio callback, and sends the translations and the
+//! typing indicator to VRChat. `main.rs` runs it on the processing thread
+//! and gives it the audio input and output devices.
 
-use crate::app_state::{AppState, Logger};
-use crate::audio_playback::convert_for_output;
+use crate::api_client::build_api_client;
+use crate::app_state::{AppCommand, AppState, Logger};
+use crate::audio_playback::{convert_for_output, PlaybackOutput};
+use crate::audio_processing::process_audio;
+use crate::audio_recording::AudioStreamInfo;
+use crate::chatbox::Chatbox;
 use crate::config::Config;
 use crate::data_dir::DataDir;
 use crate::models;
@@ -11,15 +17,265 @@ use crate::rate_limiter::RateLimiter;
 use crate::recorder::MAX_RECORDING;
 use crate::recording_manager::RecordingManager;
 use crate::shutdown::Shutdown;
-use crate::types::{AudioEvent, CapturedAudio};
+use crate::types::{AudioEvent, CapturedAudio, Extent};
 use crate::typing_indicator::TypingIndicator;
 use crate::upload_audio::encode_upload_wav;
+use std::error::Error;
+use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
+use tokio::net::UdpSocket;
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::Instant;
+
+/// The audio input as the processing loop receives it. `main.rs` makes it
+/// from the input stream of cpal.
+pub struct AudioInput {
+    /// The stream format when the input stream started, or the error that
+    /// stopped it from starting
+    pub started: oneshot::Receiver<Result<AudioStreamInfo, String>>,
+    /// The events from the audio callback
+    pub events: mpsc::Receiver<AudioEvent>,
+}
+
+/// Run the processing loop until shutdown is requested or the command
+/// channel closes. `start_audio` starts the audio input, and
+/// `open_output` opens the output device for each test recording
+/// playback. Returns an error if the loop cannot start.
+pub async fn run_processing_loop<O: PlaybackOutput>(
+    app_state: Arc<AppState>,
+    mut cmd_rx: mpsc::Receiver<AppCommand>,
+    data_dir: DataDir,
+    start_audio: impl FnOnce() -> AudioInput,
+    open_output: impl Fn() -> Result<O, Box<dyn Error + Send + Sync>>,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
+    // Read initial config
+    let config = app_state
+        .config
+        .read()
+        .expect("Config lock poisoned")
+        .clone();
+
+    let socket_address = format!("{}:{}", config.osc.address, config.osc.input_port);
+    let socket = UdpSocket::bind(&socket_address)
+        .await
+        .map_err(|e| format!("cannot open OSC port {}: {}", socket_address, e))?;
+    let socket = Arc::new(socket);
+
+    // Before the audio input starts, so a failure here does not leave
+    // audio capture running with nothing to receive it.
+    let api_client =
+        build_api_client().map_err(|e| format!("cannot create the HTTP client: {}", e))?;
+
+    app_state.logger.info("Starting audio recording...");
+    app_state.logger.info(format!(
+        "Translating to: {}",
+        config.translation.target_language
+    ));
+
+    let AudioInput { started, events } = start_audio();
+    let mut audio_events = AudioEvents::new(events, app_state.logger.clone());
+
+    let Some(audio_stream_info) =
+        wait_for_audio_start(started, &app_state.shutdown, AUDIO_START_TIMEOUT).await?
+    else {
+        // Shutdown was requested before the stream started
+        return Ok(());
+    };
+
+    app_state.logger.info(format!(
+        "Audio: {} ch, {} Hz",
+        audio_stream_info.channels, audio_stream_info.sample_rate
+    ));
+
+    let mut services = ProcessingServices::new(&config, &data_dir, &app_state.logger);
+    // Initialize the shared cost from the loaded value
+    app_state.set_total_cost(services.price_estimator.total_cost);
+
+    let typing_indicator = TypingIndicator::new(
+        Arc::clone(&socket),
+        Arc::clone(&app_state.config),
+        app_state.logger.clone(),
+    );
+
+    let mut chatbox = Chatbox::new(Arc::clone(&socket));
+
+    let mut test_recording = TestRecording::new(
+        &app_state,
+        audio_stream_info.channels,
+        audio_stream_info.sample_rate,
+    );
+    // Keep playback stream alive until playback completes
+    let mut playback_stream: Option<O::Playback> = None;
+    let mut playback_errors = PlaybackErrors::default();
+
+    loop {
+        tokio::select! {
+            // Prioritize shutdown and the command channel to quit promptly
+            biased;
+
+            _ = app_state.shutdown.requested() => break,
+            cmd = cmd_rx.recv() => {
+                match cmd {
+                    Some(AppCommand::SetEnabled(enabled)) => {
+                        apply_enabled(enabled, &typing_indicator, &app_state.logger).await;
+                    }
+                    Some(AppCommand::UpdateConfig(new_config)) => {
+                        app_state.logger.info("Config updated");
+                        // Update hot-reloadable audio params
+                        app_state.audio_params.update(&new_config.audio);
+                        services.apply_config(&new_config, &app_state.logger);
+                    }
+                    Some(AppCommand::StartTestRecording) => {
+                        app_state.logger.info("Test recording started...");
+                        test_recording.start();
+                    }
+                    Some(AppCommand::StopTestRecording) => {
+                        if finish_test_recording(&mut test_recording, &mut playback_stream, &playback_errors, &app_state, &open_output).await.is_break() {
+                            break;
+                        }
+                    }
+                    Some(AppCommand::Quit) | None => {
+                        // Quit command received or channel closed
+                        break;
+                    }
+                }
+            }
+            _ = test_recording.limit_reached() => {
+                app_state.logger.info(format!(
+                    "Test recording reached {} s",
+                    TEST_RECORDING_LIMIT.as_secs()
+                ));
+                if finish_test_recording(&mut test_recording, &mut playback_stream, &playback_errors, &app_state, &open_output).await.is_break() {
+                    break;
+                }
+            }
+            // Errors of the playback stream, reported on the audio thread
+            _ = playback_errors.log_next(&app_state.logger) => {}
+            event = audio_events.recv() => {
+                // Ignore speech while translation is off. SetEnabled(false)
+                // turns off a typing indicator that is still on.
+                if !app_state.enabled.load(Ordering::Relaxed) {
+                    continue;
+                }
+
+                // A part of a long recording: the typing indicator is to stay
+                // on after process_audio turns it off.
+                let recording_goes_on = matches!(event, AudioEvent::AudioPart(_));
+                let (audio, extent) = match event {
+                    AudioEvent::StartRecording => {
+                        typing_indicator.start_typing().await;
+                        continue;
+                    }
+                    AudioEvent::StopRecording => {
+                        typing_indicator.stop_typing().await;
+                        continue;
+                    }
+                    // Logged above. The callback follows a discarded
+                    // recording with StopRecording.
+                    AudioEvent::RecordingDiscarded => continue,
+                    // Logged above. AudioEvents follows an input error
+                    // with StopRecording.
+                    AudioEvent::EventsDropped(_) | AudioEvent::InputError(_) => continue,
+                    AudioEvent::AudioData(audio, extent) => (audio, extent),
+                    AudioEvent::AudioPart(audio) => (audio, Extent::Part),
+                };
+                let audio_data = match app_state.shutdown.run_until(encode_for_upload(audio)).await {
+                    Some(Ok(wav)) => wav,
+                    Some(Err(e)) => {
+                        app_state.logger.error(format!("Error: {}", e));
+                        continue;
+                    }
+                    None => break,
+                };
+                // Read current config for processing
+                let current_config = app_state.config.read().expect("Config lock poisoned").clone();
+                // Shutdown drops the work, including the chatbox
+                // display pause and rate limiter wait.
+                let result = app_state.shutdown.run_until(process_audio(
+                    &api_client,
+                    audio_data,
+                    extent,
+                    &current_config,
+                    &mut chatbox,
+                    &mut services.rate_limiter,
+                    &typing_indicator,
+                    &mut services.price_estimator,
+                    services.recording_manager.as_mut(),
+                    &app_state,
+                ))
+                .await;
+                match result {
+                    Some(Ok(())) => {}
+                    Some(Err(e)) => app_state.logger.error_api(format!("Error: {}", e)),
+                    None => break,
+                }
+                if recording_goes_on {
+                    typing_indicator.start_typing().await;
+                }
+            }
+        }
+    }
+
+    // Shutdown can stop processing between StartRecording and the end of
+    // process_audio. Do not leave VRChat showing the typing indicator.
+    typing_indicator.stop_typing().await;
+
+    Ok(())
+}
+
+/// Stop the test recording and play it back on an output that
+/// `open_output` opens. The playback is kept in `playback` until the next
+/// playback or the end of the loop, and reports its errors to
+/// `playback_errors`. Breaks if shutdown stopped the work.
+async fn finish_test_recording<O: PlaybackOutput>(
+    test_recording: &mut TestRecording,
+    playback: &mut Option<O::Playback>,
+    playback_errors: &PlaybackErrors,
+    app_state: &AppState,
+    open_output: &impl Fn() -> Result<O, Box<dyn Error + Send + Sync>>,
+) -> ControlFlow<()> {
+    let logger = &app_state.logger;
+    let Some(audio) = test_recording.stop() else {
+        return ControlFlow::Continue(());
+    };
+    if audio.samples.is_empty() {
+        logger.info("Test recording stopped, nothing recorded");
+        return ControlFlow::Continue(());
+    }
+    logger.info(format!(
+        "Test recording stopped, {} samples",
+        audio.samples.len()
+    ));
+    let output = match open_output() {
+        Ok(output) => output,
+        Err(e) => {
+            logger.error(format!("Failed to play test recording: {}", e));
+            return ControlFlow::Continue(());
+        }
+    };
+    let converted = app_state.shutdown.run_until(convert_for_playback(
+        audio,
+        output.channels(),
+        output.sample_rate(),
+    ));
+    let samples = match converted.await {
+        Some(Ok(samples)) => samples,
+        Some(Err(e)) => {
+            logger.error(format!("Failed to play test recording: {}", e));
+            return ControlFlow::Continue(());
+        }
+        None => return ControlFlow::Break(()),
+    };
+    logger.info("Playing back test recording...");
+    match output.play(samples, playback_errors.sender()) {
+        Ok(stream) => *playback = Some(stream),
+        Err(e) => logger.error(format!("Failed to play test recording: {}", e)),
+    }
+    ControlFlow::Continue(())
+}
 
 /// Longest test recording. The Stop button in the GUI ends it earlier.
 pub const TEST_RECORDING_LIMIT: Duration = Duration::from_secs(30);
