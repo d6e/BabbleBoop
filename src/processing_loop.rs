@@ -629,7 +629,9 @@ pub async fn convert_for_playback(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app_state::LogEntry;
+    use crate::api_client::test_server::{Response, TestServer};
+    use crate::app_state::{LogEntry, LogLevel};
+    use crate::price_estimator::TokenCounts;
     use rosc::{OscPacket, OscType};
     use std::future::Future;
     use std::sync::atomic::AtomicUsize;
@@ -830,20 +832,23 @@ mod tests {
         }
 
         /// Wait for an activity log line that contains `text`, and skip the
-        /// lines before it.
-        async fn logged(&mut self, text: &str) {
+        /// lines before it. Returns the line.
+        async fn logged(&mut self, text: &str) -> LogEntry {
             let mut seen = Vec::new();
             let found = tokio::time::timeout(self.wait, async {
                 while let Some(entry) = self.log.recv().await {
                     if entry.message.contains(text) {
-                        return true;
+                        return Some(entry);
                     }
                     seen.push(entry.message);
                 }
-                false
+                None
             })
             .await;
-            assert_eq!(found, Ok(true), "{:?} not logged after {:?}", text, seen);
+            match found {
+                Ok(Some(entry)) => entry,
+                _ => panic!("{:?} not logged after {:?}", text, seen),
+            }
         }
 
         /// The next message that VRChat receives.
@@ -1134,5 +1139,231 @@ mod tests {
         assert_eq!(result, Ok(()));
         // Off at shutdown; the StartRecording was not handled
         assert_eq!(d.received().await, Osc::Typing(false));
+    }
+
+    /// The translation that the API server of the tests returns, and the
+    /// tokens that it reports.
+    const TRANSLATION: &str = "Bonjour";
+    const TOKENS: TokenCounts = TokenCounts {
+        input: 30,
+        output: 2,
+    };
+
+    /// A server that transcribes every recording as "Hello" and translates
+    /// every text as `TRANSLATION`.
+    async fn translating_server() -> TestServer {
+        let chat_completion = serde_json::json!({
+            "choices": [{
+                "message": { "content": TRANSLATION },
+                "finish_reason": "stop"
+            }],
+            "usage": {
+                "prompt_tokens": TOKENS.input,
+                "completion_tokens": TOKENS.output
+            }
+        });
+        TestServer::start(vec![
+            ("audio/transcriptions", Response::ok(r#"{"text": "Hello"}"#)),
+            (
+                "chat/completions",
+                Response::ok(chat_completion.to_string()),
+            ),
+        ])
+        .await
+    }
+
+    /// A processing loop that sends its requests to `server`, with no
+    /// minimum duration and no display pause of the chatbox.
+    async fn processing_loop_with_api(server: &TestServer) -> (LoopUnderTest, Driver) {
+        let (mut processing, driver) = processing_loop(|config| {
+            config.openai.api_key = "sk-test".to_string();
+            config.audio.min_transcription_duration = 0.0;
+            config.osc.display_time = 0;
+        })
+        .await;
+        processing.api_base_url = server.base_url.clone();
+        (processing, driver)
+    }
+
+    /// The cost of `utterances` recordings of `sound(seconds)` that are
+    /// transcribed and translated by `translating_server`.
+    fn translated_cost(utterances: u32, seconds: f32) -> f64 {
+        let config = Config::default();
+        let prices = PriceEstimator::new(
+            PathBuf::new(),
+            &config.openai.model,
+            &config.openai.transcription_model,
+        );
+        let wav = encode_upload_wav(&sound(seconds)).unwrap();
+        let duration = crate::audio_processing::calculate_audio_duration(&wav).unwrap();
+        let one =
+            prices.estimate_transcription_cost(duration) + prices.estimate_translation_cost(TOKENS);
+        (0..utterances).fold(0.0, |total, _| total + one)
+    }
+
+    /// The paths of the next `count` requests to `server`.
+    async fn requested_paths(server: &mut TestServer, count: usize) -> Vec<String> {
+        let mut paths = Vec::new();
+        for _ in 0..count {
+            paths.push(server.request().await.path);
+        }
+        paths
+    }
+
+    #[tokio::test]
+    async fn test_an_utterance_is_transcribed_translated_and_sent_to_the_chatbox() {
+        let mut server = translating_server().await;
+        let (processing, mut d) = processing_loop_with_api(&server).await;
+        let result = processing
+            .run_with(async {
+                d.start_audio();
+                d.event(AudioEvent::StartRecording).await;
+                d.event(AudioEvent::AudioData(sound(1.0), Extent::Whole))
+                    .await;
+                d.event(AudioEvent::StopRecording).await;
+                assert_eq!(d.received().await, Osc::Typing(true));
+                assert_eq!(d.received().await, Osc::Input(TRANSLATION.to_string()));
+                // Off when the translation is sent, off at the stop
+                assert_eq!(d.received().await, Osc::Typing(false));
+                assert_eq!(d.received().await, Osc::Typing(false));
+                d.logged("Transcription: Hello").await;
+                d.logged("Translation: Bonjour").await;
+                d.shut_down().await;
+            })
+            .await;
+
+        assert_eq!(result, Ok(()));
+        assert_eq!(d.received().await, Osc::Typing(false));
+        assert_eq!(d.app_state.get_total_cost(), translated_cost(1, 1.0));
+        assert!(translated_cost(1, 1.0) > 0.0);
+        assert_eq!(
+            requested_paths(&mut server, 2).await,
+            ["/v1/audio/transcriptions", "/v1/chat/completions"]
+        );
+        assert_eq!(
+            server.received().len(),
+            0,
+            "more requests than one utterance needs"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_a_part_of_a_long_recording_is_sent_and_typing_goes_on() {
+        let mut server = translating_server().await;
+        let (processing, mut d) = processing_loop_with_api(&server).await;
+        let result = processing
+            .run_with(async {
+                d.start_audio();
+                d.event(AudioEvent::StartRecording).await;
+                d.event(AudioEvent::AudioPart(sound(1.0))).await;
+                assert_eq!(d.received().await, Osc::Typing(true));
+                assert_eq!(d.received().await, Osc::Input(TRANSLATION.to_string()));
+                assert_eq!(d.received().await, Osc::Typing(false));
+                // The recording goes on after its part
+                assert_eq!(d.received().await, Osc::Typing(true));
+                d.logged("processing it while recording goes on").await;
+
+                d.event(AudioEvent::AudioData(sound(1.0), Extent::Whole))
+                    .await;
+                d.event(AudioEvent::StopRecording).await;
+                assert_eq!(d.received().await, Osc::Input(TRANSLATION.to_string()));
+                assert_eq!(d.received().await, Osc::Typing(false));
+                assert_eq!(d.received().await, Osc::Typing(false));
+                d.shut_down().await;
+            })
+            .await;
+
+        assert_eq!(result, Ok(()));
+        assert_eq!(d.received().await, Osc::Typing(false));
+        assert_eq!(d.app_state.get_total_cost(), translated_cost(2, 1.0));
+        assert_eq!(
+            requested_paths(&mut server, 4).await,
+            [
+                "/v1/audio/transcriptions",
+                "/v1/chat/completions",
+                "/v1/audio/transcriptions",
+                "/v1/chat/completions"
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_an_api_error_shows_its_message_and_sends_nothing_to_the_chatbox() {
+        let body = serde_json::json!({
+            "error": {
+                "message": "Incorrect API key provided: sk-test.",
+                "type": "invalid_request_error",
+                "code": "invalid_api_key"
+            }
+        });
+        let mut server = TestServer::start(vec![(
+            "audio/transcriptions",
+            Response::error(reqwest::StatusCode::UNAUTHORIZED, body.to_string()),
+        )])
+        .await;
+        let (processing, mut d) = processing_loop_with_api(&server).await;
+        let result = processing
+            .run_with(async {
+                d.start_audio();
+                d.event(AudioEvent::StartRecording).await;
+                d.event(AudioEvent::AudioData(sound(1.0), Extent::Whole))
+                    .await;
+                d.event(AudioEvent::StopRecording).await;
+                let error = d.logged("API key").await;
+                assert_eq!(
+                    (error.level, error.message.as_str()),
+                    (
+                        LogLevel::Error,
+                        "Invalid API key. Check your OpenAI API key in settings."
+                    )
+                );
+                // On at the start, off at the stop, and no chatbox message
+                // between them
+                assert_eq!(d.received().await, Osc::Typing(true));
+                assert_eq!(d.received().await, Osc::Typing(false));
+                d.shut_down().await;
+            })
+            .await;
+
+        assert_eq!(result, Ok(()));
+        assert_eq!(d.received().await, Osc::Typing(false));
+        assert_eq!(d.app_state.get_total_cost(), 0.0);
+        assert_eq!(
+            requested_paths(&mut server, 1).await,
+            ["/v1/audio/transcriptions"]
+        );
+        assert_eq!(server.received().len(), 0, "a translation was requested");
+    }
+
+    #[tokio::test]
+    async fn test_an_error_that_is_not_from_the_api_is_logged_as_it_is() {
+        // The body is not a transcription
+        let mut server = TestServer::start(vec![(
+            "audio/transcriptions",
+            Response::ok(r#"{"text": null}"#),
+        )])
+        .await;
+        let (processing, mut d) = processing_loop_with_api(&server).await;
+        let result = processing
+            .run_with(async {
+                d.start_audio();
+                d.event(AudioEvent::AudioData(sound(1.0), Extent::Whole))
+                    .await;
+                let error = d.logged("Error: ").await;
+                assert_eq!(error.level, LogLevel::Error);
+                assert!(
+                    error.message.starts_with("Error: invalid type: null"),
+                    "{}",
+                    error.message
+                );
+                d.shut_down().await;
+            })
+            .await;
+
+        assert_eq!(result, Ok(()));
+        assert_eq!(
+            requested_paths(&mut server, 1).await,
+            ["/v1/audio/transcriptions"]
+        );
     }
 }
