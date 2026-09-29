@@ -206,8 +206,8 @@ impl Pipeline {
         }
         // Translation can be switched off while this message waits for the
         // previous one or for the API. The processing loop checks the
-        // toggle only when it takes the audio event, so check it again
-        // here.
+        // toggle when it takes the audio event, before these waits, so
+        // check it again here.
         self.chatbox.wait_for_display(config).await;
         if !self.app_state.enabled.load(Ordering::Relaxed) {
             self.app_state

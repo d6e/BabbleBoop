@@ -186,22 +186,23 @@ pub async fn run_processing_loop<O: PlaybackOutput>(
             // Errors of the playback stream, reported on the audio thread
             _ = playback_errors.log_next(&app_state.logger) => {}
             event = audio_events.recv() => {
-                // Ignore speech while translation is off. SetEnabled(false)
-                // turns off a typing indicator that is still on.
-                if !app_state.enabled.load(Ordering::Relaxed) {
-                    continue;
-                }
-
                 // A part of a long recording: the typing indicator is to stay
                 // on after Pipeline::process turns it off.
                 let recording_goes_on = matches!(event, AudioEvent::AudioPart(_));
                 let (audio, extent) = match event {
-                    AudioEvent::StartRecording => {
-                        pipeline.typing_indicator.start_typing(&config).await;
-                        continue;
-                    }
+                    // Also while translation is off: the GUI stores the
+                    // toggle before it sends SetEnabled(false), and the
+                    // send fails while the command channel is full, so the
+                    // end of a recording can be the only event that turns
+                    // typing off.
                     AudioEvent::StopRecording => {
                         pipeline.typing_indicator.stop_typing(&config).await;
+                        continue;
+                    }
+                    // Ignore speech while translation is off
+                    _ if !app_state.enabled.load(Ordering::Relaxed) => continue,
+                    AudioEvent::StartRecording => {
+                        pipeline.typing_indicator.start_typing(&config).await;
                         continue;
                     }
                     // Logged above. The callback follows a discarded
@@ -233,7 +234,9 @@ pub async fn run_processing_loop<O: PlaybackOutput>(
                     Some(Err(e)) => log_processing_error(&*e, &app_state.logger),
                     None => break,
                 }
-                if recording_goes_on {
+                // Not if translation was switched off while the part was
+                // processed: the SetEnabled(false) may not come
+                if recording_goes_on && app_state.enabled.load(Ordering::Relaxed) {
                     pipeline.typing_indicator.start_typing(&config).await;
                 }
             }
@@ -441,11 +444,12 @@ impl TestRecording {
 
 /// Handle the translation toggle from the GUI.
 ///
-/// Disabling turns the typing indicator at the address in `config` off.
-/// While translation is off the loop ignores audio events, so the
-/// StopRecording of an utterance that started before would not turn it
-/// off. The GUI stores `enabled` before it sends this command, so no
-/// StartRecording handled after this can turn the indicator on again.
+/// Disabling turns the typing indicator at the address in `config` off at
+/// once, without waiting for the StopRecording of an utterance that
+/// started before. The GUI stores `enabled` before it sends this command,
+/// so no StartRecording handled after this can turn the indicator on
+/// again. The command does not always arrive, so the loop also turns the
+/// indicator off at each StopRecording while translation is off.
 pub async fn apply_enabled(
     enabled: bool,
     config: &Config,
@@ -1009,6 +1013,48 @@ mod tests {
         assert_eq!(d.received().await, Osc::Typing(false));
     }
 
+    /// The GUI stores the toggle before it sends SetEnabled, and the send
+    /// fails while the command channel is full. The end of a recording
+    /// that started while translation was on still turns typing off.
+    #[tokio::test]
+    async fn test_a_recording_that_ends_after_translation_is_switched_off_turns_typing_off() {
+        let (processing, mut d) = processing_loop(skip_short_recordings).await;
+        let result = processing
+            .run_with(async {
+                d.start_audio();
+                d.event(AudioEvent::StartRecording).await;
+                assert_eq!(d.received().await, Osc::Typing(true));
+                // Switched off, and the SetEnabled(false) does not reach
+                // the loop
+                d.app_state.enabled.store(false, Ordering::Relaxed);
+                d.event(AudioEvent::AudioData(sound(0.5), Extent::Whole))
+                    .await;
+                d.event(AudioEvent::StopRecording).await;
+                // Speech while translation is off. The loop logs the event
+                // when it receives it, so it handled the StopRecording
+                // before.
+                d.event(AudioEvent::StartRecording).await;
+                d.logged("Silence detected").await;
+                d.logged("Sound detected").await;
+                // Switched on again, and speech turns typing on
+                d.app_state.enabled.store(true, Ordering::Relaxed);
+                d.command(AppCommand::SetEnabled(true)).await;
+                d.logged("Translation enabled").await;
+                d.event(AudioEvent::StartRecording).await;
+                assert_eq!(
+                    d.received().await,
+                    Osc::Typing(false),
+                    "typing is still on from the recording before"
+                );
+                assert_eq!(d.received().await, Osc::Typing(true));
+                d.shut_down().await;
+            })
+            .await;
+
+        assert_eq!(result, Ok(()));
+        assert_eq!(d.received().await, Osc::Typing(false));
+    }
+
     #[tokio::test]
     async fn test_a_discarded_recording_is_logged_and_turns_typing_off() {
         let (processing, mut d) = processing_loop(skip_short_recordings).await;
@@ -1346,6 +1392,40 @@ To use a different port, change Input Port in OSC Settings."
                 "/v1/chat/completions"
             ]
         );
+    }
+
+    /// Translation switched off while a part of a long recording is
+    /// processed, and the SetEnabled(false) does not reach the loop (the
+    /// GUI send fails while the command channel is full). Typing does not
+    /// go on again after the part.
+    #[tokio::test]
+    async fn test_a_part_processed_while_translation_is_switched_off_leaves_typing_off() {
+        let mut server = translating_server().await;
+        let (processing, mut d) = processing_loop_with_api(&server).await;
+        let result = processing
+            .run_with(async {
+                d.start_audio();
+                d.event(AudioEvent::StartRecording).await;
+                d.event(AudioEvent::AudioPart(sound(1.0))).await;
+                assert_eq!(d.received().await, Osc::Typing(true));
+                assert_eq!(server.request().await.path, "/v1/audio/transcriptions");
+                // The GUI stores the toggle before it sends the command
+                d.app_state.enabled.store(false, Ordering::Relaxed);
+                d.logged("Translation is off, so the translation was not sent")
+                    .await;
+                assert_eq!(d.received().await, Osc::Typing(false));
+                d.event(AudioEvent::StopRecording).await;
+                assert_eq!(
+                    d.received().await,
+                    Osc::Typing(false),
+                    "typing went on again after the part"
+                );
+                d.shut_down().await;
+            })
+            .await;
+
+        assert_eq!(result, Ok(()));
+        assert_eq!(d.received().await, Osc::Typing(false));
     }
 
     #[tokio::test]
