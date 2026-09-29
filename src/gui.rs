@@ -506,10 +506,18 @@ impl BabbleBoopApp {
                         egui::RichText::new("● Settings not applied")
                             .color(colors.unsaved_indicator),
                     )
-                    .on_hover_text(
+                    // The processing thread drops the command receiver when
+                    // it ends, so after processing stops no Save reaches
+                    // the loop. `main.rs` loads the settings from the file
+                    // (`Config::load_or_create`) at the next start.
+                    .on_hover_text(if self.app_state.is_processing_stopped() {
                         "The settings are saved to the file, but are not in use. \
-                        Click Save Settings to apply them.",
-                    );
+                        Processing stopped, so Save Settings cannot apply them. \
+                        Restart BabbleBoop to use them."
+                    } else {
+                        "The settings are saved to the file, but are not in use. \
+                        Click Save Settings to apply them."
+                    });
                     ui.separator();
                 }
 
@@ -2227,5 +2235,93 @@ mod tests {
             after_retry
         );
         assert_eq!(sent_languages(&sent_when_clean), Vec::<String>::new());
+    }
+
+    // ===========================================================================
+    // Test: The hint of "Settings not applied" says how to apply them
+    // ===========================================================================
+
+    /// Start of the hover text of `NOT_APPLIED`
+    const NOT_APPLIED_HINT: &str = "The settings are saved to the file, but are not in use.";
+
+    /// Save a changed target language, through a send on `cmd_tx` that
+    /// fails, rest the pointer on `NOT_APPLIED`, and return the hover text
+    /// that shows. `prepare` changes `AppState` before the save. `name`
+    /// makes the folder of the config file.
+    fn not_applied_hint_after_save(
+        name: &str,
+        cmd_tx: tokio::sync::mpsc::Sender<AppCommand>,
+        prepare: impl FnOnce(&AppState),
+    ) -> Vec<String> {
+        use std::fs;
+
+        let dir =
+            std::env::temp_dir().join(format!("babble_boop_gui_{}_{}", name, std::process::id()));
+        if dir.exists() {
+            fs::remove_dir_all(&dir).unwrap();
+        }
+        fs::create_dir_all(&dir).unwrap();
+        let config_file = dir.join("config.toml");
+        let mut file_config = Config::default();
+        file_config.openai.api_key = "sk-test".to_string();
+        file_config.save(&config_file).unwrap();
+        let (log_tx, log_rx) = tokio::sync::mpsc::channel(100);
+        let app_state = Arc::new(AppState::new(cmd_tx, log_tx));
+        prepare(&app_state);
+        let mut app = BabbleBoopApp::new(app_state, file_config, log_rx, config_file);
+        app.config_draft.translation.target_language = "German".to_string();
+        let ctx = egui::Context::default();
+        let output = run_until_idle(&ctx, &mut app);
+        click(&ctx, &mut app, text_center(&output, "Save Settings"));
+        let mut output = run_until_idle(&ctx, &mut app);
+        // egui 0.29.1 shows no tooltip within 0.1 s of a click
+        // (src/response.rs lines 697 to 706); a frame is 1/60 s
+        for _ in 0..10 {
+            output = ctx.run(raw_input(), |ctx| app.ui(ctx));
+        }
+        let indicator = text_center(&output, NOT_APPLIED);
+        run_with_events(&ctx, &mut app, vec![egui::Event::PointerMoved(indicator)]);
+        // Past the tooltip delay of 0.5 s
+        for _ in 0..60 {
+            output = ctx.run(raw_input(), |ctx| app.ui(ctx));
+        }
+        // Clean up before asserting, so a failure does not leave files behind
+        fs::remove_dir_all(&dir).unwrap();
+        painted_text(&output)
+            .into_iter()
+            .filter(|text| text.starts_with(NOT_APPLIED_HINT))
+            .collect()
+    }
+
+    #[test]
+    fn test_settings_not_applied_after_processing_stopped_says_to_restart() {
+        let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel(32);
+        // The processing loop ended and dropped its receiver
+        drop(cmd_rx);
+
+        let hint = not_applied_hint_after_save("hint_stopped", cmd_tx, |app_state| {
+            app_state.mark_processing_stopped()
+        });
+
+        assert_eq!(
+            hint,
+            ["The settings are saved to the file, but are not in use. \
+            Processing stopped, so Save Settings cannot apply them. \
+            Restart BabbleBoop to use them."]
+        );
+    }
+
+    #[test]
+    fn test_settings_not_applied_while_processing_runs_says_to_save_again() {
+        let (cmd_tx, cmd_rx) = full_command_channel();
+
+        let hint = not_applied_hint_after_save("hint_full", cmd_tx, |_| {});
+
+        assert_eq!(
+            hint,
+            ["The settings are saved to the file, but are not in use. \
+            Click Save Settings to apply them."]
+        );
+        drop(cmd_rx);
     }
 }
