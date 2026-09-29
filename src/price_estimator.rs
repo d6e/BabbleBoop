@@ -136,14 +136,14 @@ impl PriceEstimator {
 
     /// The total cost saved in `cost_file`, or zero if there is no such
     /// file. A file that cannot be read, or that does not hold a total (for
-    /// example a file that a save cut short left empty), is renamed to
-    /// `<cost_file>.unreadable` so that no save replaces it, the error goes
-    /// to the activity log, and the total starts at zero: the old total is
-    /// not known, and the user can add it from the kept file. If
-    /// `cost_file` is a symbolic link, on Unix the link is renamed and the
-    /// file that it names stays as it is (rename(2), man-pages 6.19), so
-    /// the next save makes a file in place of the link. Blocks on the file
-    /// system.
+    /// example a file that a save cut short left empty), is renamed so
+    /// that no save replaces it (see `unused_kept_path` for the name), the
+    /// error goes to the activity log, and the total starts at zero: the
+    /// old total is not known, and the user can add it from the kept
+    /// file. If `cost_file` is a symbolic link, on Unix the link is
+    /// renamed and the file that it names stays as it is (rename(2),
+    /// man-pages 6.19), so the next save makes a file in place of the link.
+    /// Blocks on the file system.
     fn load_total_cost(cost_file: &Path, logger: &Logger) -> f64 {
         let error = match fs::read_to_string(cost_file) {
             Err(e) if e.kind() == io::ErrorKind::NotFound => return 0.0,
@@ -153,14 +153,19 @@ impl PriceEstimator {
                 _ => "the file does not hold a total cost".to_string(),
             },
         };
-        let kept = with_suffix(cost_file, ".unreadable");
-        let kept_as = match fs::rename(cost_file, &kept) {
-            Ok(()) => format!("The file is now {}", kept.display()),
+        let kept_as = match unused_kept_path(cost_file) {
             Err(e) => format!(
-                "Cannot rename it to {} ({}), so the next save replaces it",
-                kept.display(),
+                "Cannot find a free name to keep it ({}), so the next save replaces it",
                 e
             ),
+            Ok(kept) => match fs::rename(cost_file, &kept) {
+                Ok(()) => format!("The file is now {}", kept.display()),
+                Err(e) => format!(
+                    "Cannot rename it to {} ({}), so the next save replaces it",
+                    kept.display(),
+                    e
+                ),
+            },
         };
         logger.error(format!(
             "Cannot read the total cost in {}: {}. {}. The total starts at 0.",
@@ -183,6 +188,33 @@ impl PriceEstimator {
 /// reads as a smaller total without a log entry.
 fn save_total_cost(cost_file: &Path, total_cost: f64) -> io::Result<()> {
     fs::write(cost_file, total_cost.to_string())
+}
+
+/// The first of `<cost_file>.unreadable`, `<cost_file>.unreadable.1`,
+/// `<cost_file>.unreadable.2` and so on that is not in use, for a cost file
+/// that cannot be read. Blocks on the file system.
+///
+/// A file kept on an earlier start can hold the only copy of the old
+/// total, and `fs::rename` replaces an existing target (rename(2),
+/// man-pages 6.19; on Windows `MOVEFILE_REPLACE_EXISTING`, std 1.97
+/// library/std/src/sys/fs/windows.rs line 1322), so the name must be free
+/// before the rename. `fs::symlink_metadata` does not follow a symbolic
+/// link (std 1.97 library/std/src/fs.rs line 2693), so a link at a name
+/// also makes the name in use. A file that another program makes at the
+/// name after this check and before the rename is replaced.
+fn unused_kept_path(cost_file: &Path) -> io::Result<PathBuf> {
+    let mut number = 0u32;
+    loop {
+        let path = match number {
+            0 => with_suffix(cost_file, ".unreadable"),
+            _ => with_suffix(cost_file, &format!(".unreadable.{}", number)),
+        };
+        match fs::symlink_metadata(&path) {
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(path),
+            Err(e) => return Err(e),
+            Ok(_) => number += 1,
+        }
+    }
 }
 
 /// `path` with `suffix` added to its file name.

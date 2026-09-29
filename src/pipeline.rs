@@ -974,31 +974,63 @@ mod tests {
         let dir = crate::test_support::TempDir::new("unreadable_cost");
         let data_dir = DataDir::new(dir.path().to_path_buf());
         let cost_file = data_dir.cost_file();
-        let kept_file = dir.path().join("total_cost.txt.unreadable");
+        let kept_names = [
+            "total_cost.txt.unreadable",
+            "total_cost.txt.unreadable.1",
+            "total_cost.txt.unreadable.2",
+            "total_cost.txt.unreadable.3",
+            "total_cost.txt.unreadable.4",
+        ];
+        // The kept files in the data folder, by name, with their contents
+        let kept_files = || {
+            let mut kept: Vec<(String, Vec<u8>)> = std::fs::read_dir(dir.path())
+                .unwrap()
+                .map(|entry| entry.unwrap())
+                .map(|entry| (entry.file_name().to_string_lossy().into_owned(), entry))
+                .filter(|(name, _)| name.starts_with("total_cost.txt.unreadable"))
+                .map(|(name, entry)| (name, std::fs::read(entry.path()).unwrap()))
+                .collect();
+            kept.sort();
+            kept
+        };
         // No file yet: the first start
         let entries = entries_logged_by(|logger| {
             ProcessingServices::new(&Config::default(), &data_dir, logger);
         });
         assert_eq!(entries.len(), 0, "{:?}", entries);
 
-        // An empty file is what a save cut short by the process exit left
+        // An empty file is what a save cut short by the process exit left.
+        // Each start with a file that cannot be read keeps it under a new
+        // name, and the files kept before stay as they are.
         let contents: [&[u8]; 5] = [b"", b"twelve", b"NaN", b"-3", b"\xff\xfe"];
-        for content in contents {
+        for (start, content) in contents.into_iter().enumerate() {
+            let kept_file = dir.path().join(kept_names[start]);
             std::fs::write(&cost_file, content).unwrap();
             let mut log = LogCapture::new();
 
             let services = ProcessingServices::new(&Config::default(), &data_dir, &log.logger());
 
+            let expected: Vec<(String, Vec<u8>)> = kept_names
+                .iter()
+                .zip(contents)
+                .take(start + 1)
+                .map(|(name, content)| (name.to_string(), content.to_vec()))
+                .collect();
+            assert_eq!(kept_files(), expected, "start {}", start);
             let entries = log.entries();
             assert_eq!(entries.len(), 1, "{:?}: {:?}", content, entries);
             assert_eq!(entries[0].0, LogLevel::Error, "{:?}", entries);
-            for path in [&cost_file, &kept_file] {
-                let path = path.display().to_string();
+            // The log names the file it kept, not only a name that starts
+            // the same
+            let paths = [
+                cost_file.display().to_string(),
+                format!("{}. ", kept_file.display()),
+            ];
+            for path in paths {
                 assert!(entries[0].1.contains(&path), "{:?}", entries);
             }
             assert_eq!(services.price_estimator.total_cost, 0.0, "{:?}", content);
             assert!(!cost_file.exists(), "{:?}", content);
-            assert_eq!(std::fs::read(&kept_file).unwrap(), content);
         }
     }
 
