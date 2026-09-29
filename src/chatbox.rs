@@ -29,6 +29,11 @@ impl Chatbox {
         }
     }
 
+    /// Send from `socket` from now on.
+    pub fn set_socket(&mut self, socket: Arc<UdpSocket>) {
+        self.socket = socket;
+    }
+
     /// Wait until the last chunk that went out was on screen for the
     /// `display_time` of `config`. `send` does this wait before each chunk.
     /// A caller can do it first, to check after the wait that the message

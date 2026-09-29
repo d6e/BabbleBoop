@@ -56,7 +56,9 @@ pub async fn run_processing_loop<O: PlaybackOutput>(
     start_audio: impl FnOnce() -> AudioInput,
     open_output: impl Fn() -> Result<O, Box<dyn Error + Send + Sync>>,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
-    let socket_address = osc_socket_address(&config);
+    // Where the socket in use is bound. After a failed rebind this differs
+    // from the address in the settings.
+    let mut socket_address = osc_socket_address(&config);
     let socket = UdpSocket::bind(&socket_address)
         .await
         .map_err(|e| format!("cannot open OSC port {}: {}", socket_address, e))?;
@@ -94,7 +96,7 @@ pub async fn run_processing_loop<O: PlaybackOutput>(
     // Initialize the shared cost from the loaded value
     app_state.set_total_cost(services.price_estimator.total_cost);
 
-    let typing_indicator = TypingIndicator::new(Arc::clone(&socket), app_state.logger.clone());
+    let mut typing_indicator = TypingIndicator::new(Arc::clone(&socket), app_state.logger.clone());
     let mut chatbox = Chatbox::new(socket);
 
     let mut test_recording = TestRecording::new(
@@ -126,6 +128,18 @@ pub async fn run_processing_loop<O: PlaybackOutput>(
                             // Typing can be on at the old destination, and
                             // the StopRecording goes to the new one
                             typing_indicator.stop_typing(&config).await;
+                        }
+                        let new_socket_address = osc_socket_address(&new_config);
+                        if new_socket_address != socket_address {
+                            match rebind_osc_socket(&socket_address, &new_socket_address, &app_state).await {
+                                ControlFlow::Continue(Some(socket)) => {
+                                    typing_indicator.set_socket(Arc::clone(&socket));
+                                    chatbox.set_socket(socket);
+                                    socket_address = new_socket_address;
+                                }
+                                ControlFlow::Continue(None) => {}
+                                ControlFlow::Break(()) => break,
+                            }
                         }
                         app_state.audio_params.update(&new_config.audio);
                         services.apply_config(&new_config, &app_state.logger);
@@ -236,6 +250,39 @@ fn osc_socket_address(config: &Config) -> String {
 /// Where the loop sends the chatbox messages and the typing indicator.
 fn osc_destination(config: &Config) -> (&str, u16) {
     (&config.osc.address, config.osc.output_port)
+}
+
+/// Open an OSC socket at `new_address` to use in place of the socket at
+/// `old_address`. Returns the new socket, or `None` if it cannot be
+/// opened: the error goes to the activity log and the old socket stays in
+/// use. Breaks if shutdown is requested first, as a host name in the
+/// address can wait for DNS.
+async fn rebind_osc_socket(
+    old_address: &str,
+    new_address: &str,
+    app_state: &AppState,
+) -> ControlFlow<(), Option<Arc<UdpSocket>>> {
+    let logger = &app_state.logger;
+    let Some(bound) = app_state
+        .shutdown
+        .run_until(UdpSocket::bind(new_address))
+        .await
+    else {
+        return ControlFlow::Break(());
+    };
+    match bound {
+        Ok(socket) => {
+            logger.info(format!("OSC port is now {}", new_address));
+            ControlFlow::Continue(Some(Arc::new(socket)))
+        }
+        Err(e) => {
+            logger.error(format!(
+                "Cannot open OSC port {}: {}. The old port {} stays in use.",
+                new_address, e, old_address
+            ));
+            ControlFlow::Continue(None)
+        }
+    }
 }
 
 /// Log an error of `process_audio`. An error of the API shows its message
@@ -1520,6 +1567,103 @@ mod tests {
             d.vrchat.try_recv(&mut buf).is_err(),
             "the old port received a message after the change"
         );
+    }
+
+    /// A local UDP port that nothing uses at the time of the call.
+    async fn free_port() -> u16 {
+        let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        socket.local_addr().unwrap().port()
+    }
+
+    #[tokio::test]
+    async fn test_a_new_input_port_opens_a_new_socket_and_closes_the_old_one() {
+        let server = translating_server().await;
+        let (processing, mut d) = processing_loop_with_api(&server).await;
+        let new_port = free_port().await;
+        let result = processing
+            .run_with(async {
+                d.start_audio();
+                d.event(AudioEvent::StartRecording).await;
+                let (typing, old_socket) = d.received_on(&d.vrchat).await;
+                assert_eq!(typing, Osc::Typing(true));
+
+                d.update_config(|config| config.osc.input_port = new_port)
+                    .await;
+                let line = d.logged("OSC port is now").await;
+                assert_eq!(
+                    (line.level, line.message),
+                    (
+                        LogLevel::Info,
+                        format!("OSC port is now 127.0.0.1:{}", new_port)
+                    )
+                );
+                // The typing indicator and the chatbox let go of the old
+                // socket
+                UdpSocket::bind(old_socket).await.unwrap();
+                d.event(AudioEvent::AudioData(sound(1.0), Extent::Whole))
+                    .await;
+                d.event(AudioEvent::StopRecording).await;
+                for expected in [
+                    Osc::Input(TRANSLATION.to_string()),
+                    Osc::Typing(false),
+                    Osc::Typing(false),
+                ] {
+                    let (osc, sender) = d.received_on(&d.vrchat).await;
+                    assert_eq!((osc, sender.port()), (expected, new_port));
+                }
+                // Back to the port of the start
+                d.update_config(|_| {}).await;
+                d.logged("OSC port is now 127.0.0.1:0").await;
+                d.shut_down().await;
+            })
+            .await;
+
+        assert_eq!(result, Ok(()));
+    }
+
+    #[tokio::test]
+    async fn test_a_busy_input_port_keeps_the_old_socket_until_it_is_free() {
+        let (processing, mut d) = processing_loop(|_| {}).await;
+        let busy = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let busy_port = busy.local_addr().unwrap().port();
+        let result = processing
+            .run_with(async {
+                d.start_audio();
+                d.event(AudioEvent::StartRecording).await;
+                let (_, old_socket) = d.received_on(&d.vrchat).await;
+
+                d.update_config(|config| config.osc.input_port = busy_port)
+                    .await;
+                let error = d.logged("Cannot open OSC port").await;
+                assert_eq!(error.level, LogLevel::Error);
+                assert!(
+                    error
+                        .message
+                        .starts_with(&format!("Cannot open OSC port 127.0.0.1:{}: ", busy_port))
+                        && error
+                            .message
+                            .ends_with(". The old port 127.0.0.1:0 stays in use."),
+                    "{}",
+                    error.message
+                );
+                d.event(AudioEvent::StopRecording).await;
+                let (typing, sender) = d.received_on(&d.vrchat).await;
+                assert_eq!((typing, sender), (Osc::Typing(false), old_socket));
+
+                // Saved again once the port is free, the settings open it
+                drop(busy);
+                d.update_config(|config| config.osc.input_port = busy_port)
+                    .await;
+                d.logged(&format!("OSC port is now 127.0.0.1:{}", busy_port))
+                    .await;
+                d.event(AudioEvent::StartRecording).await;
+                let (typing, sender) = d.received_on(&d.vrchat).await;
+                assert_eq!((typing, sender.port()), (Osc::Typing(true), busy_port));
+                d.shut_down().await;
+            })
+            .await;
+
+        assert_eq!(result, Ok(()));
     }
 
     #[tokio::test]

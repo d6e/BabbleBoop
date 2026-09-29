@@ -26,6 +26,11 @@ impl TypingIndicator {
         }
     }
 
+    /// Send from `socket` from now on.
+    pub fn set_socket(&mut self, socket: Arc<UdpSocket>) {
+        self.socket = socket;
+    }
+
     /// Send the typing state to the VRChat chatbox at the address in
     /// `config`. A failed send goes to the activity log, once until a send
     /// works again or fails with a different message.
