@@ -1,7 +1,7 @@
 use crate::app_state::{blocking_task_failure, FailureLog, Logger};
 use crate::models::{self, DEFAULT_CHAT_MODEL, DEFAULT_TRANSCRIPTION_MODEL};
-use std::error::Error;
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -26,18 +26,32 @@ pub struct PriceEstimator {
 }
 
 impl PriceEstimator {
-    /// An estimator that loads and saves the total cost of all sessions
-    /// in `cost_file`.
+    /// An estimator that starts at a total cost of zero and saves the
+    /// total cost of all sessions in `cost_file`.
     pub fn new(cost_file: PathBuf, model: &str, transcription_model: &str) -> Self {
         let mut estimator = PriceEstimator {
             transcription_price_per_minute: 0.0,
             gpt_input_price_per_million_tokens: 0.0,
             gpt_output_price_per_million_tokens: 0.0,
-            total_cost: Self::load_total_cost(&cost_file).unwrap_or(0.0),
+            total_cost: 0.0,
             cost_file,
             save_failure: FailureLog::default(),
         };
         estimator.set_models(model, transcription_model);
+        estimator
+    }
+
+    /// An estimator that continues the total cost saved in `cost_file`.
+    /// See `load_total_cost` for a file that cannot be read. Blocks on the
+    /// file system.
+    pub fn load(
+        cost_file: PathBuf,
+        model: &str,
+        transcription_model: &str,
+        logger: &Logger,
+    ) -> Self {
+        let mut estimator = Self::new(cost_file, model, transcription_model);
+        estimator.total_cost = Self::load_total_cost(&estimator.cost_file, logger);
         estimator
     }
 
@@ -88,7 +102,9 @@ impl PriceEstimator {
     /// Add to the total cost and save it. A failed save goes to the
     /// activity log, once until the save works again or fails differently.
     /// The save runs on the blocking pool, so a slow disk does not stop
-    /// the async task of the processing loop.
+    /// the async task of the processing loop. The save writes the file in
+    /// place, so a process exit during a save can leave the file empty;
+    /// see `save_total_cost`.
     pub async fn add_cost(&mut self, cost: f64, logger: &Logger) {
         self.total_cost += cost;
         let (cost_file, total_cost) = (self.cost_file.clone(), self.total_cost);
@@ -118,16 +134,62 @@ impl PriceEstimator {
         }
     }
 
-    /// Blocks on the file system.
-    fn load_total_cost(cost_file: &Path) -> Result<f64, Box<dyn Error>> {
-        let content = fs::read_to_string(cost_file)?;
-        Ok(content.trim().parse()?)
+    /// The total cost saved in `cost_file`, or zero if there is no such
+    /// file. A file that cannot be read, or that does not hold a total (for
+    /// example a file that a save cut short left empty), is renamed to
+    /// `<cost_file>.unreadable` so that no save replaces it, the error goes
+    /// to the activity log, and the total starts at zero: the old total is
+    /// not known, and the user can add it from the kept file. If
+    /// `cost_file` is a symbolic link, on Unix the link is renamed and the
+    /// file that it names stays as it is (rename(2), man-pages 6.19), so
+    /// the next save makes a file in place of the link. Blocks on the file
+    /// system.
+    fn load_total_cost(cost_file: &Path, logger: &Logger) -> f64 {
+        let error = match fs::read_to_string(cost_file) {
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return 0.0,
+            Err(e) => e.to_string(),
+            Ok(content) => match content.trim().parse::<f64>() {
+                Ok(total) if total.is_finite() && total >= 0.0 => return total,
+                _ => "the file does not hold a total cost".to_string(),
+            },
+        };
+        let kept = with_suffix(cost_file, ".unreadable");
+        let kept_as = match fs::rename(cost_file, &kept) {
+            Ok(()) => format!("The file is now {}", kept.display()),
+            Err(e) => format!(
+                "Cannot rename it to {} ({}), so the next save replaces it",
+                kept.display(),
+                e
+            ),
+        };
+        logger.error(format!(
+            "Cannot read the total cost in {}: {}. {}. The total starts at 0.",
+            cost_file.display(),
+            error,
+            kept_as
+        ));
+        0.0
     }
 }
 
-/// Write `total_cost` to `cost_file`. Blocks on the file system.
-fn save_total_cost(cost_file: &Path, total_cost: f64) -> std::io::Result<()> {
+/// Write `total_cost` to `cost_file` in place. Blocks on the file system.
+///
+/// `fs::write` empties the file, then writes the total. If the process
+/// exits in between, for example because the shutdown waits at most 1 s
+/// for the blocking pool (main.rs), the file stays empty. The next start
+/// then cannot read it, so `load_total_cost` logs it, moves it aside, and
+/// starts the total at 0. A write that stops part way, for example on a
+/// full disk, leaves only the start of the total, which the next start
+/// reads as a smaller total without a log entry.
+fn save_total_cost(cost_file: &Path, total_cost: f64) -> io::Result<()> {
     fs::write(cost_file, total_cost.to_string())
+}
+
+/// `path` with `suffix` added to its file name.
+fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
+    let mut name = path.as_os_str().to_owned();
+    name.push(suffix);
+    PathBuf::from(name)
 }
 
 #[cfg(test)]
@@ -186,6 +248,33 @@ mod tests {
         fs::remove_dir_all(&dir).unwrap();
         estimator.add_cost(0.5, &logger).await;
         assert_eq!(saves_fail_with(log.entries()), not_found);
+    }
+
+    /// The save writes into the cost file that is there. Another name of
+    /// the file (a hard link) shows the new total, and a folder that lets
+    /// BabbleBoop write the file but not make new files does not stop the
+    /// save.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_a_save_writes_the_total_into_the_existing_cost_file() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = crate::test_support::TempDir::new("cost_save_in_place");
+        let file = dir.path().join("total_cost.txt");
+        let other_name = dir.path().join("other_name.txt");
+        fs::write(&file, "1").unwrap();
+        fs::hard_link(&file, &other_name).unwrap();
+        fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o555)).unwrap();
+        let mut log = LogCapture::new();
+        let logger = log.logger();
+
+        let mut estimator =
+            PriceEstimator::load(file.clone(), "gpt-6-luna", "gpt-transcribe", &logger);
+        estimator.add_cost(0.5, &logger).await;
+
+        assert_eq!(log.entries(), []);
+        assert_eq!(fs::read_to_string(&file).unwrap(), "1.5");
+        assert_eq!(fs::read_to_string(&other_name).unwrap(), "1.5");
     }
 
     // ===========================================================================

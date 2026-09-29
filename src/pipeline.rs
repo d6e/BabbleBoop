@@ -240,10 +240,11 @@ impl ProcessingServices {
         let recordings_dir = data_dir.recordings_dir();
         Self {
             rate_limiter: RateLimiter::new(config.rate_limit.requests_per_minute),
-            price_estimator: PriceEstimator::new(
+            price_estimator: PriceEstimator::load(
                 data_dir.cost_file(),
                 &config.openai.model,
                 &config.openai.transcription_model,
+                logger,
             ),
             recording_manager: recording_manager(config, &recordings_dir),
             recordings_dir,
@@ -966,6 +967,39 @@ mod tests {
         assert_eq!(recordings.len(), 2, "{:?}", recordings);
         assert!(recordings[0].ends_with("_first.wav"), "{:?}", recordings);
         assert!(recordings[1].ends_with("_second.wav"), "{:?}", recordings);
+    }
+
+    #[test]
+    fn test_a_total_cost_file_that_cannot_be_read_is_logged_and_kept() {
+        let dir = crate::test_support::TempDir::new("unreadable_cost");
+        let data_dir = DataDir::new(dir.path().to_path_buf());
+        let cost_file = data_dir.cost_file();
+        let kept_file = dir.path().join("total_cost.txt.unreadable");
+        // No file yet: the first start
+        let entries = entries_logged_by(|logger| {
+            ProcessingServices::new(&Config::default(), &data_dir, logger);
+        });
+        assert_eq!(entries.len(), 0, "{:?}", entries);
+
+        // An empty file is what a save cut short by the process exit left
+        let contents: [&[u8]; 5] = [b"", b"twelve", b"NaN", b"-3", b"\xff\xfe"];
+        for content in contents {
+            std::fs::write(&cost_file, content).unwrap();
+            let mut log = LogCapture::new();
+
+            let services = ProcessingServices::new(&Config::default(), &data_dir, &log.logger());
+
+            let entries = log.entries();
+            assert_eq!(entries.len(), 1, "{:?}: {:?}", content, entries);
+            assert_eq!(entries[0].0, LogLevel::Error, "{:?}", entries);
+            for path in [&cost_file, &kept_file] {
+                let path = path.display().to_string();
+                assert!(entries[0].1.contains(&path), "{:?}", entries);
+            }
+            assert_eq!(services.price_estimator.total_cost, 0.0, "{:?}", content);
+            assert!(!cost_file.exists(), "{:?}", content);
+            assert_eq!(std::fs::read(&kept_file).unwrap(), content);
+        }
     }
 
     /// Activity log entries written by `body`.
