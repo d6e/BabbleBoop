@@ -323,6 +323,9 @@ async fn run_processing_loop(
                         typing_indicator.stop_typing().await;
                         continue;
                     }
+                    // Logged above. The callback follows a discarded
+                    // recording with StopRecording.
+                    AudioEvent::RecordingDiscarded => continue,
                     // Logged above. AudioEvents follows an input error
                     // with StopRecording.
                     AudioEvent::EventsDropped(_) | AudioEvent::InputError(_) => continue,

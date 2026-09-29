@@ -14,6 +14,9 @@ pub enum AudioEvent {
     /// The callback could not queue this many events because the channel
     /// was full. Sent once the channel has room again.
     EventsDropped(u32),
+    /// Test Microphone started during a recording. The callback dropped
+    /// the recording without processing it. StopRecording follows.
+    RecordingDiscarded,
     /// The audio input reported an error or stopped. Holds the message for
     /// the activity log.
     InputError(String),

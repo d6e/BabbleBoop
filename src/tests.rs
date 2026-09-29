@@ -1882,6 +1882,7 @@ requests_per_minute = 50
                 AudioEvent::AudioPart(audio()),
                 AudioEvent::AudioData(audio(), Extent::Whole),
                 AudioEvent::StopRecording,
+                AudioEvent::RecordingDiscarded,
                 AudioEvent::EventsDropped(3),
                 AudioEvent::InputError("Audio input error: device unplugged".to_string()),
             ] {
@@ -1901,6 +1902,10 @@ requests_per_minute = 50
                     LogLevel::Info
                 ),
                 ("Silence detected, processing...", LogLevel::Info),
+                (
+                    "Test Microphone started, the recording in progress is discarded",
+                    LogLevel::Info
+                ),
                 (
                     "Lost 3 audio events because the processing queue was full",
                     LogLevel::Error

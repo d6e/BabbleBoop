@@ -302,6 +302,20 @@ impl Recorder {
         frames as usize
     }
 
+    /// Drop the recording in progress without sending its samples, and
+    /// close the gate, so that the next loud buffer starts a new recording.
+    /// Returns whether a recording was in progress.
+    pub fn discard(&mut self) -> bool {
+        self.gate.is_active = false;
+        self.gate.hold_remaining = 0.0;
+        self.quiet_frames = 0;
+        self.recording_start = None;
+        self.has_sound = false;
+        self.split = false;
+        self.discard_samples();
+        std::mem::take(&mut self.is_recording)
+    }
+
     pub fn status(&self, now: Instant) -> RecorderStatus {
         RecorderStatus {
             is_recording: self.is_recording,
@@ -1005,6 +1019,55 @@ mod tests {
         assert!(!h.feed(&QUIET).is_recording);
         let expected = [&LOUD[..], &QUIET, &QUIET, &QUIET].concat();
         assert_eq!(h.events[1], RecorderEvent::Ended(expected, Extent::Whole));
+    }
+
+    #[test]
+    fn test_discard_drops_the_recording_and_the_next_loud_buffer_starts_a_new_one() {
+        let mut h = Harness::with_limit(4 * LOUD.len());
+        // A split recording with a part in progress and the gate open
+        for _ in 0..5 {
+            h.feed(&LOUD);
+        }
+        h.feed(&QUIET);
+        assert!(h.recorder.discard());
+        let status = h.recorder.status(h.now);
+        assert_eq!(
+            status,
+            RecorderStatus {
+                is_recording: false,
+                quiet_time: 0.0,
+                gate_open: false,
+                hold_remaining: 0.0,
+                recording_duration: 0.0,
+                split: false,
+            }
+        );
+        // Inside the hold time of the discarded recording: the gate stays
+        // closed
+        assert!(!h.feed(&QUIET).is_recording);
+        h.feed(&LOUD);
+        h.wait_past_hold();
+        for _ in 0..QUIET_BUFFERS_TO_END {
+            h.feed(&QUIET);
+        }
+        let new = [&LOUD[..], &QUIET, &QUIET].concat();
+        assert_eq!(
+            h.events,
+            vec![
+                RecorderEvent::Started,
+                RecorderEvent::LimitReached([LOUD, LOUD, LOUD, LOUD].concat()),
+                RecorderEvent::Started,
+                RecorderEvent::Ended(new, Extent::Whole),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_discard_without_a_recording_reports_none() {
+        let mut h = Harness::new();
+        h.feed(&QUIET);
+        assert!(!h.recorder.discard());
+        assert!(h.events.is_empty());
     }
 
     #[test]

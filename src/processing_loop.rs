@@ -243,6 +243,9 @@ pub fn log_audio_event(event: &AudioEvent, logger: &Logger) {
         )),
         AudioEvent::AudioData(..) => logger.info("Silence detected, processing..."),
         AudioEvent::StopRecording => {}
+        AudioEvent::RecordingDiscarded => {
+            logger.info("Test Microphone started, the recording in progress is discarded")
+        }
         AudioEvent::EventsDropped(count) => logger.error(format!(
             "Lost {} audio events because the processing queue was full",
             count

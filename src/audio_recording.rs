@@ -109,6 +109,8 @@ impl EventQueue {
 ///   doubles the buffer (10, 20, then 30 s), which copies the samples: at
 ///   most 3 times in a part. After a quiet part or a recording that ended
 ///   without sound, it frees a buffer that grew and allocates a new 5 s one.
+///   It does the same when test mode starts during a recording and the
+///   recorder discards it.
 /// - `build_input_stream` grows its f32 buffer on the first callback and
 ///   when the backend delivers a larger buffer than before.
 /// - `try_send` can allocate a new block of the channel list (tokio 1.48.0,
@@ -125,6 +127,8 @@ struct InputHandler {
     events: EventQueue,
     channels: u16,
     sample_rate: u32,
+    /// Whether the last buffer was in test mode
+    in_test_mode: bool,
 }
 
 impl InputHandler {
@@ -141,6 +145,7 @@ impl InputHandler {
             events: EventQueue { tx, dropped: 0 },
             channels,
             sample_rate,
+            in_test_mode: false,
         }
     }
 
@@ -152,6 +157,17 @@ impl InputHandler {
 
         // If test mode is active, write raw samples to the test buffer and skip normal processing
         if self.shared.test_mode_active.load(Ordering::Relaxed) {
+            if !self.in_test_mode {
+                self.in_test_mode = true;
+                // The recorder does not run during the test. A recording
+                // that went on after it would join the audio before and
+                // after the test.
+                if self.recorder.discard() {
+                    self.events.send(AudioEvent::RecordingDiscarded);
+                    self.events.send(AudioEvent::StopRecording);
+                }
+                self.shared.publish(&self.recorder.status(now));
+            }
             // The processing side holds the lock only to swap the buffer.
             // If it does so now, this buffer is lost; waiting could make the
             // audio thread miss its deadline.
@@ -160,6 +176,7 @@ impl InputHandler {
             }
             return;
         }
+        self.in_test_mode = false;
 
         let settings = self.shared.recorder_settings();
         let Self {
@@ -501,6 +518,82 @@ mod tests {
         assert_eq!(buffer, [LOUD, QUIET].concat());
         let level = f32::from_bits(s.app_state.current_audio_level.load(Ordering::Relaxed));
         assert_eq!(level, 0.05);
+    }
+
+    #[test]
+    fn test_test_mode_discards_the_recording_in_progress() {
+        let mut s = Setup::new(10);
+        s.feed(&LOUD);
+        s.feed(&QUIET);
+        s.start_test_mode(100);
+        s.feed(&LOUD);
+        s.feed(&QUIET);
+        assert_eq!(
+            s.events(),
+            vec![
+                AudioEvent::StartRecording,
+                AudioEvent::RecordingDiscarded,
+                AudioEvent::StopRecording,
+            ]
+        );
+        // The GUI shows no recording, and the level meter stays live
+        let state = &s.app_state;
+        assert!(!state.is_recording.load(Ordering::Relaxed));
+        assert_eq!(
+            f32::from_bits(state.quiet_time.load(Ordering::Relaxed)),
+            0.0
+        );
+        let duration = f32::from_bits(state.recording_duration.load(Ordering::Relaxed));
+        assert_eq!(duration, 0.0);
+        let level = f32::from_bits(state.current_audio_level.load(Ordering::Relaxed));
+        assert_eq!(level, 0.05);
+
+        s.app_state.test_mode_active.store(false, Ordering::Relaxed);
+        s.feed(&QUIET);
+        assert!(s.events().is_empty());
+        s.feed(&LOUD);
+        s.feed(&QUIET);
+        s.feed(&QUIET);
+        assert_eq!(
+            s.events(),
+            vec![
+                AudioEvent::StartRecording,
+                AudioEvent::AudioData(
+                    CapturedAudio {
+                        samples: [LOUD, QUIET].concat(),
+                        channels: 2,
+                        sample_rate: 48_000,
+                    },
+                    Extent::Whole
+                ),
+                AudioEvent::StopRecording,
+            ]
+        );
+    }
+
+    #[test]
+    fn test_a_second_test_mode_discards_the_recording_in_progress_again() {
+        let mut s = Setup::new(10);
+        for _ in 0..2 {
+            s.feed(&LOUD);
+            s.start_test_mode(100);
+            s.feed(&LOUD);
+            s.app_state.test_mode_active.store(false, Ordering::Relaxed);
+        }
+        let discarded = || {
+            [
+                AudioEvent::StartRecording,
+                AudioEvent::RecordingDiscarded,
+                AudioEvent::StopRecording,
+            ]
+        };
+        assert_eq!(
+            s.events(),
+            discarded()
+                .into_iter()
+                .chain(discarded())
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]
