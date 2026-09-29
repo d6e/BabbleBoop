@@ -49,7 +49,9 @@ impl EventQueue {
 /// lock is free (`try_lock`). Logging and encoding happen on the processing
 /// side when it receives the events.
 ///
-/// The callback can still allocate, free memory or take a lock:
+/// The callback can still allocate, free memory, take a lock or wake a
+/// thread. On the normal path it does so only in the places below. The
+/// last item is the panic path, which this list does not break down.
 /// - `Recorder` allocates a 5 s buffer when it sends a part, and when a
 ///   recording starts with no buffer (the first recording, or one after a
 ///   recording that ended with sound). During speech longer than 5 s it
@@ -71,7 +73,16 @@ impl EventQueue {
 ///   another thread starts to wait for that lock, the unlock here wakes it
 ///   with a system call (Rust 1.97 on Linux and Windows,
 ///   `library/std/src/sys/sync/mutex/futex.rs` lines 89 to 95).
-/// - `PanicGuard` formats a crash report after a panic.
+/// - After a panic, the panic machinery of std runs on this thread before
+///   `catch_unwind` in `PanicGuard::run` returns: the default panic hook
+///   (BabbleBoop sets no hook) and the unwinding. It takes locks, allocates
+///   memory and writes to stderr. For example, it reads the hook under a
+///   lock, writes the message to stderr under a mutex, and puts the payload
+///   in a box (Rust 1.97, `library/std/src/panicking.rs` lines 816, 260,
+///   318, 647 and 669). This item does not list all that std does there.
+///   Then `PanicGuard` allocates a crash report and frees the payload.
+///   Later callbacks do not run `process`; they only send the crash report
+///   again while it does not fit in the channel.
 struct InputHandler {
     shared: Arc<AudioShared>,
     recorder: Recorder,
@@ -187,7 +198,8 @@ impl InputSample for i16 {
 /// otherwise end the backend's audio thread with a message on stderr only
 /// (ALSA, WASAPI), or abort the program where the backend calls the
 /// callback through an `extern "C"` function (CoreAudio; Rust aborts on a
-/// panic that unwinds out of one since 1.81).
+/// panic that unwinds out of one since 1.81). The default panic hook of std
+/// still writes the message to stderr before `catch_unwind` returns.
 struct PanicGuard {
     tx: mpsc::Sender<AudioEvent>,
     failed: bool,
