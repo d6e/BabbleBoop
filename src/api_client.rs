@@ -36,7 +36,7 @@ impl OpenAi {
         Self::with_timeouts(base_url, CONNECT_TIMEOUT, REQUEST_TIMEOUT)
     }
 
-    pub(crate) fn with_timeouts(
+    fn with_timeouts(
         base_url: &str,
         connect: Duration,
         request: Duration,
@@ -376,6 +376,94 @@ mod tests {
     fn error_body(code: &str, message: &str) -> String {
         serde_json::json!({ "error": { "message": message, "type": "x", "code": code } })
             .to_string()
+    }
+
+    // ===========================================================================
+    // Test: API error messages are truncated by characters, not bytes
+    // ===========================================================================
+
+    /// The text shown in the activity log for an OpenAI style JSON error
+    /// with `message`.
+    fn displayed_api_error(message: &str) -> String {
+        let body = serde_json::json!({ "error": { "message": message, "code": "other" } });
+        ApiError::Http {
+            status: StatusCode::BAD_REQUEST,
+            body: body.to_string(),
+        }
+        .to_string()
+    }
+
+    #[test]
+    fn test_api_error_truncation_ascii() {
+        let long = "a".repeat(130);
+        assert_eq!(
+            displayed_api_error(&long),
+            format!("{}...", "a".repeat(117))
+        );
+
+        let short = "a".repeat(120);
+        assert_eq!(displayed_api_error(&short), short);
+    }
+
+    #[test]
+    fn test_api_error_truncation_multibyte() {
+        // Byte 117 is inside the two byte 'é'.
+        let accented = format!("{}é{}", "a".repeat(116), "b".repeat(20));
+        assert_eq!(
+            displayed_api_error(&accented),
+            format!("{}é...", "a".repeat(116))
+        );
+
+        // 121 characters of three bytes each.
+        let cjk = "語".repeat(121);
+        assert_eq!(
+            displayed_api_error(&cjk),
+            format!("{}...", "語".repeat(117))
+        );
+
+        // 120 characters is short enough to show in full, even at 360 bytes.
+        let cjk_short = "語".repeat(120);
+        assert_eq!(displayed_api_error(&cjk_short), cjk_short);
+    }
+
+    // ===========================================================================
+    // Test: API client timeouts
+    // ===========================================================================
+
+    #[tokio::test]
+    async fn test_api_client_times_out_when_server_never_responds() {
+        use std::time::Duration;
+        use tokio::net::TcpListener;
+
+        // Accept the connection and keep it open without sending a response.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (_socket, _) = listener.accept().await.unwrap();
+            std::future::pending::<()>().await;
+        });
+
+        let api = OpenAi::with_timeouts(
+            &format!("http://{}/v1", addr),
+            Duration::from_secs(5),
+            Duration::from_millis(200),
+        )
+        .unwrap();
+        let result = tokio::time::timeout(
+            Duration::from_secs(10),
+            api.post_json("chat/completions", "sk-test", &serde_json::json!({})),
+        )
+        .await;
+        server.abort();
+
+        let error = result
+            .expect("request was not stopped by the client timeout")
+            .expect_err("server never responds");
+        assert!(
+            matches!(&error, ApiError::Transport(e) if e.is_timeout()),
+            "expected a timeout error, got {:?}",
+            error
+        );
     }
 
     #[test]

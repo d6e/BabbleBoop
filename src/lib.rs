@@ -24,4 +24,4 @@ pub mod typing_indicator;
 pub mod upload_audio;
 
 #[cfg(test)]
-mod tests;
+mod test_support;

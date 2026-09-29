@@ -56,17 +56,8 @@ fn downmix(samples: &[f32], channels: u16) -> Vec<f32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::{sine, zero_crossings};
     use hound::WavReader;
-
-    fn sine(frequency: f32, sample_rate: u32, seconds: f32, amplitude: f32) -> Vec<f32> {
-        let len = (sample_rate as f32 * seconds) as usize;
-        (0..len)
-            .map(|n| {
-                let t = n as f32 / sample_rate as f32;
-                amplitude * (2.0 * std::f32::consts::PI * frequency * t).sin()
-            })
-            .collect()
-    }
 
     /// Repeat each sample for every channel.
     fn interleave(mono: &[f32], channels: usize) -> Vec<f32> {
@@ -88,13 +79,6 @@ mod tests {
             sample_rate,
         };
         decode(&encode_upload_wav(&audio).unwrap())
-    }
-
-    fn zero_crossings(samples: &[i16]) -> usize {
-        samples
-            .windows(2)
-            .filter(|pair| (pair[0] < 0) != (pair[1] < 0))
-            .count()
     }
 
     fn rms(samples: &[i16]) -> f64 {
@@ -121,7 +105,7 @@ mod tests {
 
         assert!(samples.len().abs_diff(16_000) <= 1, "{}", samples.len());
         // 440 Hz crosses zero 880 times a second
-        let crossings = zero_crossings(&samples);
+        let crossings = zero_crossings(samples.iter().copied());
         assert!(crossings.abs_diff(880) <= 2, "{} zero crossings", crossings);
         // The level of a tone in the speech band does not change
         let expected_rms = 0.5 / 2f64.sqrt();
@@ -134,7 +118,7 @@ mod tests {
         let (_, samples) = encode(tone, 1, 44_100);
 
         assert!(samples.len().abs_diff(24_000) <= 1, "{}", samples.len());
-        let crossings = zero_crossings(&samples);
+        let crossings = zero_crossings(samples.iter().copied());
         assert!(
             crossings.abs_diff(3000) <= 2,
             "{} zero crossings",

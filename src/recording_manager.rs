@@ -116,24 +116,19 @@ impl RecordingManager {
     }
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod tests {
     use super::RecordingManager;
-    use crate::app_state::{LogEntry, LogLevel, Logger};
+    use crate::app_state::LogLevel;
+    use crate::test_support::LogCapture;
     use std::fs;
+    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
-    use tokio::sync::mpsc;
-
-    /// Level and text of the entries in the activity log since the last call.
-    fn new_entries(log_rx: &mut mpsc::Receiver<LogEntry>) -> Vec<(LogLevel, String)> {
-        std::iter::from_fn(|| log_rx.try_recv().ok())
-            .map(|entry| (entry.level, entry.message))
-            .collect()
-    }
 
     /// A failed debug recording save is logged once per distinct error and
     /// does not stop the caller; a save that works again is logged too.
     #[tokio::test]
+    #[cfg(unix)]
     async fn test_a_failed_debug_recording_save_is_logged_once_per_distinct_error() {
         let dir = std::env::temp_dir().join(format!(
             "babble_boop_recording_save_failure_{}",
@@ -160,15 +155,15 @@ mod tests {
             return;
         }
 
-        let (log_tx, mut log_rx) = mpsc::channel(10);
-        let logger = Logger::new(log_tx, Default::default());
+        let mut log = LogCapture::new();
+        let logger = log.logger();
         let mut manager = RecordingManager::new(dir.clone(), 10);
 
         // The translation is not aborted: save_recording has no error to
         // propagate, so a caller that drives it (Pipeline::process) always
         // reaches the code after it.
         manager.save_recording(vec![0u8; 4], "first", &logger).await;
-        let entries = new_entries(&mut log_rx);
+        let entries = log.entries();
         assert_eq!(entries.len(), 1, "{:?}", entries);
         assert_eq!(entries[0].0, LogLevel::Error, "{:?}", entries);
         assert!(
@@ -181,13 +176,13 @@ mod tests {
         manager
             .save_recording(vec![0u8; 4], "second", &logger)
             .await;
-        assert_eq!(new_entries(&mut log_rx), []);
+        assert_eq!(log.entries(), []);
 
         // The folder becomes writable again: the save works and a recovery
         // line is logged.
         fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
         manager.save_recording(vec![0u8; 4], "third", &logger).await;
-        let entries = new_entries(&mut log_rx);
+        let entries = log.entries();
         assert_eq!(entries.len(), 1, "{:?}", entries);
         assert_eq!(entries[0].0, LogLevel::Info, "{:?}", entries);
 
@@ -195,12 +190,13 @@ mod tests {
         manager
             .save_recording(vec![0u8; 4], "fourth", &logger)
             .await;
-        assert_eq!(new_entries(&mut log_rx), []);
+        assert_eq!(log.entries(), []);
 
         fs::remove_dir_all(&dir).unwrap();
     }
 
     #[tokio::test]
+    #[cfg(unix)]
     async fn test_cleanup_skips_entries_without_metadata() {
         let dir = std::env::temp_dir().join(format!(
             "babble_boop_cleanup_metadata_{}",
@@ -245,5 +241,62 @@ mod tests {
         };
         assert!(result.is_ok(), "cleanup failed: {:?}", result.err());
         assert!(files_kept, "a recording with no readable age was deleted");
+    }
+
+    // ===========================================================================
+    // Test: Recording file names cut the transcription by characters
+    // ===========================================================================
+
+    /// Saves one recording with `transcription` into a fresh directory and
+    /// returns the file name without the timestamp prefix.
+    async fn saved_recording_name(test_name: &str, transcription: &str) -> String {
+        use crate::test_support::{silent_logger, TempDir};
+
+        let dir = TempDir::new(test_name);
+
+        RecordingManager::new(dir.path().to_path_buf(), 10)
+            .save_recording(vec![0u8; 4], transcription, &silent_logger())
+            .await;
+        let names: Vec<String> = fs::read_dir(dir.path())
+            .map(|entries| {
+                entries
+                    .filter_map(|entry| entry.ok())
+                    .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        assert_eq!(names.len(), 1, "expected one recording, found {:?}", names);
+        let (_timestamp, rest) = names[0]
+            .split_once('_')
+            .expect("file name has a timestamp prefix");
+        rest.to_string()
+    }
+
+    #[tokio::test]
+    async fn test_recording_name_ascii() {
+        // The first 50 characters are kept, so " cut" is dropped.
+        let transcription = "Hello, World! This is a test of the recording name cut";
+        assert_eq!(
+            saved_recording_name("ascii", transcription).await,
+            "hello-world-this-is-a-test-of-the-recording-name.wav"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_recording_name_multibyte() {
+        // Byte 50 is inside the two byte 'é'.
+        let accented = format!("{}é{}", "a".repeat(49), "b".repeat(20));
+        assert_eq!(
+            saved_recording_name("accented", &accented).await,
+            format!("{}é.wav", "a".repeat(49))
+        );
+
+        // 60 characters of three bytes each; byte 50 is inside the 17th.
+        let cjk = "日本語".repeat(20);
+        assert_eq!(
+            saved_recording_name("cjk", &cjk).await,
+            format!("{}.wav", cjk.chars().take(50).collect::<String>())
+        );
     }
 }

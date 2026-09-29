@@ -316,7 +316,7 @@ mod tests {
     use crate::app_state::{AppCommand, AppState};
     use crate::config::AudioConfig;
     use crate::recorder::RecorderStatus;
-    use crate::tests::regression_tests::{check_against_minimum, MinimumCheck};
+    use crate::test_support::{check_against_minimum, MinimumCheck};
     use crate::types::{CapturedAudio, Extent};
     use std::time::Duration;
 

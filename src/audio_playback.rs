@@ -159,6 +159,7 @@ fn write_samples<T: OutputSample>(output: &mut [T], samples: &[f32], position: &
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::zero_crossings;
 
     fn audio(samples: &[f32], channels: u16) -> CapturedAudio {
         CapturedAudio {
@@ -186,18 +187,7 @@ mod tests {
     }
 
     fn sine(frequency: f32, sample_rate: u32, seconds: f32) -> Vec<f32> {
-        let len = (sample_rate as f32 * seconds) as usize;
-        (0..len)
-            .map(|n| {
-                let t = n as f32 / sample_rate as f32;
-                0.5 * (2.0 * std::f32::consts::PI * frequency * t).sin()
-            })
-            .collect()
-    }
-
-    fn zero_crossings(samples: impl Iterator<Item = f32>) -> usize {
-        let signs: Vec<bool> = samples.map(|s| s < 0.0).collect();
-        signs.windows(2).filter(|pair| pair[0] != pair[1]).count()
+        crate::test_support::sine(frequency, sample_rate, seconds, 0.5)
     }
 
     /// Play a 440 Hz stereo tone of 1 s recorded at `from_rate` on a

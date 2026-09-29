@@ -57,3 +57,20 @@ pub enum Extent {
     /// minimum transcription duration does not apply.
     Part,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_captured_audio_duration_with_a_zero_sample_rate_does_not_divide_by_zero() {
+        // A sample rate of 0 cannot come from a real input stream. Clamped
+        // to 1, as Recorder::new clamps it, instead of dividing by zero.
+        let audio = CapturedAudio {
+            samples: vec![0.0; 4],
+            channels: 1,
+            sample_rate: 0,
+        };
+        assert_eq!(audio.duration(), std::time::Duration::from_secs(4));
+    }
+}

@@ -466,11 +466,126 @@ mod tests {
     use super::*;
     use crate::rate_limiter::RateLimiter;
     use crate::recording_manager::RecordingManager;
+    use crate::test_support::silent_logger as test_logger;
 
-    /// Logger whose entries nobody reads.
-    fn test_logger() -> crate::app_state::Logger {
-        let (log_tx, _log_rx) = tokio::sync::mpsc::channel(10);
-        crate::app_state::Logger::new(log_tx, Default::default())
+    // ===========================================================================
+    // Test: Config load/save round-trip
+    // ===========================================================================
+
+    #[test]
+    fn test_config_round_trip() {
+        let config = Config {
+            osc: OscConfig {
+                address: "127.0.0.1".to_string(),
+                input_port: 9001,
+                output_port: 9000,
+                max_message_chunks: 9,
+                display_time: 3000,
+            },
+            openai: OpenAiConfig {
+                api_key: "test-api-key".to_string(),
+                model: "gpt-4o-mini".to_string(),
+                transcription_model: "whisper-1".to_string(),
+            },
+            translation: TranslationConfig {
+                target_language: "Japanese".to_string(),
+                include_original_message: false,
+            },
+            audio: AudioConfig {
+                silence_duration: 2.5,
+                noise_gate_threshold: 0.3,
+                noise_gate_hold_time: 0.20,
+                min_transcription_duration: 1.0,
+            },
+            rate_limit: RateLimitConfig {
+                requests_per_minute: 50,
+            },
+            // Fields with a serde default use non default values, so a field
+            // that fails to save cannot pass by falling back to its default.
+            keep_audio_files: true,
+            max_audio_files: 25,
+            theme: ThemeMode::Light,
+        };
+
+        // A file in the temp directory, named per process, so parallel runs
+        // do not share it and nothing is written into the repo
+        let temp_path = std::env::temp_dir().join(format!(
+            "babble_boop_config_roundtrip_{}.toml",
+            std::process::id()
+        ));
+
+        // Save config
+        config.save(&temp_path).expect("Failed to save config");
+
+        // Load it back
+        let loaded = Config::load(&temp_path).expect("Failed to load config");
+
+        // Clean up before asserting, so a failure does not leave the file behind
+        fs::remove_file(&temp_path).unwrap();
+
+        // Compare the whole struct, so every field is checked
+        assert_eq!(loaded.config, config);
+        assert_eq!(loaded.warnings, []);
+    }
+
+    #[test]
+    fn test_config_migration_from_old_format() {
+        // Old config format (v0.3.1) used "debug" instead of "keep_audio_files",
+        // didn't have "max_audio_files" or "transcription_model",
+        // and had "passthrough_enabled" and "passthrough_port" in [osc]
+        // Note: In TOML, top-level keys must come before any [section] declarations
+        let old_config_toml = r#"
+debug = true
+
+[osc]
+address = "127.0.0.1"
+input_port = 9001
+output_port = 9000
+max_message_chunks = 9
+display_time = 3000
+passthrough_enabled = false
+passthrough_port = 9002
+
+[openai]
+api_key = "test-key"
+model = "gpt-4o-mini"
+
+[translation]
+target_language = "Japanese"
+include_original_message = false
+
+[audio]
+silence_threshold = 100
+noise_gate_threshold = 0.3
+noise_gate_hold_time = 0.20
+min_transcription_duration = 1.0
+
+[rate_limit]
+requests_per_minute = 50
+"#;
+
+        let config: Config =
+            toml::from_str(old_config_toml).expect("Failed to parse old config format");
+
+        // "debug = true" should be read as keep_audio_files = true
+        assert!(
+            config.keep_audio_files,
+            "debug should be aliased to keep_audio_files"
+        );
+        // max_audio_files should default to 10
+        assert_eq!(
+            config.max_audio_files, 10,
+            "max_audio_files should default to 10"
+        );
+        // A missing transcription_model gets the default of a new config
+        assert_eq!(
+            config.openai.transcription_model,
+            Config::default().openai.transcription_model
+        );
+        // Removed fields (passthrough_enabled, passthrough_port,
+        // silence_threshold) should be ignored. `Config::from_toml` gives a
+        // warning for silence_threshold.
+        assert_eq!(config.audio.silence_duration, 1.0);
     }
 
     /// `config.toml.example` of v0.5.0, the last release.

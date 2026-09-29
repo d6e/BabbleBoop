@@ -270,7 +270,7 @@ pub struct BabbleBoopApp {
     app_state: Arc<AppState>,
     /// The file that the settings came from. Save writes it.
     config_file: PathBuf,
-    pub(crate) config_draft: Config,
+    config_draft: Config,
     saved_config: Config,
     /// The config file has values that the loader replaced, so the file
     /// differs from `saved_config` until the next successful save.
@@ -329,7 +329,7 @@ impl BabbleBoopApp {
     /// Show the settings as unsaved until the next successful save if the
     /// loader replaced values of the config file, so that Save can write
     /// the values in use to the file.
-    pub(crate) fn note_replaced_values(&mut self, warnings: &[ConfigWarning]) {
+    fn note_replaced_values(&mut self, warnings: &[ConfigWarning]) {
         self.file_differs = !warnings.is_empty();
     }
 
@@ -353,7 +353,7 @@ impl BabbleBoopApp {
     /// model name with a space at the end. A pasted API key often has a
     /// line break at the end, and a request cannot put a line break in its
     /// Authorization header (http 1.4.0, src/header/value.rs:557).
-    pub(crate) fn config_to_save(&mut self) -> Result<Config, String> {
+    fn config_to_save(&mut self) -> Result<Config, String> {
         let draft = &mut self.config_draft;
         for text in [
             &mut draft.osc.address,
@@ -460,14 +460,14 @@ impl BabbleBoopApp {
         self.status_message = Some((msg.into(), StatusType::Error, std::time::Instant::now()));
     }
 
-    pub(crate) fn set_status_info(&mut self, msg: impl Into<String>) {
+    fn set_status_info(&mut self, msg: impl Into<String>) {
         self.status_message = Some((msg.into(), StatusType::Info, std::time::Instant::now()));
     }
 
     /// Send `cmd` to the processing loop. Does not wait: the GUI thread
     /// must not block while the loop is busy, so a full or closed channel
     /// is an error.
-    pub(crate) fn send_command(&self, cmd: AppCommand) -> Result<(), String> {
+    fn send_command(&self, cmd: AppCommand) -> Result<(), String> {
         self.app_state
             .command_tx
             .try_send(cmd)
@@ -537,7 +537,7 @@ impl eframe::App for BabbleBoopApp {
 impl BabbleBoopApp {
     /// Show one frame. Separate from `update` so tests can run it without
     /// an `eframe::Frame`.
-    pub(crate) fn ui(&mut self, ctx: &egui::Context) {
+    fn ui(&mut self, ctx: &egui::Context) {
         // Poll for new log entries
         self.poll_log_entries();
 
@@ -832,7 +832,7 @@ impl BabbleBoopApp {
 
     /// Body of the Audio Settings section: live meters, the test button and
     /// the audio settings.
-    pub(crate) fn audio_settings_ui(&mut self, ui: &mut egui::Ui) {
+    fn audio_settings_ui(&mut self, ui: &mut egui::Ui) {
         // The meters show state of the audio thread, which does not wake the
         // GUI. Not while minimized: nothing is visible, and eframe still runs
         // a frame for each request (eframe 0.29.1
@@ -1097,5 +1097,1018 @@ impl eframe::App for ErrorDialog {
                 }
             });
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app_state::{AppCommand, AppState, LogEntry, LogLevel};
+    use crate::config::Config;
+    use crate::recorder::RecorderStatus;
+    use eframe::egui;
+    use std::path::PathBuf;
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    /// A config file in a folder that does not exist, so a click on Save
+    /// fails instead of writing a file.
+    fn unused_config_file() -> PathBuf {
+        std::env::temp_dir()
+            .join(format!("babble_boop_no_config_dir_{}", std::process::id()))
+            .join("config.toml")
+    }
+
+    fn test_app_with_state() -> (BabbleBoopApp, Arc<AppState>) {
+        let (cmd_tx, _cmd_rx) = tokio::sync::mpsc::channel(10);
+        let (log_tx, log_rx) = tokio::sync::mpsc::channel(100);
+        let app_state = Arc::new(AppState::new(cmd_tx, log_tx));
+        (
+            BabbleBoopApp::new(
+                Arc::clone(&app_state),
+                Config::default(),
+                log_rx,
+                unused_config_file(),
+            ),
+            app_state,
+        )
+    }
+
+    fn test_app() -> (BabbleBoopApp, tokio::sync::mpsc::Sender<LogEntry>) {
+        let (cmd_tx, _cmd_rx) = tokio::sync::mpsc::channel(10);
+        let (log_tx, log_rx) = tokio::sync::mpsc::channel(100);
+        let app_state = Arc::new(AppState::new(cmd_tx, log_tx.clone()));
+        let app = BabbleBoopApp::new(app_state, Config::default(), log_rx, unused_config_file());
+        (app, log_tx)
+    }
+
+    fn raw_input() -> egui::RawInput {
+        egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(400.0, 600.0),
+            )),
+            ..Default::default()
+        }
+    }
+
+    /// Run a few frames, so that the first frame layout passes are over,
+    /// and return how long the GUI asks to wait before the next frame.
+    /// `Duration::MAX` means it waits for input or a wake up.
+    fn repaint_delay_after_frames(
+        ctx: &egui::Context,
+        mut run_ui: impl FnMut(&egui::Context),
+    ) -> Duration {
+        let mut output = ctx.run(raw_input(), &mut run_ui);
+        for _ in 0..4 {
+            output = ctx.run(raw_input(), &mut run_ui);
+        }
+        output.viewport_output[&egui::ViewportId::ROOT].repaint_delay
+    }
+
+    #[test]
+    fn test_idle_gui_with_log_entries_does_not_repaint() {
+        let (mut app, log_tx) = test_app();
+        log_tx
+            .try_send(LogEntry {
+                timestamp: Instant::now(),
+                message: "Starting audio recording...".to_string(),
+                level: LogLevel::Info,
+            })
+            .unwrap();
+
+        let delay = repaint_delay_after_frames(&egui::Context::default(), |ctx| app.ui(ctx));
+
+        assert_eq!(delay, Duration::MAX);
+    }
+
+    #[test]
+    fn test_status_message_repaints_when_it_expires() {
+        let (mut app, _log_tx) = test_app();
+        app.set_status_info("Settings saved successfully");
+
+        let delay = repaint_delay_after_frames(&egui::Context::default(), |ctx| app.ui(ctx));
+
+        assert!(delay > Duration::from_secs(2), "delay {:?}", delay);
+        assert!(delay <= Duration::from_secs(3), "delay {:?}", delay);
+    }
+
+    #[test]
+    fn test_audio_settings_keep_meters_live() {
+        let (mut app, _log_tx) = test_app();
+
+        let delay = repaint_delay_after_frames(&egui::Context::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| app.audio_settings_ui(ui));
+        });
+
+        assert!(delay <= Duration::from_millis(50), "delay {:?}", delay);
+    }
+
+    #[test]
+    fn test_audio_settings_do_not_repaint_while_minimized() {
+        let (mut app, _log_tx) = test_app();
+        let ctx = egui::Context::default();
+        let minimized = || {
+            let mut input = raw_input();
+            input
+                .viewports
+                .entry(egui::ViewportId::ROOT)
+                .or_default()
+                .minimized = Some(true);
+            input
+        };
+        let mut run_ui = |ctx: &egui::Context| {
+            egui::CentralPanel::default().show(ctx, |ui| app.audio_settings_ui(ui));
+        };
+
+        let mut output = ctx.run(minimized(), &mut run_ui);
+        for _ in 0..4 {
+            output = ctx.run(minimized(), &mut run_ui);
+        }
+
+        assert_eq!(
+            output.viewport_output[&egui::ViewportId::ROOT].repaint_delay,
+            Duration::MAX
+        );
+    }
+
+    /// Text of all labels painted in `output`. Labels outside the visible
+    /// part of a scroll area are not painted.
+    fn painted_text(output: &egui::FullOutput) -> Vec<String> {
+        output
+            .shapes
+            .iter()
+            .filter_map(|clipped| match &clipped.shape {
+                egui::Shape::Text(text) => Some(text.galley.text().to_string()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Run frames the way eframe does: one, then one more for each frame
+    /// that asks for a repaint at once. Returns the last frame's output.
+    fn run_until_idle(ctx: &egui::Context, app: &mut BabbleBoopApp) -> egui::FullOutput {
+        for _ in 0..10 {
+            let output = ctx.run(raw_input(), |ctx| app.ui(ctx));
+            if output.viewport_output[&egui::ViewportId::ROOT].repaint_delay != Duration::ZERO {
+                return output;
+            }
+        }
+        panic!("the GUI still repaints continuously after 10 frames");
+    }
+
+    #[test]
+    fn test_new_log_entry_is_visible_when_gui_goes_idle() {
+        let (mut app, app_state) = test_app_with_state();
+        let ctx = egui::Context::default();
+        app_state.gui_waker.attach(ctx.clone());
+        // More entries than the log shows, so the log scrolls.
+        for i in 0..20 {
+            app_state.logger.info(format!("entry {}", i));
+        }
+        run_until_idle(&ctx, &mut app);
+
+        // The GUI is idle. The processing thread logs one more line.
+        app_state.logger.info("Translation: hallo");
+        assert!(ctx.has_requested_repaint());
+        let output = run_until_idle(&ctx, &mut app);
+
+        assert!(
+            painted_text(&output).contains(&"Translation: hallo".to_string()),
+            "{:?}",
+            painted_text(&output)
+        );
+    }
+
+    // ===========================================================================
+    // Test: Meters and the toggle follow the theme
+    // ===========================================================================
+
+    fn themed_app(theme: crate::config::ThemeMode) -> (BabbleBoopApp, Arc<AppState>) {
+        let (cmd_tx, _cmd_rx) = tokio::sync::mpsc::channel(10);
+        let (log_tx, log_rx) = tokio::sync::mpsc::channel(100);
+        let config = Config {
+            theme,
+            ..Config::default()
+        };
+        let app_state = Arc::new(AppState::new(cmd_tx, log_tx));
+        (
+            BabbleBoopApp::new(Arc::clone(&app_state), config, log_rx, unused_config_file()),
+            app_state,
+        )
+    }
+
+    /// Filled rectangles of exactly `width` x `height` points in `output`.
+    fn painted_rect_fills(
+        output: &egui::FullOutput,
+        width: f32,
+        height: f32,
+    ) -> Vec<egui::Color32> {
+        output
+            .shapes
+            .iter()
+            .filter_map(|clipped| match &clipped.shape {
+                egui::Shape::Rect(rect)
+                    if rect.rect.width() == width && rect.rect.height() == height =>
+                {
+                    Some(rect.fill)
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn is_light(color: egui::Color32) -> bool {
+        (u32::from(color.r()) + u32::from(color.g()) + u32::from(color.b())) / 3 > 128
+    }
+
+    #[test]
+    fn test_meter_tracks_follow_the_theme() {
+        use crate::config::ThemeMode;
+
+        for theme in [ThemeMode::Dark, ThemeMode::Light] {
+            let (mut app, app_state) = themed_app(theme);
+            // Recording shows the silence and duration meters. Level,
+            // silence and duration are zero, so only the tracks are painted.
+            app_state.audio.publish(RecorderStatus {
+                is_recording: true,
+                ..RecorderStatus::default()
+            });
+            let output = egui::Context::default().run(raw_input(), |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| app.audio_settings_ui(ui));
+            });
+
+            let window_is_light = is_light(crate::theme::get_visuals(theme).panel_fill);
+            let level_track = painted_rect_fills(&output, 200.0, 16.0);
+            let small_tracks = painted_rect_fills(&output, 200.0, 10.0);
+            assert_eq!(level_track.len(), 1, "{:?}", theme);
+            // Gate, silence and duration.
+            assert_eq!(small_tracks.len(), 3, "{:?}", theme);
+            for track in level_track.iter().chain(&small_tracks) {
+                assert_eq!(
+                    is_light(*track),
+                    window_is_light,
+                    "{:?} theme meter track {:?}",
+                    theme,
+                    track
+                );
+            }
+        }
+    }
+
+    // ===========================================================================
+    // Test: The duration line shows when a recording can be sent
+    // ===========================================================================
+
+    /// One frame of the audio settings while a recording that is 0.5 s long
+    /// is in progress, with a minimum transcription duration of 1 s.
+    fn recording_frame(recording_split: bool) -> egui::FullOutput {
+        let (mut app, app_state) = test_app_with_state();
+        app.config_draft.audio.min_transcription_duration = 1.0;
+        app_state.audio.publish(RecorderStatus {
+            is_recording: true,
+            recording_duration: 0.5,
+            split: recording_split,
+            ..RecorderStatus::default()
+        });
+        egui::Context::default().run(raw_input(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| app.audio_settings_ui(ui));
+        })
+    }
+
+    /// The painted "Duration:" status in the frame from `recording_frame`.
+    fn duration_status(recording_split: bool) -> Vec<String> {
+        painted_text(&recording_frame(recording_split))
+            .into_iter()
+            .filter(|text| text.starts_with("0.5s"))
+            .collect()
+    }
+
+    /// Widths of the filled parts of the 10 point high meters in the frame
+    /// from `recording_frame`. The noise gate is closed and there is no
+    /// quiet time, so only the duration meter has a filled part.
+    fn duration_bar_fill_widths(recording_split: bool) -> Vec<f32> {
+        small_meter_fill_widths(&recording_frame(recording_split))
+    }
+
+    /// Widths of the filled parts of the 10 point high meters in `output`.
+    fn small_meter_fill_widths(output: &egui::FullOutput) -> Vec<f32> {
+        let track = crate::theme::get_colors(Config::default().theme).meter_background;
+        output
+            .shapes
+            .iter()
+            .filter_map(|clipped| match &clipped.shape {
+                egui::Shape::Rect(rect) if rect.rect.height() == 10.0 && rect.fill != track => {
+                    Some(rect.rect.width())
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_last_part_of_a_split_recording_shows_ready_below_the_minimum() {
+        // The minimum applies only to a whole recording, not to the last
+        // part of a recording that reached the length limit.
+        assert_eq!(duration_status(true), ["0.5s (ready)"]);
+    }
+
+    #[test]
+    fn test_whole_recording_below_the_minimum_shows_not_ready() {
+        assert_eq!(duration_status(false), ["0.5s / 1.0s"]);
+    }
+
+    #[test]
+    fn test_last_part_of_a_split_recording_fills_the_duration_bar() {
+        // The 200 point bar is full, because the minimum does not apply.
+        assert_eq!(duration_bar_fill_widths(true), [200.0]);
+    }
+
+    #[test]
+    fn test_whole_recording_below_the_minimum_half_fills_the_duration_bar() {
+        // 0.5 s of the 1 s minimum fills half of the 200 point bar.
+        assert_eq!(duration_bar_fill_widths(false), [100.0]);
+    }
+
+    // ===========================================================================
+    // Test: The silence line shows seconds
+    // ===========================================================================
+
+    /// One frame of the audio settings while a recording is in progress,
+    /// 0.5 s after the noise gate closed, with a silence duration of 2 s.
+    fn silence_frame() -> egui::FullOutput {
+        let (mut app, app_state) = test_app_with_state();
+        app.config_draft.audio.silence_duration = 2.0;
+        app_state.audio.publish(RecorderStatus {
+            is_recording: true,
+            quiet_time: 0.5,
+            ..RecorderStatus::default()
+        });
+        egui::Context::default().run(raw_input(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| app.audio_settings_ui(ui));
+        })
+    }
+
+    #[test]
+    fn test_silence_line_shows_the_seconds_of_silence_and_the_duration() {
+        let text = painted_text(&silence_frame());
+        assert!(text.contains(&"0.5s / 2.0s".to_string()), "{:?}", text);
+    }
+
+    #[test]
+    fn test_silence_bar_fills_by_seconds() {
+        // 0.5 s of the 2 s duration fills a quarter of the 200 point bar.
+        // The gate is closed and the duration is 0, so only the silence
+        // meter has a filled part.
+        assert_eq!(small_meter_fill_widths(&silence_frame()), [50.0]);
+    }
+
+    // ===========================================================================
+    // Test: The audio settings show the published recorder status
+    // ===========================================================================
+
+    /// The texts from the gate state to the Test Microphone button in one
+    /// frame of the audio settings, with a silence duration of 3 s and a
+    /// minimum transcription duration of 2 s.
+    fn status_texts(app: &mut BabbleBoopApp) -> Vec<String> {
+        app.config_draft.audio.silence_duration = 3.0;
+        app.config_draft.audio.min_transcription_duration = 2.0;
+        let output = egui::Context::default().run(raw_input(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| app.audio_settings_ui(ui));
+        });
+        painted_text(&output)
+            .into_iter()
+            .skip_while(|text| text != "Gate:")
+            .skip(1)
+            .take_while(|text| text != "Test Microphone")
+            .collect()
+    }
+
+    #[test]
+    fn test_the_audio_settings_show_the_published_status() {
+        let (mut app, app_state) = test_app_with_state();
+        app_state.audio.publish(RecorderStatus {
+            is_recording: true,
+            quiet_time: 0.7,
+            gate_open: true,
+            hold_remaining: 0.25,
+            recording_duration: 1.5,
+            split: false,
+        });
+        assert_eq!(
+            status_texts(&mut app),
+            [
+                "Hold (0.25s)",
+                "Silence:",
+                "0.7s / 3.0s",
+                "Duration:",
+                "1.5s / 2.0s"
+            ]
+        );
+
+        app_state.audio.publish(RecorderStatus {
+            is_recording: true,
+            quiet_time: 0.2,
+            gate_open: false,
+            hold_remaining: 0.0,
+            recording_duration: 1.0,
+            split: true,
+        });
+        assert_eq!(
+            status_texts(&mut app),
+            [
+                "Closed",
+                "Silence:",
+                "0.2s / 3.0s",
+                "Duration:",
+                "1.0s (ready)"
+            ]
+        );
+
+        app_state.audio.publish(RecorderStatus {
+            gate_open: true,
+            ..RecorderStatus::default()
+        });
+        assert_eq!(status_texts(&mut app), ["Open"]);
+    }
+
+    #[test]
+    fn test_toggle_off_track_follows_the_theme() {
+        use crate::config::ThemeMode;
+        use std::sync::atomic::Ordering;
+
+        for theme in [ThemeMode::Dark, ThemeMode::Light] {
+            let (mut app, app_state) = themed_app(theme);
+            app_state.enabled.store(false, Ordering::Relaxed);
+            let output = egui::Context::default().run(raw_input(), |ctx| app.ui(ctx));
+
+            let window_is_light = is_light(crate::theme::get_visuals(theme).panel_fill);
+            let toggle = painted_rect_fills(&output, 36.0, 20.0);
+            assert_eq!(toggle.len(), 1, "{:?}", theme);
+            assert_eq!(is_light(toggle[0]), window_is_light, "{:?} theme", theme);
+        }
+    }
+
+    // ===========================================================================
+    // Test: The translation model takes a custom name
+    // ===========================================================================
+
+    /// Centre of the first painted text that reads `text`.
+    fn text_center(output: &egui::FullOutput, text: &str) -> egui::Pos2 {
+        output
+            .shapes
+            .iter()
+            .find_map(|clipped| match &clipped.shape {
+                egui::Shape::Text(shape) if shape.galley.text() == text => {
+                    Some(egui::Rect::from_min_size(shape.pos, shape.galley.size()).center())
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("no painted text {:?}", text))
+    }
+
+    fn with_events(events: Vec<egui::Event>) -> egui::RawInput {
+        egui::RawInput {
+            events,
+            ..raw_input()
+        }
+    }
+
+    /// Run one frame with `events` for what it does to `app`.
+    fn run_with_events(ctx: &egui::Context, app: &mut BabbleBoopApp, events: Vec<egui::Event>) {
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "the tests that call this do not check the painted output"
+        )]
+        let _ = ctx.run(with_events(events), |ctx| app.ui(ctx));
+    }
+
+    #[test]
+    fn test_custom_translation_model_can_be_typed() {
+        let (mut app, _log_tx) = test_app();
+        let ctx = egui::Context::default();
+        let mut output = ctx.run(raw_input(), |ctx| app.ui(ctx));
+        for _ in 0..2 {
+            output = ctx.run(raw_input(), |ctx| app.ui(ctx));
+        }
+        let model = text_center(&output, &Config::default().openai.model);
+
+        click(&ctx, &mut app, model);
+        let select_all = egui::Event::Key {
+            key: egui::Key::A,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::COMMAND,
+        };
+        let typed = egui::Event::Text("my-finetuned-model".to_string());
+        run_with_events(&ctx, &mut app, vec![select_all, typed]);
+
+        assert_eq!(app.config_draft.openai.model, "my-finetuned-model");
+    }
+
+    #[test]
+    fn test_custom_transcription_model_can_be_typed() {
+        let (mut app, _log_tx) = test_app();
+        let ctx = egui::Context::default();
+        let mut output = ctx.run(raw_input(), |ctx| app.ui(ctx));
+        for _ in 0..2 {
+            output = ctx.run(raw_input(), |ctx| app.ui(ctx));
+        }
+        let model = text_center(&output, &Config::default().openai.transcription_model);
+
+        click(&ctx, &mut app, model);
+        let select_all = egui::Event::Key {
+            key: egui::Key::A,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::COMMAND,
+        };
+        let typed = egui::Event::Text("my-transcriber".to_string());
+        run_with_events(&ctx, &mut app, vec![select_all, typed]);
+
+        assert_eq!(
+            app.config_draft.openai.transcription_model,
+            "my-transcriber"
+        );
+    }
+
+    #[test]
+    fn test_translation_model_preset_can_be_selected() {
+        let (mut app, _log_tx) = test_app();
+        app.config_draft.openai.model = "my-finetuned-model".to_string();
+        let ctx = egui::Context::default();
+        let mut output = ctx.run(raw_input(), |ctx| app.ui(ctx));
+        for _ in 0..2 {
+            output = ctx.run(raw_input(), |ctx| app.ui(ctx));
+        }
+        let model = text_center(&output, "my-finetuned-model");
+        // The preset list button is the next widget right of the text field.
+        let list_button = output
+            .shapes
+            .iter()
+            .filter_map(|clipped| match &clipped.shape {
+                egui::Shape::Rect(rect)
+                    if rect.rect.x_range().min > model.x
+                        && rect.rect.y_range().contains(model.y) =>
+                {
+                    Some(rect.rect)
+                }
+                _ => None,
+            })
+            .min_by(|a, b| a.min.x.total_cmp(&b.min.x))
+            .expect("no preset list button")
+            .center();
+
+        click(&ctx, &mut app, list_button);
+        let output = ctx.run(raw_input(), |ctx| app.ui(ctx));
+        click(&ctx, &mut app, text_center(&output, "gpt-6-sol"));
+
+        assert_eq!(app.config_draft.openai.model, "gpt-6-sol");
+    }
+
+    #[test]
+    fn test_model_names_are_trimmed_on_save() {
+        let (mut app, _log_tx) = test_app();
+        app.config_draft.openai.api_key = "test-key".to_string();
+        app.config_draft.openai.model = "gpt-6-sol ".to_string();
+        app.config_draft.openai.transcription_model = "\tgpt-transcribe\n".to_string();
+
+        let saved = app.config_to_save().expect("config is valid");
+
+        assert_eq!(saved.openai.model, "gpt-6-sol");
+        assert_eq!(saved.openai.transcription_model, "gpt-transcribe");
+        // The settings show what was saved.
+        assert_eq!(app.config_draft, saved);
+    }
+
+    #[test]
+    fn test_api_key_and_target_language_are_trimmed_on_save() {
+        let (mut app, _log_tx) = test_app();
+        // A pasted key often has a space or a line break at an end. The
+        // Authorization header must not contain them.
+        app.config_draft.openai.api_key = " sk-test \n".to_string();
+        app.config_draft.translation.target_language = "\tFrench ".to_string();
+
+        let saved = app.config_to_save().expect("config is valid");
+
+        assert_eq!(saved.openai.api_key, "sk-test");
+        assert_eq!(saved.translation.target_language, "French");
+        // The settings show what was saved.
+        assert_eq!(app.config_draft, saved);
+    }
+
+    /// Every free text field of the config, found through its serialized
+    /// form, so that a text field added later is checked too.
+    #[test]
+    fn test_every_text_field_is_trimmed_on_save() {
+        fn text_paths(value: &toml::Value, path: &str, out: &mut Vec<String>) {
+            match value {
+                toml::Value::String(_) => out.push(path.to_string()),
+                toml::Value::Table(table) => {
+                    for (key, child) in table {
+                        let child_path = if path.is_empty() {
+                            key.clone()
+                        } else {
+                            format!("{path}.{key}")
+                        };
+                        text_paths(child, &child_path, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+        fn text_at<'a>(value: &'a mut toml::Value, path: &str) -> &'a mut String {
+            let mut value = value;
+            for key in path.split('.') {
+                value = value.get_mut(key).expect("path exists");
+            }
+            match value {
+                toml::Value::String(text) => text,
+                _ => panic!("{path} is not text"),
+            }
+        }
+
+        let mut valid = Config::default();
+        valid.openai.api_key = "test-key".to_string();
+        let valid = toml::Value::try_from(&valid).expect("config serializes");
+        let mut paths = Vec::new();
+        text_paths(&valid, "", &mut paths);
+
+        let mut checked = Vec::new();
+        for path in paths {
+            let mut padded = valid.clone();
+            let text = text_at(&mut padded, &path);
+            *text = format!(" {text}\n");
+            // A value that does not load with spaces around it, such as the
+            // theme, is a fixed choice and not free text.
+            let Ok(draft) = padded.try_into::<Config>() else {
+                continue;
+            };
+            let (mut app, _log_tx) = test_app();
+            app.config_draft = draft;
+
+            let saved = app.config_to_save().expect("config is valid");
+
+            let mut saved = toml::Value::try_from(&saved).expect("config serializes");
+            let mut expected = valid.clone();
+            assert_eq!(text_at(&mut saved, &path), text_at(&mut expected, &path));
+            checked.push(path);
+        }
+        assert!(checked.contains(&"openai.api_key".to_string()));
+    }
+
+    #[test]
+    fn test_blank_api_key_is_not_saved() {
+        let (mut app, _log_tx) = test_app();
+        app.config_draft.openai.api_key = " \n".to_string();
+
+        assert!(app.config_to_save().is_err());
+    }
+
+    #[test]
+    fn test_blank_transcription_model_is_not_saved() {
+        let (mut app, _log_tx) = test_app();
+        app.config_draft.openai.api_key = "test-key".to_string();
+        app.config_draft.openai.transcription_model = " ".to_string();
+
+        assert!(app.config_to_save().is_err());
+    }
+
+    #[test]
+    fn test_blank_osc_address_is_not_saved() {
+        let (mut app, _log_tx) = test_app();
+        app.config_draft.openai.api_key = "test-key".to_string();
+        app.config_draft.osc.address = " \n".to_string();
+
+        let error = app.config_to_save().unwrap_err();
+        assert!(error.contains("address"), "{:?}", error);
+    }
+
+    /// The settings window clamps a value to the range of its field when it
+    /// draws the field, even if the user does not touch it. A config that
+    /// loads unchanged must also stay unchanged in the window.
+    #[test]
+    fn test_high_limits_are_not_clamped_in_the_settings() {
+        let (cmd_tx, _cmd_rx) = tokio::sync::mpsc::channel(10);
+        let (log_tx, log_rx) = tokio::sync::mpsc::channel(100);
+        let config = Config {
+            keep_audio_files: true,
+            max_audio_files: 500,
+            rate_limit: crate::config::RateLimitConfig {
+                requests_per_minute: 500,
+            },
+            ..Config::default()
+        };
+        let app_state = Arc::new(AppState::new(cmd_tx, log_tx));
+        let mut app = BabbleBoopApp::new(app_state, config.clone(), log_rx, unused_config_file());
+        // Tall enough that the settings below the log are not scrolled away
+        let tall = |events| egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(400.0, 3000.0),
+            )),
+            events,
+            ..Default::default()
+        };
+        let ctx = egui::Context::default();
+        let mut output = ctx.run(tall(Vec::new()), |ctx| app.ui(ctx));
+
+        // Open the two sections, which are closed at the start
+        for header in ["Rate Limit", "Debug"] {
+            let pos = text_center(&output, header);
+            let button = |pressed| egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            };
+            let press = vec![egui::Event::PointerMoved(pos), button(true)];
+            #[expect(
+                clippy::let_underscore_must_use,
+                reason = "only the output after the release is used"
+            )]
+            let _ = ctx.run(tall(press), |ctx| app.ui(ctx));
+            output = ctx.run(tall(vec![button(false)]), |ctx| app.ui(ctx));
+        }
+        for _ in 0..3 {
+            output = ctx.run(tall(Vec::new()), |ctx| app.ui(ctx));
+        }
+
+        // Both fields were drawn, so the clamp had its chance to run
+        let text = painted_text(&output);
+        assert!(text.contains(&"Max Audio Files:".to_string()), "{:?}", text);
+        assert!(
+            text.contains(&"Requests per Minute:".to_string()),
+            "{:?}",
+            text
+        );
+        assert_eq!(app.config_draft, config);
+    }
+
+    /// Press and release the primary button at `pos`, in two frames.
+    fn click(ctx: &egui::Context, app: &mut BabbleBoopApp, pos: egui::Pos2) {
+        let button = |pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        run_with_events(ctx, app, vec![egui::Event::PointerMoved(pos), button(true)]);
+        run_with_events(ctx, app, vec![button(false)]);
+    }
+
+    // ===========================================================================
+    // Test: The GUI shows that processing stopped
+    // ===========================================================================
+
+    #[test]
+    fn test_stopped_processing_is_shown_instead_of_enabled() {
+        let (mut app, app_state) = test_app_with_state();
+        let ctx = egui::Context::default();
+        app_state.gui_waker.attach(ctx.clone());
+        let output = run_until_idle(&ctx, &mut app);
+        assert!(painted_text(&output).contains(&"Enabled".to_string()));
+        assert!(!ctx.has_requested_repaint());
+
+        app_state.mark_processing_stopped();
+        assert!(ctx.has_requested_repaint());
+        let output = ctx.run(raw_input(), |ctx| app.ui(ctx));
+
+        let text = painted_text(&output);
+        assert!(
+            text.contains(&"Processing stopped".to_string()),
+            "{:?}",
+            text
+        );
+        assert!(!text.contains(&"Enabled".to_string()), "{:?}", text);
+    }
+
+    // ===========================================================================
+    // Test: A value that the loader replaced can be saved to the file
+    // ===========================================================================
+
+    const UNSAVED: &str = "● Unsaved changes";
+
+    /// The app after a start with the default config file, but with
+    /// `osc.display_time` set to `display_time` in the file. The API key is
+    /// blank, so a click on Save fails the validation and writes no file.
+    fn app_from_file_with_display_time(display_time: i64) -> BabbleBoopApp {
+        let mut file = toml::Value::try_from(Config::default()).unwrap();
+        file["osc"]["display_time"] = toml::Value::Integer(display_time);
+        let loaded = Config::from_toml(&toml::to_string(&file).unwrap()).unwrap();
+        assert_eq!(
+            loaded.config.openai.api_key, "",
+            "a click on Save must fail the validation"
+        );
+        let (cmd_tx, _cmd_rx) = tokio::sync::mpsc::channel(10);
+        let (log_tx, log_rx) = tokio::sync::mpsc::channel(100);
+        let app_state = Arc::new(AppState::new(cmd_tx, log_tx));
+        let mut app = BabbleBoopApp::new(app_state, loaded.config, log_rx, unused_config_file());
+        app.note_replaced_values(&loaded.warnings);
+        app
+    }
+
+    /// 999999 is above the maximum, so the loader uses 30000.
+    fn app_with_replaced_display_time() -> BabbleBoopApp {
+        app_from_file_with_display_time(999_999)
+    }
+
+    #[test]
+    fn test_replaced_config_value_shows_unsaved_changes() {
+        let mut app = app_with_replaced_display_time();
+
+        let text = painted_text(&run_until_idle(&egui::Context::default(), &mut app));
+
+        assert!(text.contains(&UNSAVED.to_string()), "{:?}", text);
+        // Reset has nothing to discard, as the draft has the values in use
+        assert!(!text.contains(&"Reset".to_string()), "{:?}", text);
+    }
+
+    #[test]
+    fn test_replaced_config_value_can_be_saved() {
+        let mut app = app_with_replaced_display_time();
+        let ctx = egui::Context::default();
+        let output = run_until_idle(&ctx, &mut app);
+
+        click(&ctx, &mut app, text_center(&output, "Save Settings"));
+
+        // The click reached the save handler, which refused the blank key
+        let text = painted_text(&run_until_idle(&ctx, &mut app));
+        assert!(
+            text.contains(&"OpenAI API key is required".to_string()),
+            "{:?}",
+            text
+        );
+    }
+
+    #[test]
+    fn test_reset_keeps_the_replaced_value_and_the_unsaved_changes() {
+        let mut app = app_with_replaced_display_time();
+        let ctx = egui::Context::default();
+        app.config_draft.osc.display_time = 5000;
+        let output = run_until_idle(&ctx, &mut app);
+
+        click(&ctx, &mut app, text_center(&output, "Reset"));
+
+        let text = painted_text(&run_until_idle(&ctx, &mut app));
+        assert!(
+            text.contains(&"Changes discarded".to_string()),
+            "{:?}",
+            text
+        );
+        assert_eq!(app.config_draft.osc.display_time, 30000);
+        assert!(text.contains(&UNSAVED.to_string()), "{:?}", text);
+    }
+
+    #[test]
+    fn test_config_file_without_replaced_values_has_nothing_to_save() {
+        let mut app = app_from_file_with_display_time(5000);
+        let ctx = egui::Context::default();
+        let output = run_until_idle(&ctx, &mut app);
+        assert!(
+            !painted_text(&output).contains(&UNSAVED.to_string()),
+            "{:?}",
+            painted_text(&output)
+        );
+
+        click(&ctx, &mut app, text_center(&output, "Save Settings"));
+
+        let text = painted_text(&run_until_idle(&ctx, &mut app));
+        assert!(
+            !text.contains(&"OpenAI API key is required".to_string()),
+            "{:?}",
+            text
+        );
+    }
+
+    // ===========================================================================
+    // Test: Save writes the config file that the settings came from
+    // ===========================================================================
+
+    #[test]
+    fn test_save_writes_the_config_file_that_was_loaded() {
+        use std::fs;
+
+        let dir = std::env::temp_dir().join(format!("babble_boop_gui_save_{}", std::process::id()));
+        if dir.exists() {
+            fs::remove_dir_all(&dir).unwrap();
+        }
+        fs::create_dir_all(&dir).unwrap();
+        let config_file = dir.join("config.toml");
+        let mut file_config = Config::default();
+        file_config.openai.api_key = "sk-test".to_string();
+        file_config.save(&config_file).unwrap();
+        let loaded = Config::load(&config_file).unwrap();
+        let (cmd_tx, _cmd_rx) = tokio::sync::mpsc::channel(10);
+        let (log_tx, log_rx) = tokio::sync::mpsc::channel(100);
+        let app_state = Arc::new(AppState::new(cmd_tx, log_tx));
+        let mut app = BabbleBoopApp::new(app_state, loaded.config, log_rx, config_file.clone());
+        app.config_draft.translation.target_language = "German".to_string();
+        let ctx = egui::Context::default();
+        let output = run_until_idle(&ctx, &mut app);
+
+        click(&ctx, &mut app, text_center(&output, "Save Settings"));
+
+        let text = painted_text(&run_until_idle(&ctx, &mut app));
+        let saved = Config::load(&config_file).map_err(|e| e.to_string());
+        let files: Vec<_> = fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.file_name())
+            .collect();
+        // Clean up before asserting, so a failure does not leave files behind
+        fs::remove_dir_all(&dir).unwrap();
+
+        assert!(
+            text.contains(&"Settings saved successfully".to_string()),
+            "{:?}",
+            text
+        );
+        let saved = saved.unwrap().config;
+        assert_eq!(saved.translation.target_language, "German");
+        assert_eq!(saved.openai.api_key, "sk-test");
+        assert_eq!(files, ["config.toml"]);
+    }
+
+    // ===========================================================================
+    // Test: The GUI does not wait for a busy processing loop
+    // ===========================================================================
+
+    /// Run `body` on another thread, and fail if it does not return within
+    /// 5 s. A GUI that waits for the processing loop blocks in it.
+    fn without_blocking<T: Send + 'static>(body: impl FnOnce() -> T + Send + 'static) -> T {
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || done_tx.send(body()));
+        done_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the GUI waited for the processing loop")
+    }
+
+    /// A command channel with the room of the channel in `main.rs`, full of
+    /// commands. The receiver reads none of them.
+    fn full_command_channel() -> (
+        tokio::sync::mpsc::Sender<AppCommand>,
+        tokio::sync::mpsc::Receiver<AppCommand>,
+    ) {
+        let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel(32);
+        while cmd_tx.try_send(AppCommand::SetEnabled(true)).is_ok() {}
+        assert_eq!(cmd_tx.capacity(), 0);
+        (cmd_tx, cmd_rx)
+    }
+
+    #[test]
+    fn test_a_command_to_a_full_channel_fails_without_waiting() {
+        let (cmd_tx, cmd_rx) = full_command_channel();
+        let (log_tx, log_rx) = tokio::sync::mpsc::channel(100);
+        let app_state = Arc::new(AppState::new(cmd_tx, log_tx));
+        let app = BabbleBoopApp::new(app_state, Config::default(), log_rx, unused_config_file());
+
+        let result = without_blocking(move || app.send_command(AppCommand::SetEnabled(false)));
+
+        let error = result.unwrap_err();
+        assert!(error.starts_with("Failed to send command: "), "{}", error);
+        drop(cmd_rx);
+    }
+
+    #[test]
+    fn test_save_with_a_full_channel_writes_the_file_and_says_it_is_not_applied() {
+        use std::fs;
+
+        let dir =
+            std::env::temp_dir().join(format!("babble_boop_gui_save_full_{}", std::process::id()));
+        if dir.exists() {
+            fs::remove_dir_all(&dir).unwrap();
+        }
+        fs::create_dir_all(&dir).unwrap();
+        let config_file = dir.join("config.toml");
+        let mut file_config = Config::default();
+        file_config.openai.api_key = "sk-test".to_string();
+        file_config.save(&config_file).unwrap();
+        let (cmd_tx, cmd_rx) = full_command_channel();
+        let (log_tx, log_rx) = tokio::sync::mpsc::channel(100);
+        let app_state = Arc::new(AppState::new(cmd_tx, log_tx));
+        let mut app = BabbleBoopApp::new(app_state, file_config, log_rx, config_file.clone());
+        app.config_draft.translation.target_language = "German".to_string();
+
+        let text = without_blocking(move || {
+            let ctx = egui::Context::default();
+            let output = run_until_idle(&ctx, &mut app);
+            click(&ctx, &mut app, text_center(&output, "Save Settings"));
+            painted_text(&run_until_idle(&ctx, &mut app))
+        });
+        let saved = Config::load(&config_file).map_err(|e| e.to_string());
+        // Clean up before asserting, so a failure does not leave files behind
+        fs::remove_dir_all(&dir).unwrap();
+
+        assert!(
+            text.iter().any(|line| line
+                .starts_with("Settings saved to file, but not applied. Failed to send command: ")),
+            "{:?}",
+            text
+        );
+        assert_eq!(saved.unwrap().config.translation.target_language, "German");
+        drop(cmd_rx);
     }
 }

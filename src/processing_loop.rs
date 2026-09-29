@@ -655,23 +655,17 @@ mod tests {
     use crate::app_state::{LogEntry, LogLevel};
     use crate::models;
     use crate::price_estimator::{PriceEstimator, TokenCounts};
-    use rosc::{OscPacket, OscType};
     use std::future::Future;
     use std::net::SocketAddr;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicBool, AtomicUsize};
     use std::sync::Mutex;
 
+    use crate::test_support::{recv_osc, Osc};
+
     /// The input and output format of the tests. The output plays the
     /// input format, so a test recording plays unchanged.
     const SAMPLE_RATE: u32 = 16_000;
-
-    /// A message that VRChat received from the loop.
-    #[derive(Debug, PartialEq)]
-    enum Osc {
-        Typing(bool),
-        Input(String),
-    }
 
     /// An output device that plays nothing. It sends the samples of each
     /// playback to the test and counts the playbacks that are kept alive.
@@ -900,21 +894,7 @@ mod tests {
         /// The next message that `vrchat` receives, and the address that
         /// sent it.
         async fn received_on(&self, vrchat: &UdpSocket) -> (Osc, SocketAddr) {
-            let mut buf = [0u8; 1024];
-            let (len, sender) = tokio::time::timeout(self.wait, vrchat.recv_from(&mut buf))
-                .await
-                .expect("VRChat received no message")
-                .unwrap();
-            let OscPacket::Message(message) = rosc::decoder::decode_udp(&buf[..len]).unwrap().1
-            else {
-                panic!("VRChat received a bundle");
-            };
-            let osc = match (message.addr.as_str(), message.args.first()) {
-                ("/chatbox/typing", Some(OscType::Bool(typing))) => Osc::Typing(*typing),
-                ("/chatbox/input", Some(OscType::String(text))) => Osc::Input(text.clone()),
-                _ => panic!("unexpected OSC message {:?}", message),
-            };
-            (osc, sender)
+            recv_osc(vrchat, self.wait).await
         }
 
         /// Send the settings of the start with the changes of `change`.
@@ -1681,5 +1661,482 @@ To use a different port, change Input Port in OSC Settings."
 
         assert_eq!(result, Ok(()));
         assert_eq!(*threshold_at_start.lock().unwrap(), Some(0.2));
+    }
+
+    // ===========================================================================
+    // Test: Audio events are logged and encoded on the processing side
+    // ===========================================================================
+
+    /// Activity log entries written by `body`.
+    fn entries_logged_by(body: impl FnOnce(&crate::app_state::Logger)) -> Vec<LogEntry> {
+        let mut log = crate::test_support::LogCapture::new();
+        body(&log.logger());
+        log.full_entries()
+    }
+
+    #[test]
+    fn test_audio_events_are_logged_on_the_processing_side() {
+        use crate::types::{AudioEvent, CapturedAudio, Extent};
+
+        let audio = || CapturedAudio {
+            samples: vec![0.5; 4],
+            channels: 1,
+            sample_rate: 16_000,
+        };
+        let entries = entries_logged_by(|logger| {
+            for event in [
+                AudioEvent::StartRecording,
+                AudioEvent::AudioPart(audio()),
+                AudioEvent::AudioData(audio(), Extent::Whole),
+                AudioEvent::StopRecording,
+                AudioEvent::RecordingDiscarded,
+                AudioEvent::EventsDropped(3),
+                AudioEvent::InputError("Audio input error: device unplugged".to_string()),
+            ] {
+                log_audio_event(&event, logger);
+            }
+        });
+        let logged: Vec<(&str, LogLevel)> = entries
+            .iter()
+            .map(|entry| (entry.message.as_str(), entry.level))
+            .collect();
+        assert_eq!(
+            logged,
+            vec![
+                ("Sound detected, recording...", LogLevel::Info),
+                (
+                    "Recording reached 30 s, processing it while recording goes on...",
+                    LogLevel::Info
+                ),
+                ("Silence detected, processing...", LogLevel::Info),
+                (
+                    "Test Microphone started, the recording in progress is discarded",
+                    LogLevel::Info
+                ),
+                (
+                    "Lost 3 audio events because the processing queue was full",
+                    LogLevel::Error
+                ),
+                ("Audio input error: device unplugged", LogLevel::Error),
+            ]
+        );
+    }
+
+    /// The events that `events` returns before it waits 60 s for the next
+    /// one.
+    async fn events_until_quiet(events: &mut AudioEvents) -> Vec<crate::types::AudioEvent> {
+        let mut received = Vec::new();
+        while let Ok(event) = tokio::time::timeout(Duration::from_secs(60), events.recv()).await {
+            received.push(event);
+        }
+        received
+    }
+
+    /// cpal reports playback stream errors on an audio thread, which does
+    /// not log. They reach the activity log through the processing loop,
+    /// and an error that cpal repeats is logged once.
+    #[tokio::test(start_paused = true)]
+    async fn test_playback_errors_reach_the_activity_log_once_per_distinct_error() {
+        use crate::audio_playback::playback_error_reporter;
+        use crate::test_support::LogCapture;
+
+        /// Log the errors that came, and return the new activity log entries.
+        async fn logged(
+            errors: &mut PlaybackErrors,
+            log: &mut LogCapture,
+        ) -> Vec<(String, LogLevel)> {
+            let logger = log.logger();
+            while tokio::time::timeout(Duration::from_secs(60), errors.log_next(&logger))
+                .await
+                .is_ok()
+            {}
+            log.entries()
+                .into_iter()
+                .map(|(level, message)| (message, level))
+                .collect()
+        }
+        let mut log = LogCapture::new();
+        let mut errors = PlaybackErrors::default();
+
+        // cpal calls the error callback in a loop while the device is gone
+        let mut first_stream = playback_error_reporter(errors.sender());
+        for error in [
+            "device unplugged",
+            "device unplugged",
+            "underrun",
+            "device unplugged",
+        ] {
+            first_stream.report(error);
+        }
+        assert_eq!(
+            logged(&mut errors, &mut log).await,
+            ["device unplugged", "underrun", "device unplugged"]
+                .map(|e| (format!("Playback error: {}", e), LogLevel::Error))
+        );
+
+        // The next playback has a new stream, which reports its first error
+        let mut second_stream = playback_error_reporter(errors.sender());
+        second_stream.report("device unplugged");
+        second_stream.report("device unplugged");
+        assert_eq!(
+            logged(&mut errors, &mut log).await,
+            [(
+                "Playback error: device unplugged".to_string(),
+                LogLevel::Error
+            )]
+        );
+    }
+
+    /// When the audio input ends in a recording, no StopRecording comes from
+    /// the callback. The processing loop turns the typing indicator off only
+    /// on StopRecording, so it would stay on in VRChat.
+    #[tokio::test(start_paused = true)]
+    async fn test_the_end_of_audio_input_ends_the_recording_and_is_logged_once() {
+        use crate::test_support::LogCapture;
+        use crate::types::AudioEvent;
+
+        let (tx, rx) = mpsc::channel(10);
+        let mut log = LogCapture::new();
+        let mut events = AudioEvents::new(rx, log.logger());
+        tx.try_send(AudioEvent::StartRecording).unwrap();
+        // The audio thread ends and drops every sender
+        drop(tx);
+
+        assert_eq!(
+            events_until_quiet(&mut events).await,
+            vec![AudioEvent::StartRecording, AudioEvent::StopRecording]
+        );
+        // After that, no event comes; the loop waits for its other branches
+        assert_eq!(events_until_quiet(&mut events).await, vec![]);
+        assert_eq!(
+            log.entries(),
+            vec![
+                (LogLevel::Info, "Sound detected, recording...".to_string()),
+                (
+                    LogLevel::Error,
+                    "Audio input stopped. Restart BabbleBoop to record again.".to_string()
+                ),
+            ]
+        );
+    }
+
+    /// A crash of the callback, or a stream error such as an unplugged
+    /// device, can end the input while the channel stays open. The recording
+    /// then ends with no StopRecording from the callback.
+    #[tokio::test(start_paused = true)]
+    async fn test_an_audio_input_error_ends_the_recording() {
+        use crate::test_support::silent_logger;
+        use crate::types::AudioEvent;
+
+        for message in [
+            "Audio input crashed: index out of bounds. Restart BabbleBoop to record again.",
+            "Audio input error: device unplugged",
+        ] {
+            let (tx, rx) = mpsc::channel(10);
+            let mut events = AudioEvents::new(rx, silent_logger());
+            let error = || AudioEvent::InputError(message.to_string());
+            tx.try_send(AudioEvent::StartRecording).unwrap();
+            tx.try_send(error()).unwrap();
+
+            assert_eq!(
+                events_until_quiet(&mut events).await,
+                vec![
+                    AudioEvent::StartRecording,
+                    error(),
+                    AudioEvent::StopRecording
+                ],
+                "{}",
+                message
+            );
+            // The recording ends once, and later events come as sent
+            tx.try_send(AudioEvent::StartRecording).unwrap();
+            assert_eq!(
+                events_until_quiet(&mut events).await,
+                vec![AudioEvent::StartRecording],
+                "{}",
+                message
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_recording_is_encoded_for_upload_with_its_duration() {
+        use crate::types::CapturedAudio;
+
+        // Half a second of stereo audio at 48 kHz
+        let audio = CapturedAudio {
+            samples: vec![0.25; 48_000],
+            channels: 2,
+            sample_rate: 48_000,
+        };
+        let (_wav, duration) = encode_for_upload(audio).await.unwrap();
+
+        // Computed from the captured samples, not read back from the WAV,
+        // so it is exact.
+        assert_eq!(duration, Duration::from_millis(500));
+    }
+
+    // ===========================================================================
+    // Test: The test microphone recording stops at its limit
+    // ===========================================================================
+
+    /// App state with its command and log channels kept open.
+    fn app_state_for_test() -> (
+        crate::app_state::AppState,
+        mpsc::Receiver<AppCommand>,
+        mpsc::Receiver<LogEntry>,
+    ) {
+        let (cmd_tx, cmd_rx) = mpsc::channel(10);
+        let (log_tx, log_rx) = mpsc::channel(10);
+        let app_state = crate::app_state::AppState::new(cmd_tx, log_tx);
+        (app_state, cmd_rx, log_rx)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_test_recording_reaches_its_limit_after_30_seconds() {
+        use tokio::time::timeout;
+
+        let (app_state, _cmd_rx, _log_rx) = app_state_for_test();
+        let mut test = TestRecording::new(&app_state, 2, 48_000);
+        test.start();
+        let started = Instant::now();
+
+        timeout(Duration::from_secs(60), test.limit_reached())
+            .await
+            .expect("the test recording has no time limit");
+        assert_eq!(started.elapsed(), TEST_RECORDING_LIMIT);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_no_limit_is_reached_while_no_test_recording_runs() {
+        use tokio::time::timeout;
+
+        let (app_state, _cmd_rx, _log_rx) = app_state_for_test();
+        let mut test = TestRecording::new(&app_state, 2, 48_000);
+        let hour = Duration::from_secs(3600);
+        assert!(timeout(hour, test.limit_reached()).await.is_err());
+
+        test.start();
+        test.stop();
+        assert!(timeout(hour, test.limit_reached()).await.is_err());
+    }
+
+    #[test]
+    fn test_test_recording_returns_the_samples_the_callback_wrote() {
+        use crate::types::CapturedAudio;
+
+        let (app_state, _cmd_rx, _log_rx) = app_state_for_test();
+        let mut test = TestRecording::new(&app_state, 2, 48_000);
+        assert_eq!(test.stop(), None);
+
+        test.start();
+        assert!(app_state.audio.test_mode.load(Ordering::SeqCst));
+        // As the callback does, within the reserved capacity
+        let reserved = {
+            let mut buffer = app_state.audio.test_buffer.lock().unwrap();
+            buffer.extend_from_slice(&[0.1, 0.2, 0.3, 0.4]);
+            buffer.capacity()
+        };
+        // Room for 30 s of 48 kHz stereo
+        assert_eq!(reserved, 30 * 48_000 * 2);
+
+        assert_eq!(
+            test.stop(),
+            Some(CapturedAudio {
+                samples: vec![0.1, 0.2, 0.3, 0.4],
+                channels: 2,
+                sample_rate: 48_000,
+            })
+        );
+        assert!(!app_state.audio.test_mode.load(Ordering::SeqCst));
+        // A callback that still sees test mode on has no room to write
+        assert_eq!(app_state.audio.test_buffer.lock().unwrap().capacity(), 0);
+        assert_eq!(test.stop(), None);
+    }
+
+    #[test]
+    fn test_a_new_test_recording_starts_empty() {
+        let (app_state, _cmd_rx, _log_rx) = app_state_for_test();
+        let mut test = TestRecording::new(&app_state, 1, 16_000);
+        test.start();
+        app_state.audio.test_buffer.lock().unwrap().push(0.5);
+        test.start();
+        assert_eq!(test.stop().map(|audio| audio.samples), Some(Vec::new()));
+    }
+
+    #[tokio::test]
+    async fn test_test_recording_is_converted_to_the_output_format() {
+        use crate::types::CapturedAudio;
+
+        // Half a second of stereo audio at 48 kHz, for a mono 16 kHz output
+        let audio = CapturedAudio {
+            samples: vec![0.25; 48_000],
+            channels: 2,
+            sample_rate: 48_000,
+        };
+        let samples = convert_for_playback(audio, 1, 16_000).await.unwrap();
+        assert_eq!(samples.len(), 8_000);
+    }
+
+    // ===========================================================================
+    // Test: Waiting for the audio input to start cannot hang shutdown
+    // ===========================================================================
+
+    #[tokio::test(start_paused = true)]
+    async fn test_audio_start_returns_the_stream_format() {
+        use crate::shutdown::Shutdown;
+        use tokio::sync::oneshot;
+
+        let (started_tx, started_rx) = oneshot::channel::<Result<u32, String>>();
+        started_tx.send(Ok(48_000)).unwrap();
+        let result = wait_for_audio_start(started_rx, &Shutdown::new(), AUDIO_START_TIMEOUT).await;
+        assert_eq!(result, Ok(Some(48_000)));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_audio_start_error_is_a_startup_error() {
+        use crate::shutdown::Shutdown;
+        use tokio::sync::oneshot;
+
+        let (started_tx, started_rx) = oneshot::channel::<Result<u32, String>>();
+        started_tx.send(Err("no input device".to_string())).unwrap();
+        let result = wait_for_audio_start(started_rx, &Shutdown::new(), AUDIO_START_TIMEOUT).await;
+        assert_eq!(
+            result,
+            Err("cannot start audio input: no input device".to_string())
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_audio_start_times_out_when_the_stream_does_not_start() {
+        use crate::shutdown::Shutdown;
+        use tokio::sync::oneshot;
+        use tokio::time::timeout;
+
+        // The audio thread is stuck in the driver: the sender stays alive
+        let (_started_tx, started_rx) = oneshot::channel::<Result<u32, String>>();
+        let started = Instant::now();
+        let result = timeout(
+            AUDIO_START_TIMEOUT * 2,
+            wait_for_audio_start(started_rx, &Shutdown::new(), AUDIO_START_TIMEOUT),
+        )
+        .await
+        .expect("waiting for the audio input has no time limit");
+        assert_eq!(
+            result,
+            Err("cannot start audio input: timed out after 15 s".to_string())
+        );
+        assert_eq!(started.elapsed(), AUDIO_START_TIMEOUT);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_shutdown_stops_waiting_for_the_audio_start() {
+        use crate::shutdown::Shutdown;
+        use tokio::sync::oneshot;
+        use tokio::time::timeout;
+
+        let (_started_tx, started_rx) = oneshot::channel::<Result<u32, String>>();
+        let shutdown = Shutdown::new();
+        let requester = shutdown.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            requester.request();
+        });
+        let started = Instant::now();
+        let result = timeout(
+            AUDIO_START_TIMEOUT * 2,
+            wait_for_audio_start(started_rx, &shutdown, AUDIO_START_TIMEOUT),
+        )
+        .await
+        .expect("shutdown does not stop the wait");
+        assert_eq!(result, Ok(None));
+        assert_eq!(started.elapsed(), Duration::from_secs(1));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_audio_start_fails_when_the_audio_thread_ends_without_a_result() {
+        use crate::shutdown::Shutdown;
+        use tokio::sync::oneshot;
+
+        // As when start_audio_recording panics
+        let (started_tx, started_rx) = oneshot::channel::<Result<u32, String>>();
+        drop(started_tx);
+        let started = Instant::now();
+        let result = wait_for_audio_start(started_rx, &Shutdown::new(), AUDIO_START_TIMEOUT).await;
+        assert_eq!(
+            result,
+            Err("cannot start audio input: the audio thread stopped".to_string())
+        );
+        assert_eq!(started.elapsed(), std::time::Duration::ZERO);
+    }
+
+    /// Run `hold_audio_stream` on a thread. The receiver gets a message
+    /// when it returns, and the returned `Arc` is the stream: its strong
+    /// count falls to 1 when the stream is dropped.
+    fn hold_on_thread(
+        app_state: Arc<crate::app_state::AppState>,
+    ) -> (std::sync::mpsc::Receiver<()>, Arc<()>) {
+        let stream = Arc::new(());
+        let held = Arc::clone(&stream);
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            hold_audio_stream(held, &app_state);
+            done_tx.send(()).unwrap();
+        });
+        (done_rx, stream)
+    }
+
+    #[test]
+    fn test_audio_stream_is_held_while_the_processing_loop_runs() {
+        let (app_state, _cmd_rx, _log_rx) = app_state_for_test();
+        let (done, stream) = hold_on_thread(Arc::new(app_state));
+        assert!(done.recv_timeout(Duration::from_millis(300)).is_err());
+        assert_eq!(Arc::strong_count(&stream), 2);
+    }
+
+    #[test]
+    fn test_audio_stream_is_dropped_on_shutdown() {
+        let (app_state, _cmd_rx, _log_rx) = app_state_for_test();
+        let app_state = Arc::new(app_state);
+        let (done, stream) = hold_on_thread(Arc::clone(&app_state));
+        app_state.request_shutdown();
+        done.recv_timeout(Duration::from_secs(5))
+            .expect("the stream is still held after shutdown");
+        assert_eq!(Arc::strong_count(&stream), 1);
+    }
+
+    #[test]
+    fn test_audio_stream_is_dropped_when_the_processing_thread_ends() {
+        // As after the loop timed out waiting for the stream, or stopped
+        let (app_state, _cmd_rx, _log_rx) = app_state_for_test();
+        let app_state = Arc::new(app_state);
+        let (done, stream) = hold_on_thread(Arc::clone(&app_state));
+        app_state.mark_processing_stopped();
+        done.recv_timeout(Duration::from_secs(5))
+            .expect("the stream is still held with nothing to receive its events");
+        assert_eq!(Arc::strong_count(&stream), 1);
+    }
+
+    // ===========================================================================
+    // Test: Disabling translation clears the typing indicator
+    // ===========================================================================
+
+    #[tokio::test]
+    async fn test_disabling_translation_turns_typing_indicator_off() {
+        use crate::test_support::LogCapture;
+        use crate::typing_indicator::TypingIndicator;
+
+        let receiver = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let mut config = Config::default();
+        config.osc.address = "127.0.0.1".to_string();
+        config.osc.output_port = receiver.local_addr().unwrap().port();
+        let log = LogCapture::new();
+        let indicator = TypingIndicator::new(socket, log.logger());
+
+        apply_enabled(false, &config, &indicator, &log.logger()).await;
+
+        let (osc, _) = recv_osc(&receiver, Duration::from_secs(1)).await;
+        assert_eq!(osc, Osc::Typing(false));
     }
 }

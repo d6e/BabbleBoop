@@ -354,7 +354,107 @@ impl AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::LogCapture;
     use std::sync::atomic::AtomicBool;
+
+    // ===========================================================================
+    // Test: Processing thread failures reach the activity log
+    // ===========================================================================
+
+    fn logged_entries(body: impl FnOnce() -> Result<(), String>) -> Vec<LogEntry> {
+        let mut log = LogCapture::new();
+        run_logging_failure(&log.logger(), "Processing", body);
+        log.full_entries()
+    }
+
+    #[test]
+    fn test_processing_error_is_logged() {
+        let entries = logged_entries(|| Err("Address already in use".to_string()));
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].level, LogLevel::Error);
+        assert_eq!(
+            entries[0].message,
+            "Processing stopped: Address already in use"
+        );
+    }
+
+    #[test]
+    fn test_processing_panic_is_logged() {
+        // A message formatted at run time is a String payload, a literal is
+        // a &str.
+        let what = String::from("poisoned");
+        let entries = logged_entries(move || panic!("lock {}", what));
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].level, LogLevel::Error);
+        assert_eq!(entries[0].message, "Processing crashed: lock poisoned");
+
+        let entries = logged_entries(|| panic!("no runtime"));
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].message, "Processing crashed: no runtime");
+    }
+
+    #[test]
+    fn test_processing_normal_exit_is_not_logged() {
+        assert!(logged_entries(|| Ok(())).is_empty());
+    }
+
+    // ===========================================================================
+    // Test: Changes made on other threads wake the GUI
+    // ===========================================================================
+
+    /// Whether `change` asks the egui context attached to a `GuiWaker` for a
+    /// repaint. The GUI does not repaint on its own, so a change that does
+    /// not ask stays hidden until the next mouse or keyboard input.
+    fn wakes_gui(change: impl FnOnce(&GuiWaker)) -> bool {
+        use eframe::egui;
+
+        let ctx = egui::Context::default();
+        let waker = GuiWaker::default();
+        waker.attach(ctx.clone());
+        assert!(!ctx.has_requested_repaint());
+        change(&waker);
+        ctx.has_requested_repaint()
+    }
+
+    #[test]
+    fn test_log_entry_wakes_gui() {
+        let (log_tx, _log_rx) = mpsc::channel(10);
+        assert!(wakes_gui(|waker| Logger::new(
+            log_tx.clone(),
+            waker.clone()
+        )
+        .info("Transcription: hello")));
+        assert!(wakes_gui(|waker| Logger::new(
+            log_tx.clone(),
+            waker.clone()
+        )
+        .success("Translation: hallo")));
+        assert!(wakes_gui(|waker| Logger::new(
+            log_tx.clone(),
+            waker.clone()
+        )
+        .error("Processing stopped")));
+        assert!(wakes_gui(|waker| Logger::new(
+            log_tx.clone(),
+            waker.clone()
+        )
+        .error_with_details("API error", "HTTP 500")));
+    }
+
+    #[test]
+    fn test_cost_update_wakes_gui() {
+        use crate::test_support::app_state;
+        use eframe::egui;
+
+        let app_state = app_state();
+        let ctx = egui::Context::default();
+        app_state.gui_waker.attach(ctx.clone());
+
+        app_state.set_total_cost(0.25);
+
+        assert!(ctx.has_requested_repaint());
+    }
 
     #[test]
     fn test_the_status_is_read_as_one_snapshot() {
