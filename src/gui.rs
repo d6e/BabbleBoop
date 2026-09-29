@@ -1,9 +1,18 @@
 use crate::app_state::{AppCommand, AppState, LogEntry, LogLevel};
-use crate::config::{Config, ThemeMode, CONFIG_PATH};
+use crate::config::{
+    Config, ConfigWarning, ThemeMode, DISPLAY_TIME_MS_RANGE, MAX_AUDIO_FILES_RANGE,
+    MAX_MESSAGE_CHUNKS_RANGE, MIN_TRANSCRIPTION_DURATION_RANGE, NOISE_GATE_HOLD_TIME_RANGE,
+    NOISE_GATE_THRESHOLD_RANGE, PORT_RANGE, REQUESTS_PER_MINUTE_RANGE, SILENCE_DURATION_RANGE,
+};
+use crate::models;
+use crate::processing_loop::TEST_RECORDING_LIMIT;
+use crate::recorder::MAX_RECORDING;
 use crate::theme::{self, AppColors};
 use eframe::egui;
+use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::mpsc;
 
 /// Draw an audio level meter with draggable threshold indicator
@@ -60,13 +69,19 @@ fn draw_audio_level_meter(
         painter.vline(
             threshold_x,
             rect.y_range(),
-            egui::Stroke::new(2.0, line_color),
+            egui::Stroke::new(2.0f32, line_color),
         );
     }
 }
 
 /// Draw noise gate state indicator with hold time countdown
-fn draw_noise_gate_state(ui: &mut egui::Ui, is_active: bool, hold_remaining: f32, hold_time: f32) {
+fn draw_noise_gate_state(
+    ui: &mut egui::Ui,
+    is_active: bool,
+    hold_remaining: f32,
+    hold_time: f32,
+    colors: &AppColors,
+) {
     let meter_size = egui::vec2(ui.available_width().min(200.0), 10.0);
     let (rect, _response) = ui.allocate_exact_size(meter_size, egui::Sense::hover());
 
@@ -74,15 +89,15 @@ fn draw_noise_gate_state(ui: &mut egui::Ui, is_active: bool, hold_remaining: f32
         let painter = ui.painter();
 
         // Background
-        painter.rect_filled(rect, 2.0, egui::Color32::from_gray(40));
+        painter.rect_filled(rect, 2.0, colors.meter_background);
 
         if is_active {
             let color = if hold_remaining > 0.0 {
-                // In hold state: orange/amber
-                egui::Color32::from_rgb(220, 160, 60)
+                // In hold state: amber
+                colors.meter_medium
             } else {
                 // Active audio: green
-                egui::Color32::from_rgb(60, 180, 60)
+                colors.meter_low
             };
 
             // Fill amount based on hold state
@@ -102,8 +117,14 @@ fn draw_noise_gate_state(ui: &mut egui::Ui, is_active: bool, hold_remaining: f32
     }
 }
 
-/// Draw a progress bar showing silent frames toward silence threshold
-fn draw_silence_counter(ui: &mut egui::Ui, silent_frames: u32, threshold: u32) {
+/// Draw a progress bar showing the seconds of quiet input toward the
+/// silence duration that ends the recording
+fn draw_silence_counter(
+    ui: &mut egui::Ui,
+    quiet_time: f32,
+    silence_duration: f32,
+    colors: &AppColors,
+) {
     let meter_size = egui::vec2(ui.available_width().min(200.0), 10.0);
     let (rect, _response) = ui.allocate_exact_size(meter_size, egui::Sense::hover());
 
@@ -111,11 +132,11 @@ fn draw_silence_counter(ui: &mut egui::Ui, silent_frames: u32, threshold: u32) {
         let painter = ui.painter();
 
         // Background
-        painter.rect_filled(rect, 2.0, egui::Color32::from_gray(40));
+        painter.rect_filled(rect, 2.0, colors.meter_background);
 
         // Progress bar
-        let progress = if threshold > 0 {
-            (silent_frames as f32 / threshold as f32).min(1.0)
+        let progress = if silence_duration > 0.0 {
+            (quiet_time / silence_duration).min(1.0)
         } else {
             0.0
         };
@@ -125,14 +146,21 @@ fn draw_silence_counter(ui: &mut egui::Ui, silent_frames: u32, threshold: u32) {
             let fill_rect =
                 egui::Rect::from_min_size(rect.min, egui::vec2(fill_width, rect.height()));
             // Yellow to red gradient as silence progresses
-            let color = egui::Color32::from_rgb(220, (180.0 * (1.0 - progress)) as u8, 60);
+            let color = colors
+                .meter_medium
+                .lerp_to_gamma(colors.meter_high, progress);
             painter.rect_filled(fill_rect, 2.0, color);
         }
     }
 }
 
 /// Draw recording duration progress toward minimum transcription duration
-fn draw_recording_duration(ui: &mut egui::Ui, duration: f32, min_duration: f32) {
+fn draw_recording_duration(
+    ui: &mut egui::Ui,
+    duration: f32,
+    min_duration: f32,
+    colors: &AppColors,
+) {
     let meter_size = egui::vec2(ui.available_width().min(200.0), 10.0);
     let (rect, _response) = ui.allocate_exact_size(meter_size, egui::Sense::hover());
 
@@ -140,7 +168,7 @@ fn draw_recording_duration(ui: &mut egui::Ui, duration: f32, min_duration: f32) 
         let painter = ui.painter();
 
         // Background
-        painter.rect_filled(rect, 2.0, egui::Color32::from_gray(40));
+        painter.rect_filled(rect, 2.0, colors.meter_background);
 
         // Progress bar
         let progress = if min_duration > 0.0 {
@@ -155,13 +183,9 @@ fn draw_recording_duration(ui: &mut egui::Ui, duration: f32, min_duration: f32) 
                 egui::Rect::from_min_size(rect.min, egui::vec2(fill_width, rect.height()));
             // Red to green as duration increases
             let color = if progress >= 1.0 {
-                egui::Color32::from_rgb(60, 180, 60)
+                colors.meter_low
             } else {
-                egui::Color32::from_rgb(
-                    (220.0 * (1.0 - progress) + 60.0 * progress) as u8,
-                    (60.0 * (1.0 - progress) + 180.0 * progress) as u8,
-                    60,
-                )
+                colors.meter_high.lerp_to_gamma(colors.meter_low, progress)
             };
             painter.rect_filled(fill_rect, 2.0, color);
         }
@@ -170,6 +194,17 @@ fn draw_recording_duration(ui: &mut egui::Ui, duration: f32, min_duration: f32) 
 
 const MAX_LOG_ENTRIES: usize = 50;
 
+/// How long a status message stays in the status bar.
+const STATUS_MESSAGE_TIME: Duration = Duration::from_secs(3);
+
+/// Time between frames while the audio meters are visible, about 30 per
+/// second.
+const METER_REFRESH_INTERVAL: Duration = Duration::from_millis(33);
+
+/// Spacing and label column width of the settings grids.
+const GRID_SPACING: [f32; 2] = [10.0, 6.0];
+const LABEL_WIDTH: f32 = 160.0;
+
 #[derive(Clone, Copy, PartialEq)]
 enum StatusType {
     Success,
@@ -177,18 +212,24 @@ enum StatusType {
     Info,
 }
 
-const OPENAI_MODELS: &[&str] = &[
-    "gpt-4o",
-    "gpt-4o-mini",
-    "gpt-4-turbo",
-    "gpt-4",
-    "gpt-3.5-turbo",
-];
-
-const TRANSCRIPTION_MODELS: &[&str] = &["whisper-1", "gpt-4o-transcribe", "gpt-4o-mini-transcribe"];
+/// Text field for a model name, with a list of suggested models next to it.
+/// The config takes any model name, for example a new or fine-tuned model.
+fn model_name_edit(ui: &mut egui::Ui, id_salt: &str, model: &mut String, presets: &[&str]) {
+    ui.horizontal(|ui| {
+        ui.add(egui::TextEdit::singleline(model).desired_width(150.0));
+        egui::ComboBox::from_id_salt(id_salt)
+            .selected_text("")
+            .width(0.0)
+            .show_ui(ui, |ui| {
+                for preset in presets {
+                    ui.selectable_value(model, preset.to_string(), *preset);
+                }
+            });
+    });
+}
 
 /// Custom toggle switch widget
-fn toggle_switch(on: &mut bool) -> impl egui::Widget + '_ {
+fn toggle_switch<'a>(on: &'a mut bool, colors: &'a AppColors) -> impl egui::Widget + 'a {
     move |ui: &mut egui::Ui| {
         let desired_size = egui::vec2(36.0, 20.0);
         let (rect, mut response) = ui.allocate_exact_size(desired_size, egui::Sense::click());
@@ -206,11 +247,7 @@ fn toggle_switch(on: &mut bool) -> impl egui::Widget + '_ {
             let radius = 0.5 * rect.height();
 
             // Track background
-            let bg_color = egui::Color32::from_rgb(
-                (60.0 + how_on * 40.0) as u8,
-                (60.0 + how_on * 100.0) as u8,
-                (60.0 + how_on * 40.0) as u8,
-            );
+            let bg_color = colors.toggle_off.lerp_to_gamma(colors.toggle_on, how_on);
             ui.painter().rect(rect, radius, bg_color, visuals.bg_stroke);
 
             // Knob
@@ -220,7 +257,7 @@ fn toggle_switch(on: &mut bool) -> impl egui::Widget + '_ {
             ui.painter().circle(
                 knob_center,
                 knob_radius,
-                egui::Color32::WHITE,
+                colors.toggle_knob,
                 egui::Stroke::NONE,
             );
         }
@@ -231,8 +268,13 @@ fn toggle_switch(on: &mut bool) -> impl egui::Widget + '_ {
 
 pub struct BabbleBoopApp {
     app_state: Arc<AppState>,
-    config_draft: Config,
+    /// The file that the settings came from. Save writes it.
+    config_file: PathBuf,
+    pub(crate) config_draft: Config,
     saved_config: Config,
+    /// The config file has values that the loader replaced, so the file
+    /// differs from `saved_config` until the next successful save.
+    file_differs: bool,
     status_message: Option<(String, StatusType, std::time::Instant)>,
     log_rx: mpsc::Receiver<LogEntry>,
     log_entries: Vec<LogEntry>,
@@ -241,7 +283,11 @@ pub struct BabbleBoopApp {
 }
 
 impl BabbleBoopApp {
-    pub fn new(app_state: Arc<AppState>, log_rx: mpsc::Receiver<LogEntry>) -> Self {
+    pub fn new(
+        app_state: Arc<AppState>,
+        log_rx: mpsc::Receiver<LogEntry>,
+        config_file: PathBuf,
+    ) -> Self {
         let config_draft = app_state
             .config
             .read()
@@ -251,8 +297,10 @@ impl BabbleBoopApp {
         let colors = theme::get_colors(config_draft.theme);
         Self {
             app_state,
+            config_file,
             config_draft,
             saved_config,
+            file_differs: false,
             status_message: None,
             log_rx,
             log_entries: Vec::new(),
@@ -279,8 +327,19 @@ impl BabbleBoopApp {
         format!("{:02}:{:02}:{:02}", hours, mins, secs)
     }
 
-    fn has_unsaved_changes(&self) -> bool {
+    /// Show the settings as unsaved until the next successful save if the
+    /// loader replaced values of the config file, so that Save can write
+    /// the values in use to the file.
+    pub(crate) fn note_replaced_values(&mut self, warnings: &[ConfigWarning]) {
+        self.file_differs = !warnings.is_empty();
+    }
+
+    fn draft_changed(&self) -> bool {
         self.config_draft != self.saved_config
+    }
+
+    fn has_unsaved_changes(&self) -> bool {
+        self.file_differs || self.draft_changed()
     }
 
     fn reload_config(&mut self, ctx: &egui::Context) {
@@ -290,7 +349,50 @@ impl BabbleBoopApp {
         self.set_status_info("Changes discarded");
     }
 
+    /// The draft to save, or why it cannot be saved. Removes spaces and
+    /// line breaks around every text field first. The API does not know a
+    /// model name with a space at the end. A pasted API key often has a
+    /// line break at the end, and a request cannot put a line break in its
+    /// Authorization header (http 1.4.0, src/header/value.rs:557).
+    pub(crate) fn config_to_save(&mut self) -> Result<Config, String> {
+        let draft = &mut self.config_draft;
+        for text in [
+            &mut draft.osc.address,
+            &mut draft.openai.api_key,
+            &mut draft.openai.model,
+            &mut draft.openai.transcription_model,
+            &mut draft.translation.target_language,
+        ] {
+            *text = text.trim().to_string();
+        }
+        self.validate_config()?;
+        Ok(self.config_draft.clone())
+    }
+
+    /// Write `new_config` to the config file and send it to the processing
+    /// loop.
+    fn save_config(&mut self, new_config: Config) {
+        if let Err(e) = new_config.save(&self.config_file) {
+            self.set_status_error(format!("Failed to save: {}", e));
+            return;
+        }
+        // Update the shared config
+        if let Ok(mut config) = self.app_state.config.write() {
+            *config = new_config.clone();
+        }
+        self.saved_config = new_config.clone();
+        self.file_differs = false;
+        match self.send_command(AppCommand::UpdateConfig(new_config)) {
+            Ok(()) => self.set_status_success("Settings saved successfully"),
+            Err(e) => self.set_status_error(format!("Settings saved to file, but {}", e)),
+        }
+    }
+
     fn validate_config(&self) -> Result<(), String> {
+        if self.config_draft.osc.address.trim().is_empty() {
+            return Err("OSC address is required".to_string());
+        }
+
         // Validate ports
         if self.config_draft.osc.input_port == 0 {
             return Err("Input port cannot be 0".to_string());
@@ -311,6 +413,15 @@ impl BabbleBoopApp {
         if self.config_draft.openai.model.trim().is_empty() {
             return Err("OpenAI model is required".to_string());
         }
+        if self
+            .config_draft
+            .openai
+            .transcription_model
+            .trim()
+            .is_empty()
+        {
+            return Err("Transcription model is required".to_string());
+        }
 
         // Validate target language
         if self
@@ -328,7 +439,7 @@ impl BabbleBoopApp {
 
     fn show_status(&mut self, ctx: &egui::Context) {
         if let Some((msg, status_type, time)) = &self.status_message {
-            if time.elapsed().as_secs() < 3 {
+            if time.elapsed() < STATUS_MESSAGE_TIME {
                 let colors = self.colors;
                 egui::TopBottomPanel::bottom("status_bar").show(ctx, |ui| {
                     let color = match status_type {
@@ -352,7 +463,7 @@ impl BabbleBoopApp {
         self.status_message = Some((msg.into(), StatusType::Error, std::time::Instant::now()));
     }
 
-    fn set_status_info(&mut self, msg: impl Into<String>) {
+    pub(crate) fn set_status_info(&mut self, msg: impl Into<String>) {
         self.status_message = Some((msg.into(), StatusType::Info, std::time::Instant::now()));
     }
 
@@ -373,14 +484,13 @@ impl BabbleBoopApp {
                 // Unsaved changes indicator
                 if self.has_unsaved_changes() {
                     ui.label(
-                        egui::RichText::new("● Unsaved changes")
-                            .color(colors.unsaved_indicator),
+                        egui::RichText::new("● Unsaved changes").color(colors.unsaved_indicator),
                     );
                     ui.separator();
                 }
 
-                // Reset button (only show if there are changes)
-                if self.has_unsaved_changes()
+                // Reset button (only show if the draft has changes)
+                if self.draft_changed()
                     && ui
                         .button("Reset")
                         .on_hover_text("Discard changes and reload saved settings")
@@ -396,32 +506,9 @@ impl BabbleBoopApp {
                 );
 
                 if save_button.clicked() {
-                    if let Err(e) = self.validate_config() {
-                        self.set_status_error(e);
-                    } else {
-                        match self.config_draft.save(CONFIG_PATH) {
-                            Ok(()) => {
-                                // Update the shared config
-                                if let Ok(mut config) = self.app_state.config.write() {
-                                    *config = self.config_draft.clone();
-                                }
-                                self.saved_config = self.config_draft.clone();
-                                match self.send_command(AppCommand::UpdateConfig(
-                                    self.config_draft.clone(),
-                                )) {
-                                    Ok(()) => {
-                                        self.set_status_success("Settings saved successfully")
-                                    }
-                                    Err(e) => self.set_status_error(format!(
-                                        "Settings saved to file, but {}",
-                                        e
-                                    )),
-                                }
-                            }
-                            Err(e) => {
-                                self.set_status_error(format!("Failed to save: {}", e));
-                            }
-                        }
+                    match self.config_to_save() {
+                        Ok(new_config) => self.save_config(new_config),
+                        Err(e) => self.set_status_error(e),
                     }
                 }
             });
@@ -445,6 +532,14 @@ impl eframe::App for BabbleBoopApp {
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.ui(ctx);
+    }
+}
+
+impl BabbleBoopApp {
+    /// Show one frame. Separate from `update` so tests can run it without
+    /// an `eframe::Frame`.
+    pub(crate) fn ui(&mut self, ctx: &egui::Context) {
         // Poll for new log entries
         self.poll_log_entries();
 
@@ -481,7 +576,7 @@ impl eframe::App for BabbleBoopApp {
                 ui.add_space(8.0);
 
                 // Toggle switch
-                let response = ui.add(toggle_switch(&mut enabled));
+                let response = ui.add(toggle_switch(&mut enabled, &colors));
                 if response.changed() {
                     self.app_state.enabled.store(enabled, Ordering::Relaxed);
                     if let Err(e) = self.send_command(AppCommand::SetEnabled(enabled)) {
@@ -490,12 +585,17 @@ impl eframe::App for BabbleBoopApp {
                 }
 
                 // Status text
-                let (status_text, status_color) = if enabled {
-                    ("Enabled", colors.enabled_text)
+                if self.app_state.is_processing_stopped() {
+                    ui.label(egui::RichText::new("Processing stopped").color(colors.error))
+                        .on_hover_text("Translation does not work until you restart BabbleBoop. The activity log shows the cause.");
                 } else {
-                    ("Disabled", colors.disabled_text)
-                };
-                ui.label(egui::RichText::new(status_text).color(status_color));
+                    let (status_text, status_color) = if enabled {
+                        ("Enabled", colors.enabled_text)
+                    } else {
+                        ("Disabled", colors.disabled_text)
+                    };
+                    ui.label(egui::RichText::new(status_text).color(status_color));
+                }
 
                 // Cost display on the right
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -503,7 +603,7 @@ impl eframe::App for BabbleBoopApp {
                         egui::RichText::new(format!("${:.4}", total_cost))
                             .color(colors.cost_text)
                             .small()
-                    ).on_hover_text("Total API cost this session");
+                    ).on_hover_text("Estimated API cost of all sessions. The total is saved in total_cost.txt.");
                 });
             });
             if let Some(e) = toggle_error {
@@ -555,8 +655,8 @@ impl eframe::App for BabbleBoopApp {
             ui.add_space(10.0);
 
             egui::ScrollArea::vertical().show(ui, |ui| {
-                let grid_spacing = [10.0, 6.0];
-                let label_width = 160.0;
+                let grid_spacing = GRID_SPACING;
+                let label_width = LABEL_WIDTH;
 
                 // OSC Settings
                 egui::CollapsingHeader::new("OSC Settings")
@@ -574,22 +674,22 @@ impl eframe::App for BabbleBoopApp {
 
                             ui.label("Input Port:")
                                 .on_hover_text("Port to receive OSC messages from VRChat");
-                            ui.add(egui::DragValue::new(&mut self.config_draft.osc.input_port).range(1..=65535));
+                            ui.add(egui::DragValue::new(&mut self.config_draft.osc.input_port).range(PORT_RANGE));
                             ui.end_row();
 
                             ui.label("Output Port:")
                                 .on_hover_text("Port to send OSC messages to VRChat");
-                            ui.add(egui::DragValue::new(&mut self.config_draft.osc.output_port).range(1..=65535));
+                            ui.add(egui::DragValue::new(&mut self.config_draft.osc.output_port).range(PORT_RANGE));
                             ui.end_row();
 
                             ui.label("Display Time (ms):")
                                 .on_hover_text("How long messages stay visible in VRChat");
-                            ui.add(egui::DragValue::new(&mut self.config_draft.osc.display_time).range(1000..=30000));
+                            ui.add(egui::DragValue::new(&mut self.config_draft.osc.display_time).range(DISPLAY_TIME_MS_RANGE));
                             ui.end_row();
 
                             ui.label("Max Message Chunks:")
                                 .on_hover_text("Maximum number of message parts for long text");
-                            ui.add(egui::DragValue::new(&mut self.config_draft.osc.max_message_chunks).range(1..=10));
+                            ui.add(egui::DragValue::new(&mut self.config_draft.osc.max_message_chunks).range(MAX_MESSAGE_CHUNKS_RANGE));
                             ui.end_row();
                         });
                 });
@@ -613,34 +713,26 @@ impl eframe::App for BabbleBoopApp {
                             );
                             ui.end_row();
 
-                            ui.label("Model:")
-                                .on_hover_text("OpenAI model for translation (gpt-4o recommended)");
-                            egui::ComboBox::from_id_salt("model_combo")
-                                .selected_text(&self.config_draft.openai.model)
-                                .show_ui(ui, |ui| {
-                                    for model in OPENAI_MODELS {
-                                        ui.selectable_value(
-                                            &mut self.config_draft.openai.model,
-                                            model.to_string(),
-                                            *model,
-                                        );
-                                    }
-                                });
+                            ui.label("Model:").on_hover_text(
+                                "OpenAI model for translation. Type a model name, or select one from the list.",
+                            );
+                            model_name_edit(
+                                ui,
+                                "model_presets",
+                                &mut self.config_draft.openai.model,
+                                &models::suggested_chat_models(),
+                            );
                             ui.end_row();
 
-                            ui.label("Transcription:")
-                                .on_hover_text("Model for speech-to-text (gpt-4o-mini-transcribe is cheapest)");
-                            egui::ComboBox::from_id_salt("transcription_model_combo")
-                                .selected_text(&self.config_draft.openai.transcription_model)
-                                .show_ui(ui, |ui| {
-                                    for model in TRANSCRIPTION_MODELS {
-                                        ui.selectable_value(
-                                            &mut self.config_draft.openai.transcription_model,
-                                            model.to_string(),
-                                            *model,
-                                        );
-                                    }
-                                });
+                            ui.label("Transcription:").on_hover_text(
+                                "OpenAI model for speech to text. Type a model name, or select one from the list.",
+                            );
+                            model_name_edit(
+                                ui,
+                                "transcription_model_presets",
+                                &mut self.config_draft.openai.transcription_model,
+                                &models::suggested_transcription_models(),
+                            );
                             ui.end_row();
                         });
                 });
@@ -674,145 +766,8 @@ impl eframe::App for BabbleBoopApp {
                 ui.add_space(5.0);
 
                 // Audio Settings
-                let audio_header = egui::CollapsingHeader::new("Audio Settings")
-                    .show(ui, |ui| {
-                    // Audio level meter at the top
-                    ui.label("Input Level:");
-                    let level_bits = self.app_state.current_audio_level.load(Ordering::Relaxed);
-                    let current_level = f32::from_bits(level_bits);
-                    draw_audio_level_meter(ui, current_level, &mut self.config_draft.audio.noise_gate_threshold, &colors);
-                    ui.add_space(4.0);
-
-                    // Read audio state from atomics
-                    let is_recording = self.app_state.is_recording.load(Ordering::Relaxed);
-                    let silent_frames = self.app_state.silent_frames.load(Ordering::Relaxed);
-                    let noise_gate_active = self.app_state.noise_gate_active.load(Ordering::Relaxed);
-                    let hold_remaining = f32::from_bits(
-                        self.app_state.noise_gate_hold_remaining.load(Ordering::Relaxed),
-                    );
-                    let recording_duration = f32::from_bits(
-                        self.app_state.recording_duration.load(Ordering::Relaxed),
-                    );
-
-                    // Noise gate state visualization
-                    ui.horizontal(|ui| {
-                        ui.label("Gate:");
-                        let gate_text = if noise_gate_active {
-                            if hold_remaining > 0.0 {
-                                format!("Hold ({:.2}s)", hold_remaining)
-                            } else {
-                                "Open".to_string()
-                            }
-                        } else {
-                            "Closed".to_string()
-                        };
-                        ui.label(egui::RichText::new(gate_text).small());
-                    });
-                    draw_noise_gate_state(
-                        ui,
-                        noise_gate_active,
-                        hold_remaining,
-                        self.config_draft.audio.noise_gate_hold_time,
-                    );
-                    ui.add_space(4.0);
-
-                    // Silence counter (only visible when recording)
-                    if is_recording {
-                        ui.horizontal(|ui| {
-                            ui.label("Silence:");
-                            ui.label(
-                                egui::RichText::new(format!(
-                                    "{}/{}",
-                                    silent_frames, self.config_draft.audio.silence_threshold
-                                ))
-                                .small(),
-                            );
-                        });
-                        draw_silence_counter(
-                            ui,
-                            silent_frames,
-                            self.config_draft.audio.silence_threshold,
-                        );
-                        ui.add_space(4.0);
-
-                        // Recording duration
-                        ui.horizontal(|ui| {
-                            ui.label("Duration:");
-                            let min_dur = self.config_draft.audio.min_transcription_duration;
-                            let status = if recording_duration >= min_dur {
-                                format!("{:.1}s (ready)", recording_duration)
-                            } else {
-                                format!("{:.1}s / {:.1}s", recording_duration, min_dur)
-                            };
-                            ui.label(egui::RichText::new(status).small());
-                        });
-                        draw_recording_duration(
-                            ui,
-                            recording_duration,
-                            self.config_draft.audio.min_transcription_duration,
-                        );
-                        ui.add_space(4.0);
-                    }
-
-                    // Test Microphone button
-                    let is_testing = self.app_state.test_mode_active.load(Ordering::Relaxed);
-                    ui.horizontal(|ui| {
-                        if is_testing {
-                            if ui.button("Stop Recording").on_hover_text("Stop recording and play back").clicked() {
-                                if let Err(e) = self.send_command(AppCommand::StopTestRecording) {
-                                    self.set_status_error(format!("Failed to stop test: {}", e));
-                                }
-                            }
-                        } else if ui.button("Test Microphone").on_hover_text("Record audio and play it back (click again to stop)").clicked() {
-                            if let Err(e) = self.send_command(AppCommand::StartTestRecording) {
-                                self.set_status_error(format!("Failed to start test: {}", e));
-                            }
-                        }
-                    });
-                    ui.add_space(8.0);
-
-                    egui::Grid::new("audio_grid")
-                        .num_columns(2)
-                        .spacing(grid_spacing)
-                        .min_col_width(label_width)
-                        .show(ui, |ui| {
-                            ui.label("Silence Threshold:")
-                                .on_hover_text("Number of consecutive silent samples before stopping recording");
-                            ui.add(egui::DragValue::new(&mut self.config_draft.audio.silence_threshold).range(1..=200));
-                            ui.end_row();
-
-                            ui.label("Noise Gate Threshold:")
-                                .on_hover_text("Audio level below which input is considered silence (0.0-1.0). Drag the line on the meter or use this field.");
-                            ui.add(
-                                egui::DragValue::new(&mut self.config_draft.audio.noise_gate_threshold)
-                                    .speed(0.01)
-                                    .range(0.0..=1.0),
-                            );
-                            ui.end_row();
-
-                            ui.label("Noise Gate Hold (s):")
-                                .on_hover_text("Time to keep gate open after audio drops below threshold");
-                            ui.add(
-                                egui::DragValue::new(&mut self.config_draft.audio.noise_gate_hold_time)
-                                    .speed(0.01)
-                                    .range(0.0..=2.0),
-                            );
-                            ui.end_row();
-
-                            ui.label("Min Duration (s):")
-                                .on_hover_text("Minimum recording length before transcription (filters out noise)");
-                            ui.add(
-                                egui::DragValue::new(&mut self.config_draft.audio.min_transcription_duration)
-                                    .speed(0.1)
-                                    .range(0.0..=10.0),
-                            );
-                            ui.end_row();
-                        });
-                });
-                // Request repaint when audio settings is open to update the level meter
-                if audio_header.body_returned.is_some() {
-                    ctx.request_repaint();
-                }
+                egui::CollapsingHeader::new("Audio Settings")
+                    .show(ui, |ui| self.audio_settings_ui(ui));
 
                 ui.add_space(5.0);
 
@@ -828,7 +783,7 @@ impl eframe::App for BabbleBoopApp {
                                 .on_hover_text("Maximum API requests per minute to avoid rate limiting");
                             ui.add(egui::DragValue::new(
                                 &mut self.config_draft.rate_limit.requests_per_minute,
-                            ).range(1..=120));
+                            ).range(REQUESTS_PER_MINUTE_RANGE));
                             ui.end_row();
                         });
                 });
@@ -853,7 +808,7 @@ impl eframe::App for BabbleBoopApp {
                                     .on_hover_text("Maximum number of audio files to keep");
                             });
                             ui.add_enabled_ui(self.config_draft.keep_audio_files, |ui| {
-                                ui.add(egui::DragValue::new(&mut self.config_draft.max_audio_files).range(1..=100));
+                                ui.add(egui::DragValue::new(&mut self.config_draft.max_audio_files).range(MAX_AUDIO_FILES_RANGE));
                             });
                             ui.end_row();
                         });
@@ -869,10 +824,200 @@ impl eframe::App for BabbleBoopApp {
             ctx.set_visuals(theme::get_visuals(new_theme));
         }
 
-        // Request repaint for status message timeout and log polling
-        if self.status_message.is_some() || !self.log_entries.is_empty() {
-            ctx.request_repaint();
+        // Other frames come from input and from GuiWaker, which wakes the
+        // GUI for new log entries and cost. The status message needs one
+        // more frame to hide it when it expires.
+        if let Some((_, _, shown_at)) = &self.status_message {
+            ctx.request_repaint_after(STATUS_MESSAGE_TIME.saturating_sub(shown_at.elapsed()));
         }
+    }
+
+    /// Body of the Audio Settings section: live meters, the test button and
+    /// the audio settings.
+    pub(crate) fn audio_settings_ui(&mut self, ui: &mut egui::Ui) {
+        // The meters show state of the audio thread, which does not wake the
+        // GUI. Not while minimized: nothing is visible, and eframe still runs
+        // a frame for each request (eframe 0.29.1
+        // src/native/glow_integration.rs:484-730 does not skip a minimized
+        // window, it only sleeps 10 ms after the frame).
+        //
+        // Only Windows and X11 report the minimized state, so on macOS and
+        // Wayland the refresh continues while minimized. egui-winit 0.29.1
+        // reads the state after window creation only when not on macOS
+        // (src/lib.rs:987-993). winit 0.30.12 `is_minimized` always returns
+        // `None` on Wayland
+        // (src/platform_impl/linux/wayland/window/mod.rs:355-357), and
+        // egui-winit reads `None` as not minimized. egui 0.29.1
+        // `ViewportInfo` has no occlusion field (src/data/input.rs:224-236).
+        // Its `focused` field is not usable here: the user can look at the
+        // meters while another application has focus.
+        let minimized = ui.ctx().input(|i| i.viewport().minimized == Some(true));
+        if !minimized {
+            ui.ctx().request_repaint_after(METER_REFRESH_INTERVAL);
+        }
+
+        let colors = self.colors;
+        // Audio level meter at the top
+        ui.label("Input Level:");
+        let level_bits = self.app_state.current_audio_level.load(Ordering::Relaxed);
+        let current_level = f32::from_bits(level_bits);
+        draw_audio_level_meter(
+            ui,
+            current_level,
+            &mut self.config_draft.audio.noise_gate_threshold,
+            &colors,
+        );
+        ui.add_space(4.0);
+
+        // Read audio state from atomics
+        let is_recording = self.app_state.is_recording.load(Ordering::Relaxed);
+        let quiet_time = f32::from_bits(self.app_state.quiet_time.load(Ordering::Relaxed));
+        let noise_gate_active = self.app_state.noise_gate_active.load(Ordering::Relaxed);
+        let hold_remaining = f32::from_bits(
+            self.app_state
+                .noise_gate_hold_remaining
+                .load(Ordering::Relaxed),
+        );
+        let recording_duration =
+            f32::from_bits(self.app_state.recording_duration.load(Ordering::Relaxed));
+        let recording_split = self.app_state.recording_split.load(Ordering::Relaxed);
+
+        // Noise gate state visualization
+        ui.horizontal(|ui| {
+            ui.label("Gate:");
+            let gate_text = if noise_gate_active {
+                if hold_remaining > 0.0 {
+                    format!("Hold ({:.2}s)", hold_remaining)
+                } else {
+                    "Open".to_string()
+                }
+            } else {
+                "Closed".to_string()
+            };
+            ui.label(egui::RichText::new(gate_text).small());
+        });
+        draw_noise_gate_state(
+            ui,
+            noise_gate_active,
+            hold_remaining,
+            self.config_draft.audio.noise_gate_hold_time,
+            &colors,
+        );
+        ui.add_space(4.0);
+
+        // Silence counter (only visible when recording)
+        if is_recording {
+            let silence_duration = self.config_draft.audio.silence_duration;
+            ui.horizontal(|ui| {
+                ui.label("Silence:").on_hover_text(
+                    "Seconds of silence since the noise gate closed, and the silence duration \
+                    that ends the recording",
+                );
+                ui.label(
+                    egui::RichText::new(format!("{:.1}s / {:.1}s", quiet_time, silence_duration))
+                        .small(),
+                );
+            });
+            draw_silence_counter(ui, quiet_time, silence_duration, &colors);
+            ui.add_space(4.0);
+
+            // Recording duration. The minimum transcription duration does
+            // not apply to the last part of a recording that reached the
+            // length limit.
+            let min_duration_shown = if recording_split {
+                0.0
+            } else {
+                self.config_draft.audio.min_transcription_duration
+            };
+            ui.horizontal(|ui| {
+                ui.label("Duration:");
+                let min_dur = min_duration_shown;
+                let status = if recording_duration >= min_dur {
+                    format!("{:.1}s (ready)", recording_duration)
+                } else {
+                    format!("{:.1}s / {:.1}s", recording_duration, min_dur)
+                };
+                ui.label(egui::RichText::new(status).small());
+            });
+            draw_recording_duration(ui, recording_duration, min_duration_shown, &colors);
+            ui.add_space(4.0);
+        }
+
+        // Test Microphone button
+        let is_testing = self.app_state.test_mode_active.load(Ordering::Relaxed);
+        ui.horizontal(|ui| {
+            if is_testing {
+                if ui
+                    .button("Stop Recording")
+                    .on_hover_text("Stop recording and play back")
+                    .clicked()
+                {
+                    if let Err(e) = self.send_command(AppCommand::StopTestRecording) {
+                        self.set_status_error(format!("Failed to stop test: {}", e));
+                    }
+                }
+            } else if ui
+                .button("Test Microphone")
+                .on_hover_text(format!(
+                    "Record up to {} s of audio and play it back (click again to stop)",
+                    TEST_RECORDING_LIMIT.as_secs()
+                ))
+                .clicked()
+            {
+                if let Err(e) = self.send_command(AppCommand::StartTestRecording) {
+                    self.set_status_error(format!("Failed to start test: {}", e));
+                }
+            }
+        });
+        ui.add_space(8.0);
+
+        egui::Grid::new("audio_grid")
+            .num_columns(2)
+            .spacing(GRID_SPACING)
+            .min_col_width(LABEL_WIDTH)
+            .show(ui, |ui| {
+                ui.label("Silence Duration (s):").on_hover_text(
+                    "Seconds of silence, after the noise gate closes, before the recording \
+                    stops and is sent",
+                );
+                ui.add(
+                    egui::DragValue::new(&mut self.config_draft.audio.silence_duration)
+                        .speed(0.05)
+                        .range(SILENCE_DURATION_RANGE),
+                );
+                ui.end_row();
+
+                ui.label("Noise Gate Threshold:")
+                    .on_hover_text("Audio level below which input is considered silence (0.0-1.0). Drag the line on the meter or use this field.");
+                ui.add(
+                    egui::DragValue::new(&mut self.config_draft.audio.noise_gate_threshold)
+                        .speed(0.01)
+                        .range(NOISE_GATE_THRESHOLD_RANGE),
+                );
+                ui.end_row();
+
+                ui.label("Noise Gate Hold (s):")
+                    .on_hover_text("Time to keep gate open after audio drops below threshold");
+                ui.add(
+                    egui::DragValue::new(&mut self.config_draft.audio.noise_gate_hold_time)
+                        .speed(0.01)
+                        .range(NOISE_GATE_HOLD_TIME_RANGE),
+                );
+                ui.end_row();
+
+                ui.label("Min Duration (s):").on_hover_text(format!(
+                    "Recordings shorter than this are not transcribed (filters out noise). \
+                    A recording that reaches {} s is split into parts. The minimum does not \
+                    apply to these parts.",
+                    MAX_RECORDING.as_secs()
+                ));
+                ui.add(
+                    egui::DragValue::new(&mut self.config_draft.audio.min_transcription_duration)
+                        .speed(0.1)
+                        .range(MIN_TRANSCRIPTION_DURATION_RANGE),
+                );
+                ui.end_row();
+            });
     }
 }
 
@@ -880,6 +1025,8 @@ pub fn run_gui(
     app_state: Arc<AppState>,
     log_rx: mpsc::Receiver<LogEntry>,
     first_run: bool,
+    config_warnings: Vec<ConfigWarning>,
+    config_file: PathBuf,
 ) -> Result<(), eframe::Error> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -892,7 +1039,9 @@ pub fn run_gui(
         "BabbleBoop",
         options,
         Box::new(move |cc| {
-            let mut app = BabbleBoopApp::new(app_state, log_rx);
+            app_state.gui_waker.attach(cc.egui_ctx.clone());
+            let mut app = BabbleBoopApp::new(app_state, log_rx, config_file);
+            app.note_replaced_values(&config_warnings);
 
             // Apply saved theme on startup
             let theme_mode = app.config_draft.theme;

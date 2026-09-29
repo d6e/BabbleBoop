@@ -9,18 +9,18 @@ max_message_chunks = 9  # large messages are split into chunks, this is the max 
 
 [openai]
 api_key = "YOUR API KEY"
-model = "gpt-4o-mini"
-transcription_model = "whisper-1"  # whisper-1, gpt-4o-transcribe, or gpt-4o-mini-transcribe
+model = "gpt-6-luna"                    # any OpenAI chat model, for example gpt-6-sol or gpt-4.1-mini
+transcription_model = "gpt-transcribe"  # any OpenAI speech to text model
 
 [translation]
 target_language = "Japanese"
 include_original_message = false
 
 [audio]
-silence_threshold = 100           # determines the time for the silence detection
+silence_duration = 1.0            # seconds of silence after the noise gate closes that end a recording
 noise_gate_threshold = 0.3        # adjust based on your microphone and environment
 noise_gate_hold_time = 0.20       # adjust based on preference
-min_transcription_duration = 1.0  # Minimum duration in seconds for transcription
+min_transcription_duration = 1.0  # Minimum duration in seconds for transcription, not applied to a recording that reaches the 30 s limit
 
 [rate_limit]
 requests_per_minute = 50          # adjust based on your API limits, it should continue to record even while waiting

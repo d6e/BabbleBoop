@@ -1,0 +1,10 @@
+# These Duration methods panic on a negative, NaN or too large value. Use
+# the try_ forms, such as Duration::try_from_secs_f32, and handle the error.
+disallowed-methods = [
+    { path = "std::time::Duration::from_secs_f32", reason = "panics on a negative, NaN or too large value; use Duration::try_from_secs_f32" },
+    { path = "std::time::Duration::from_secs_f64", reason = "panics on a negative, NaN or too large value; use Duration::try_from_secs_f64" },
+    { path = "std::time::Duration::mul_f32", reason = "panics on a negative, NaN or too large result; use Duration::try_from_secs_f32 on the product" },
+    { path = "std::time::Duration::mul_f64", reason = "panics on a negative, NaN or too large result; use Duration::try_from_secs_f64 on the product" },
+    { path = "std::time::Duration::div_f32", reason = "panics on a negative, NaN or too large result; use Duration::try_from_secs_f32 on the quotient" },
+    { path = "std::time::Duration::div_f64", reason = "panics on a negative, NaN or too large result; use Duration::try_from_secs_f64 on the quotient" },
+]

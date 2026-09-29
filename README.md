@@ -7,8 +7,8 @@ The fun thing about LLMs is that they can translate to anything! English -> Japa
 ## What It Does
 
 - Listens to your speech in VRChat
-- Transcribes what you say using OpenAI's Whisper
-- Translates the text using GPT models
+- Transcribes what you say using an OpenAI speech to text model (gpt-transcribe by default)
+- Translates the text using a GPT model (gpt-6-luna by default)
 - Sends the translation to VRChat's chat box via OSC
 
 ## Why LLMs?
@@ -27,11 +27,23 @@ I wanted to see if using LLMs like GPT could provide more context-aware translat
 ## Running It
 
 1. Start VRChat and enable OSC
-2. Populate the `config.toml` file with your OpenAI API key and target language. Make sure it's in the same folder as the executable. I left an example config file in the repo.
+2. Populate the `config.toml` file with your OpenAI API key and target language. Put it in the same folder as the executable (see [Where BabbleBoop keeps its files](#where-babbleboop-keeps-its-files)). I left an example config file in the repo.
 3. Run the translator:
    - If using a [pre-built release](https://github.com/d6e/vrchat_osc_llm/releases), just double-click the executable
    - If you've built from source, use `cargo run --release`
 4. Start chatting in VRChat!
+
+## Where BabbleBoop keeps its files
+
+BabbleBoop keeps `config.toml`, `total_cost.txt` (the estimated API cost of all sessions) and the `recordings` folder (when `keep_audio_files` is on) in one folder. At startup, it looks for `config.toml` in this order:
+
+1. The working directory (the folder that BabbleBoop was started from, for example the "Start in" folder of a shortcut). If `config.toml` is there, BabbleBoop uses this folder, also when there is a `config.toml` next to the executable. The activity log then shows the path of the `config.toml` and `total_cost.txt` next to the executable that BabbleBoop does not use.
+2. The folder of the executable.
+3. If no folder has a `config.toml` yet, BabbleBoop creates one next to the executable. If it cannot write to that folder (for example `C:\Program Files` with another start folder), it creates one in the working directory.
+
+`cargo run` in the repo folder uses the `config.toml` of the repo folder. In a fresh clone without one, it creates the config next to the executable in `target/debug` (`target/release` with `--release`), and `cargo clean` deletes it with your settings and total cost.
+
+At startup, the activity log shows which folder BabbleBoop uses.
 
 ## Some Cool Things It Does
 

@@ -1,6 +1,6 @@
 [package]
 name = "babble_boop"
-version = "0.5.0"
+version = "0.6.0"
 edition = "2021"
 
 [dependencies]
@@ -19,3 +19,16 @@ serde = { version = "1.0.205", features = ["derive"] }
 serde_json = "1.0.122"
 tokio = { version = "1.39.2", features = ["rt-multi-thread", "sync", "net", "time", "fs", "io-util", "macros"] }
 toml = "0.8.19"
+
+[lints.clippy]
+# Slicing a str by byte range panics inside a multibyte character.
+string_slice = "deny"
+# A dropped Result hides a failure, such as a report that did not fit in a
+# full channel. Handle the Result, or put an expect attribute with the
+# reason on the line that drops it.
+let_underscore_must_use = "deny"
+unused_result_ok = "deny"
+
+[dev-dependencies]
+# Paused clock for timing tests (tokio::test(start_paused = true)).
+tokio = { version = "1.39.2", features = ["test-util"] }
