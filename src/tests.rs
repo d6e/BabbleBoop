@@ -1196,7 +1196,7 @@ requests_per_minute = 50
             use crate::app_state::AppState;
             use crate::chatbox::Chatbox;
             use crate::typing_indicator::TypingIndicator;
-            use std::sync::{Arc, RwLock};
+            use std::sync::Arc;
             use tokio::net::UdpSocket;
 
             let chatbox = UdpSocket::bind("127.0.0.1:0").await.unwrap();
@@ -1207,12 +1207,8 @@ requests_per_minute = 50
             config.osc.display_time = 0;
             let (cmd_tx, _cmd_rx) = tokio::sync::mpsc::channel(10);
             let (log_tx, log_rx) = tokio::sync::mpsc::channel(10);
-            let app_state = Arc::new(AppState::new(config.clone(), cmd_tx, log_tx));
-            let typing_indicator = TypingIndicator::new(
-                socket.clone(),
-                Arc::new(RwLock::new(config.clone())),
-                app_state.logger.clone(),
-            );
+            let app_state = Arc::new(AppState::new(cmd_tx, log_tx));
+            let typing_indicator = TypingIndicator::new(socket.clone(), app_state.logger.clone());
             let cost_file = std::env::temp_dir().join(format!(
                 "babble_boop_{}_{}_total_cost.txt",
                 test_name,
@@ -1544,6 +1540,7 @@ requests_per_minute = 50
                 accept_transcription(
                     text,
                     Duration::from_secs(1),
+                    &fixture.config,
                     &fixture.typing_indicator,
                     &mut fixture.price_estimator,
                     &fixture.app_state,
@@ -2156,7 +2153,7 @@ requests_per_minute = 50
         use crate::chatbox::Chatbox;
         use crate::processing_loop::encode_for_upload;
         use crate::typing_indicator::TypingIndicator;
-        use std::sync::{Arc, RwLock};
+        use std::sync::Arc;
         use std::time::Duration;
         use tokio::net::UdpSocket;
 
@@ -2171,12 +2168,8 @@ requests_per_minute = 50
         config.audio.min_transcription_duration = min_seconds;
         let (cmd_tx, _cmd_rx) = tokio::sync::mpsc::channel(10);
         let (log_tx, _log_rx) = tokio::sync::mpsc::channel(10);
-        let app_state = Arc::new(AppState::new(config.clone(), cmd_tx, log_tx));
-        let typing_indicator = TypingIndicator::new(
-            socket.clone(),
-            Arc::new(RwLock::new(config.clone())),
-            app_state.logger.clone(),
-        );
+        let app_state = Arc::new(AppState::new(cmd_tx, log_tx));
+        let typing_indicator = TypingIndicator::new(socket.clone(), app_state.logger.clone());
         let wav = encode_for_upload(audio).await.unwrap();
 
         let result = tokio::time::timeout(
@@ -2383,7 +2376,7 @@ requests_per_minute = 50
 
         let (cmd_tx, _cmd_rx) = tokio::sync::mpsc::channel(10);
         let (log_tx, _log_rx) = tokio::sync::mpsc::channel(10);
-        let app_state = AppState::new(Config::default(), cmd_tx, log_tx);
+        let app_state = AppState::new(cmd_tx, log_tx);
         let ctx = egui::Context::default();
         app_state.gui_waker.attach(ctx.clone());
 
@@ -2404,7 +2397,7 @@ requests_per_minute = 50
     ) {
         let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel(10);
         let (log_tx, log_rx) = tokio::sync::mpsc::channel(10);
-        let app_state = crate::app_state::AppState::new(Config::default(), cmd_tx, log_tx);
+        let app_state = crate::app_state::AppState::new(cmd_tx, log_tx);
         (app_state, cmd_rx, log_rx)
     }
 
@@ -2673,7 +2666,7 @@ requests_per_minute = 50
         use crate::processing_loop::apply_enabled;
         use crate::typing_indicator::TypingIndicator;
         use rosc::{OscMessage, OscPacket, OscType};
-        use std::sync::{Arc, RwLock};
+        use std::sync::Arc;
         use std::time::Duration;
         use tokio::net::UdpSocket;
 
@@ -2684,9 +2677,9 @@ requests_per_minute = 50
         config.osc.output_port = receiver.local_addr().unwrap().port();
         let (log_tx, _log_rx) = tokio::sync::mpsc::channel(10);
         let logger = Logger::new(log_tx, Default::default());
-        let indicator = TypingIndicator::new(socket, Arc::new(RwLock::new(config)), logger.clone());
+        let indicator = TypingIndicator::new(socket, logger.clone());
 
-        apply_enabled(false, &indicator, &logger).await;
+        apply_enabled(false, &config, &indicator, &logger).await;
 
         let mut buf = [0u8; 256];
         let (len, _) = tokio::time::timeout(Duration::from_secs(1), receiver.recv_from(&mut buf))
@@ -2725,9 +2718,14 @@ mod gui_tests {
     fn test_app_with_state() -> (BabbleBoopApp, Arc<AppState>) {
         let (cmd_tx, _cmd_rx) = tokio::sync::mpsc::channel(10);
         let (log_tx, log_rx) = tokio::sync::mpsc::channel(100);
-        let app_state = Arc::new(AppState::new(Config::default(), cmd_tx, log_tx));
+        let app_state = Arc::new(AppState::new(cmd_tx, log_tx));
         (
-            BabbleBoopApp::new(Arc::clone(&app_state), log_rx, unused_config_file()),
+            BabbleBoopApp::new(
+                Arc::clone(&app_state),
+                Config::default(),
+                log_rx,
+                unused_config_file(),
+            ),
             app_state,
         )
     }
@@ -2886,9 +2884,9 @@ mod gui_tests {
             theme,
             ..Config::default()
         };
-        let app_state = Arc::new(AppState::new(config, cmd_tx, log_tx));
+        let app_state = Arc::new(AppState::new(cmd_tx, log_tx));
         (
-            BabbleBoopApp::new(Arc::clone(&app_state), log_rx, unused_config_file()),
+            BabbleBoopApp::new(Arc::clone(&app_state), config, log_rx, unused_config_file()),
             app_state,
         )
     }
@@ -3329,8 +3327,8 @@ mod gui_tests {
             },
             ..Config::default()
         };
-        let app_state = Arc::new(AppState::new(config.clone(), cmd_tx, log_tx));
-        let mut app = BabbleBoopApp::new(app_state, log_rx, unused_config_file());
+        let app_state = Arc::new(AppState::new(cmd_tx, log_tx));
+        let mut app = BabbleBoopApp::new(app_state, config.clone(), log_rx, unused_config_file());
         // Tall enough that the settings below the log are not scrolled away
         let tall = |events| egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(
@@ -3432,8 +3430,8 @@ mod gui_tests {
         );
         let (cmd_tx, _cmd_rx) = tokio::sync::mpsc::channel(10);
         let (log_tx, log_rx) = tokio::sync::mpsc::channel(100);
-        let app_state = Arc::new(AppState::new(loaded.config, cmd_tx, log_tx));
-        let mut app = BabbleBoopApp::new(app_state, log_rx, unused_config_file());
+        let app_state = Arc::new(AppState::new(cmd_tx, log_tx));
+        let mut app = BabbleBoopApp::new(app_state, loaded.config, log_rx, unused_config_file());
         app.note_replaced_values(&loaded.warnings);
         app
     }
@@ -3531,8 +3529,8 @@ mod gui_tests {
         let loaded = Config::load(&config_file).unwrap();
         let (cmd_tx, _cmd_rx) = tokio::sync::mpsc::channel(10);
         let (log_tx, log_rx) = tokio::sync::mpsc::channel(100);
-        let app_state = Arc::new(AppState::new(loaded.config, cmd_tx, log_tx));
-        let mut app = BabbleBoopApp::new(app_state, log_rx, config_file.clone());
+        let app_state = Arc::new(AppState::new(cmd_tx, log_tx));
+        let mut app = BabbleBoopApp::new(app_state, loaded.config, log_rx, config_file.clone());
         app.config_draft.translation.target_language = "German".to_string();
         let ctx = egui::Context::default();
         let output = run_until_idle(&ctx, &mut app);

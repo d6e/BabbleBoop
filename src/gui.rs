@@ -283,17 +283,16 @@ pub struct BabbleBoopApp {
 }
 
 impl BabbleBoopApp {
+    /// The window for the settings in `config`, which came from
+    /// `config_file`.
     pub fn new(
         app_state: Arc<AppState>,
+        config: Config,
         log_rx: mpsc::Receiver<LogEntry>,
         config_file: PathBuf,
     ) -> Self {
-        let config_draft = app_state
-            .config
-            .read()
-            .expect("Config lock poisoned")
-            .clone();
-        let saved_config = config_draft.clone();
+        let config_draft = config.clone();
+        let saved_config = config;
         let colors = theme::get_colors(config_draft.theme);
         Self {
             app_state,
@@ -370,15 +369,11 @@ impl BabbleBoopApp {
     }
 
     /// Write `new_config` to the config file and send it to the processing
-    /// loop.
+    /// loop, which applies it.
     fn save_config(&mut self, new_config: Config) {
         if let Err(e) = new_config.save(&self.config_file) {
             self.set_status_error(format!("Failed to save: {}", e));
             return;
-        }
-        // Update the shared config
-        if let Ok(mut config) = self.app_state.config.write() {
-            *config = new_config.clone();
         }
         self.saved_config = new_config.clone();
         self.file_differs = false;
@@ -1023,6 +1018,7 @@ impl BabbleBoopApp {
 
 pub fn run_gui(
     app_state: Arc<AppState>,
+    config: Config,
     log_rx: mpsc::Receiver<LogEntry>,
     first_run: bool,
     config_warnings: Vec<ConfigWarning>,
@@ -1040,7 +1036,7 @@ pub fn run_gui(
         options,
         Box::new(move |cc| {
             app_state.gui_waker.attach(cc.egui_ctx.clone());
-            let mut app = BabbleBoopApp::new(app_state, log_rx, config_file);
+            let mut app = BabbleBoopApp::new(app_state, config, log_rx, config_file);
             app.note_replaced_values(&config_warnings);
 
             // Apply saved theme on startup

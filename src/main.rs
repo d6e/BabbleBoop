@@ -42,7 +42,7 @@ fn main() {
     let (log_tx, log_rx) = mpsc::channel::<LogEntry>(100);
 
     // Create shared app state
-    let app_state = Arc::new(AppState::new(loaded.config, cmd_tx, log_tx));
+    let app_state = Arc::new(AppState::new(cmd_tx, log_tx));
     // The logger did not exist when the data folder was selected and the
     // config was loaded
     if data.is_error() {
@@ -54,6 +54,9 @@ fn main() {
         app_state.logger.info(warning.to_string());
     }
     let app_state_clone = Arc::clone(&app_state);
+    // The processing loop owns its copy of the settings; the GUI sends it
+    // the saved settings with UpdateConfig.
+    let loop_config = loaded.config.clone();
     let shutdown = app_state.shutdown.clone();
 
     // Spawn background thread with tokio runtime for audio processing.
@@ -72,6 +75,7 @@ fn main() {
         run_logging_failure(&logger, "Processing", || {
             rt.block_on(run_processing_loop(
                 Arc::clone(&app_state_clone),
+                loop_config,
                 cmd_rx,
                 data.dir,
                 OPENAI_BASE_URL,
@@ -86,7 +90,14 @@ fn main() {
     });
 
     // Run GUI on main thread
-    if let Err(e) = run_gui(app_state, log_rx, first_run, loaded.warnings, config_file) {
+    if let Err(e) = run_gui(
+        app_state,
+        loaded.config,
+        log_rx,
+        first_run,
+        loaded.warnings,
+        config_file,
+    ) {
         let message = format!("Failed to start the application window: {}", e);
         eprintln!("{}", message);
         #[expect(

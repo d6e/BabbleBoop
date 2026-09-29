@@ -364,7 +364,7 @@ pub fn start_audio_recording(
 mod tests {
     use super::*;
     use crate::app_state::AppCommand;
-    use crate::config::{AudioConfig, Config};
+    use crate::config::AudioConfig;
     use crate::tests::regression_tests::{check_against_minimum, MinimumCheck};
     use crate::types::{CapturedAudio, Extent};
     use std::time::Duration;
@@ -392,7 +392,7 @@ mod tests {
         fn new(capacity: usize) -> Self {
             let (cmd_tx, cmd_rx) = mpsc::channel(1);
             let (log_tx, log_rx) = mpsc::channel(10);
-            let app_state = AppState::new(Config::default(), cmd_tx, log_tx);
+            let app_state = AppState::new(cmd_tx, log_tx);
             app_state.audio_params.update(&AudioConfig {
                 silence_duration: TWO_QUIET_BUFFERS,
                 noise_gate_threshold: 0.1,

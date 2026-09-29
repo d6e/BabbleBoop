@@ -37,7 +37,7 @@ pub async fn process_audio(
             audio_duration.as_secs_f32(),
             min_duration.as_secs_f32()
         ));
-        typing_indicator.stop_typing().await;
+        typing_indicator.stop_typing(config).await;
         return Ok(());
     }
 
@@ -45,6 +45,7 @@ pub async fn process_audio(
     let Some(transcription) = accept_transcription(
         text,
         audio_duration,
+        config,
         typing_indicator,
         price_estimator,
         app_state,
@@ -86,10 +87,12 @@ pub async fn process_audio(
 /// stays in the total when one of them fails. The estimate depends only on
 /// the audio duration, so an empty or blank text costs as much as speech.
 /// For such a text, an error message goes to the activity log, the typing
-/// indicator turns off, and the function returns `None`.
+/// indicator at the address in `config` turns off, and the function
+/// returns `None`.
 pub(crate) async fn accept_transcription(
     text: String,
     audio_duration: Duration,
+    config: &Config,
     typing_indicator: &TypingIndicator,
     price_estimator: &mut PriceEstimator,
     app_state: &AppState,
@@ -104,7 +107,7 @@ pub(crate) async fn accept_transcription(
         app_state
             .logger
             .error("The transcription is empty, so nothing was translated");
-        typing_indicator.stop_typing().await;
+        typing_indicator.stop_typing(config).await;
         return None;
     }
     app_state.logger.info(format!("Transcription: {}", text));
@@ -134,7 +137,7 @@ pub(crate) async fn deliver_translation(
         Ok(text) => text,
         Err(no_translation) => {
             app_state.logger.error(no_translation.to_string());
-            typing_indicator.stop_typing().await;
+            typing_indicator.stop_typing(config).await;
             return Ok(());
         }
     };
@@ -152,12 +155,12 @@ pub(crate) async fn deliver_translation(
         app_state
             .logger
             .info("Translation is off, so the translation was not sent to the chatbox");
-        typing_indicator.stop_typing().await;
+        typing_indicator.stop_typing(config).await;
         return Ok(());
     }
     chatbox.send(&final_response, config).await?;
 
-    typing_indicator.stop_typing().await;
+    typing_indicator.stop_typing(config).await;
 
     Ok(())
 }

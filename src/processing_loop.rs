@@ -41,26 +41,22 @@ pub struct AudioInput {
 }
 
 /// Run the processing loop until shutdown is requested or the command
-/// channel closes. The loop sends its API requests to `api_base_url`,
-/// such as `OPENAI_BASE_URL`. `start_audio` starts the audio input, and
-/// `open_output` opens the output device for each test recording
-/// playback. Returns an error if the loop cannot start.
+/// channel closes. The loop owns its settings: it starts with `config`,
+/// and only `AppCommand::UpdateConfig` replaces them. The loop sends its
+/// API requests to `api_base_url`, such as `OPENAI_BASE_URL`.
+/// `start_audio` starts the audio input, and `open_output` opens the
+/// output device for each test recording playback. Returns an error if the
+/// loop cannot start.
 pub async fn run_processing_loop<O: PlaybackOutput>(
     app_state: Arc<AppState>,
+    mut config: Config,
     mut cmd_rx: mpsc::Receiver<AppCommand>,
     data_dir: DataDir,
     api_base_url: &str,
     start_audio: impl FnOnce() -> AudioInput,
     open_output: impl Fn() -> Result<O, Box<dyn Error + Send + Sync>>,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
-    // Read initial config
-    let config = app_state
-        .config
-        .read()
-        .expect("Config lock poisoned")
-        .clone();
-
-    let socket_address = format!("{}:{}", config.osc.address, config.osc.input_port);
+    let socket_address = osc_socket_address(&config);
     let socket = UdpSocket::bind(&socket_address)
         .await
         .map_err(|e| format!("cannot open OSC port {}: {}", socket_address, e))?;
@@ -77,6 +73,8 @@ pub async fn run_processing_loop<O: PlaybackOutput>(
         config.translation.target_language
     ));
 
+    // The audio callback reads them from its first buffer
+    app_state.audio_params.update(&config.audio);
     let AudioInput { started, events } = start_audio();
     let mut audio_events = AudioEvents::new(events, app_state.logger.clone());
 
@@ -96,13 +94,8 @@ pub async fn run_processing_loop<O: PlaybackOutput>(
     // Initialize the shared cost from the loaded value
     app_state.set_total_cost(services.price_estimator.total_cost);
 
-    let typing_indicator = TypingIndicator::new(
-        Arc::clone(&socket),
-        Arc::clone(&app_state.config),
-        app_state.logger.clone(),
-    );
-
-    let mut chatbox = Chatbox::new(Arc::clone(&socket));
+    let typing_indicator = TypingIndicator::new(Arc::clone(&socket), app_state.logger.clone());
+    let mut chatbox = Chatbox::new(socket);
 
     let mut test_recording = TestRecording::new(
         &app_state,
@@ -122,13 +115,21 @@ pub async fn run_processing_loop<O: PlaybackOutput>(
             cmd = cmd_rx.recv() => {
                 match cmd {
                     Some(AppCommand::SetEnabled(enabled)) => {
-                        apply_enabled(enabled, &typing_indicator, &app_state.logger).await;
+                        apply_enabled(enabled, &config, &typing_indicator, &app_state.logger).await;
                     }
+                    // The only place where the settings change. The loop
+                    // handles a command between utterances, so each
+                    // utterance uses one set of settings from start to end.
                     Some(AppCommand::UpdateConfig(new_config)) => {
                         app_state.logger.info("Config updated");
-                        // Update hot-reloadable audio params
+                        if osc_destination(&new_config) != osc_destination(&config) {
+                            // Typing can be on at the old destination, and
+                            // the StopRecording goes to the new one
+                            typing_indicator.stop_typing(&config).await;
+                        }
                         app_state.audio_params.update(&new_config.audio);
                         services.apply_config(&new_config, &app_state.logger);
+                        config = new_config;
                     }
                     Some(AppCommand::StartTestRecording) => {
                         app_state.logger.info("Test recording started...");
@@ -168,11 +169,11 @@ pub async fn run_processing_loop<O: PlaybackOutput>(
                 let recording_goes_on = matches!(event, AudioEvent::AudioPart(_));
                 let (audio, extent) = match event {
                     AudioEvent::StartRecording => {
-                        typing_indicator.start_typing().await;
+                        typing_indicator.start_typing(&config).await;
                         continue;
                     }
                     AudioEvent::StopRecording => {
-                        typing_indicator.stop_typing().await;
+                        typing_indicator.stop_typing(&config).await;
                         continue;
                     }
                     // Logged above. The callback follows a discarded
@@ -192,15 +193,13 @@ pub async fn run_processing_loop<O: PlaybackOutput>(
                     }
                     None => break,
                 };
-                // Read current config for processing
-                let current_config = app_state.config.read().expect("Config lock poisoned").clone();
                 // Shutdown drops the work, including the chatbox
                 // display pause and rate limiter wait.
                 let result = app_state.shutdown.run_until(process_audio(
                     &api,
                     audio_data,
                     extent,
-                    &current_config,
+                    &config,
                     &mut chatbox,
                     &mut services.rate_limiter,
                     &typing_indicator,
@@ -215,7 +214,7 @@ pub async fn run_processing_loop<O: PlaybackOutput>(
                     None => break,
                 }
                 if recording_goes_on {
-                    typing_indicator.start_typing().await;
+                    typing_indicator.start_typing(&config).await;
                 }
             }
         }
@@ -223,9 +222,20 @@ pub async fn run_processing_loop<O: PlaybackOutput>(
 
     // Shutdown can stop processing between StartRecording and the end of
     // process_audio. Do not leave VRChat showing the typing indicator.
-    typing_indicator.stop_typing().await;
+    typing_indicator.stop_typing(&config).await;
 
     Ok(())
+}
+
+/// The local address of the OSC socket in `config`, which the loop sends
+/// from.
+fn osc_socket_address(config: &Config) -> String {
+    format!("{}:{}", config.osc.address, config.osc.input_port)
+}
+
+/// Where the loop sends the chatbox messages and the typing indicator.
+fn osc_destination(config: &Config) -> (&str, u16) {
+    (&config.osc.address, config.osc.output_port)
 }
 
 /// Log an error of `process_audio`. An error of the API shows its message
@@ -420,16 +430,21 @@ fn recording_manager(config: &Config, recordings_dir: &Path) -> Option<Recording
 
 /// Handle the translation toggle from the GUI.
 ///
-/// Disabling turns the typing indicator off. While translation is off the
-/// loop ignores audio events, so the StopRecording of an utterance that
-/// started before would not turn it off. The GUI stores `enabled` before it
-/// sends this command, so no StartRecording handled after this can turn the
-/// indicator on again.
-pub async fn apply_enabled(enabled: bool, typing_indicator: &TypingIndicator, logger: &Logger) {
+/// Disabling turns the typing indicator at the address in `config` off.
+/// While translation is off the loop ignores audio events, so the
+/// StopRecording of an utterance that started before would not turn it
+/// off. The GUI stores `enabled` before it sends this command, so no
+/// StartRecording handled after this can turn the indicator on again.
+pub async fn apply_enabled(
+    enabled: bool,
+    config: &Config,
+    typing_indicator: &TypingIndicator,
+    logger: &Logger,
+) {
     if enabled {
         logger.info("Translation enabled");
     } else {
-        typing_indicator.stop_typing().await;
+        typing_indicator.stop_typing(config).await;
         logger.info("Translation disabled");
     }
 }
@@ -634,6 +649,7 @@ mod tests {
     use crate::price_estimator::TokenCounts;
     use rosc::{OscPacket, OscType};
     use std::future::Future;
+    use std::net::SocketAddr;
     use std::sync::atomic::AtomicUsize;
 
     /// The input and output format of the tests. The output plays the
@@ -689,12 +705,16 @@ mod tests {
     /// a channel that the test fills, and the output is a `FakeOutput`.
     struct LoopUnderTest {
         app_state: Arc<AppState>,
+        /// The settings that the loop starts with
+        config: Config,
         cmd_rx: mpsc::Receiver<AppCommand>,
         /// The API that the loop sends its requests to
         api_base_url: String,
         input: AudioInput,
         output: FakeOutput,
         audio_started: Arc<AtomicBool>,
+        /// Runs when the loop starts the audio input
+        on_audio_start: Option<Box<dyn FnOnce()>>,
         ended: oneshot::Sender<()>,
     }
 
@@ -704,11 +724,13 @@ mod tests {
         async fn run_with(self, test: impl Future<Output = ()>) -> Result<(), String> {
             let Self {
                 app_state,
+                config,
                 cmd_rx,
                 api_base_url,
                 input,
                 output,
                 audio_started,
+                on_audio_start,
                 ended,
             } = self;
             let data_dir = DataDir::new(
@@ -718,11 +740,15 @@ mod tests {
             let processing = async {
                 let result = run_processing_loop(
                     app_state,
+                    config,
                     cmd_rx,
                     data_dir,
                     &api_base_url,
                     move || {
                         audio_started.store(true, Ordering::SeqCst);
+                        if let Some(on_audio_start) = on_audio_start {
+                            on_audio_start();
+                        }
                         input
                     },
                     move || Ok(output.clone()),
@@ -741,6 +767,8 @@ mod tests {
     /// What the test does to the loop and what it sees of it.
     struct Driver {
         app_state: Arc<AppState>,
+        /// The settings that the loop starts with
+        config: Config,
         commands: mpsc::Sender<AppCommand>,
         events: mpsc::Sender<AudioEvent>,
         started: Option<oneshot::Sender<Result<AudioStreamInfo, String>>>,
@@ -766,7 +794,7 @@ mod tests {
         configure(&mut config);
         let (cmd_tx, cmd_rx) = mpsc::channel(32);
         let (log_tx, log) = mpsc::channel(100);
-        let app_state = Arc::new(AppState::new(config, cmd_tx.clone(), log_tx));
+        let app_state = Arc::new(AppState::new(cmd_tx.clone(), log_tx));
         let (events_tx, events) = mpsc::channel(100);
         let (started_tx, started) = oneshot::channel();
         let (played_tx, played) = mpsc::unbounded_channel();
@@ -775,6 +803,7 @@ mod tests {
         let (ended_tx, ended) = oneshot::channel();
         let processing = LoopUnderTest {
             app_state: Arc::clone(&app_state),
+            config: config.clone(),
             cmd_rx,
             // Port 1 of the local host, where nothing listens, so a request
             // fails at once. A test with a server sets its URL.
@@ -785,10 +814,12 @@ mod tests {
                 alive: Arc::clone(&playbacks_alive),
             },
             audio_started: Arc::clone(&audio_started),
+            on_audio_start: None,
             ended: ended_tx,
         };
         let driver = Driver {
             app_state,
+            config,
             commands: cmd_tx,
             events: events_tx,
             started: Some(started_tx),
@@ -853,8 +884,14 @@ mod tests {
 
         /// The next message that VRChat receives.
         async fn received(&self) -> Osc {
+            self.received_on(&self.vrchat).await.0
+        }
+
+        /// The next message that `vrchat` receives, and the address that
+        /// sent it.
+        async fn received_on(&self, vrchat: &UdpSocket) -> (Osc, SocketAddr) {
             let mut buf = [0u8; 1024];
-            let len = tokio::time::timeout(self.wait, self.vrchat.recv(&mut buf))
+            let (len, sender) = tokio::time::timeout(self.wait, vrchat.recv_from(&mut buf))
                 .await
                 .expect("VRChat received no message")
                 .unwrap();
@@ -862,11 +899,19 @@ mod tests {
             else {
                 panic!("VRChat received a bundle");
             };
-            match (message.addr.as_str(), message.args.first()) {
+            let osc = match (message.addr.as_str(), message.args.first()) {
                 ("/chatbox/typing", Some(OscType::Bool(typing))) => Osc::Typing(*typing),
                 ("/chatbox/input", Some(OscType::String(text))) => Osc::Input(text.clone()),
                 _ => panic!("unexpected OSC message {:?}", message),
-            }
+            };
+            (osc, sender)
+        }
+
+        /// Send the settings of the start with the changes of `change`.
+        async fn update_config(&self, change: impl FnOnce(&mut Config)) {
+            let mut config = self.config.clone();
+            change(&mut config);
+            self.command(AppCommand::UpdateConfig(config)).await;
         }
 
         /// The samples of the next playback on the output.
@@ -1365,5 +1410,143 @@ mod tests {
             requested_paths(&mut server, 1).await,
             ["/v1/audio/transcriptions"]
         );
+    }
+
+    /// The US dollars for `TOKENS` at the prices of the chat model `model`.
+    fn token_cost(model: &str) -> f64 {
+        let prices = models::chat_model(model).unwrap();
+        (TOKENS.input as f64 * prices.input_price + TOKENS.output as f64 * prices.output_price)
+            / 1_000_000.0
+    }
+
+    /// The model of each translation request in `requests`.
+    fn translation_models(requests: &[crate::api_client::test_server::Request]) -> Vec<String> {
+        requests
+            .iter()
+            .filter(|request| request.path == "/v1/chat/completions")
+            .map(|request| {
+                let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+                body["model"].as_str().unwrap().to_string()
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn test_a_new_model_applies_to_the_request_and_the_cost_of_the_next_utterance() {
+        const NEW_MODEL: &str = "gpt-6-sol";
+        let mut server = translating_server().await;
+        let (processing, mut d) = processing_loop_with_api(&server).await;
+        let old_model = d.config.openai.model.clone();
+        assert!(token_cost(NEW_MODEL) > token_cost(&old_model));
+        let one_utterance = translated_cost(1, 1.0);
+        let mut costs = Vec::new();
+        let result = processing
+            .run_with(async {
+                d.start_audio();
+                d.event(AudioEvent::AudioData(sound(1.0), Extent::Whole))
+                    .await;
+                assert_eq!(d.received().await, Osc::Input(TRANSLATION.to_string()));
+                assert_eq!(d.received().await, Osc::Typing(false));
+                costs.push(d.app_state.get_total_cost());
+
+                d.update_config(|config| config.openai.model = NEW_MODEL.to_string())
+                    .await;
+                d.logged("Config updated").await;
+                d.event(AudioEvent::AudioData(sound(1.0), Extent::Whole))
+                    .await;
+                assert_eq!(d.received().await, Osc::Input(TRANSLATION.to_string()));
+                assert_eq!(d.received().await, Osc::Typing(false));
+                costs.push(d.app_state.get_total_cost());
+                d.shut_down().await;
+            })
+            .await;
+
+        assert_eq!(result, Ok(()));
+        let mut requests = Vec::new();
+        for _ in 0..4 {
+            requests.push(server.request().await);
+        }
+        assert_eq!(
+            translation_models(&requests),
+            [old_model.as_str(), NEW_MODEL]
+        );
+        // The second utterance costs its transcription, which did not
+        // change, and its tokens at the prices of the new model
+        let second_utterance = one_utterance - token_cost(&old_model) + token_cost(NEW_MODEL);
+        assert_eq!(costs[0], one_utterance);
+        assert!(
+            (costs[1] - (one_utterance + second_utterance)).abs() < 1e-12,
+            "{:?}, expected {} then {}",
+            costs,
+            one_utterance,
+            one_utterance + second_utterance
+        );
+    }
+
+    #[tokio::test]
+    async fn test_a_new_output_port_moves_typing_and_the_chatbox_to_it() {
+        let server = translating_server().await;
+        let (processing, mut d) = processing_loop_with_api(&server).await;
+        let new_vrchat = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let new_port = new_vrchat.local_addr().unwrap().port();
+        let result = processing
+            .run_with(async {
+                d.start_audio();
+                d.event(AudioEvent::StartRecording).await;
+                assert_eq!(d.received().await, Osc::Typing(true));
+
+                d.update_config(|config| config.osc.output_port = new_port)
+                    .await;
+                // Off where it went on
+                assert_eq!(d.received().await, Osc::Typing(false));
+                d.event(AudioEvent::AudioData(sound(1.0), Extent::Whole))
+                    .await;
+                d.event(AudioEvent::StopRecording).await;
+                for expected in [
+                    Osc::Input(TRANSLATION.to_string()),
+                    Osc::Typing(false),
+                    Osc::Typing(false),
+                ] {
+                    assert_eq!(d.received_on(&new_vrchat).await.0, expected);
+                }
+                d.shut_down().await;
+            })
+            .await;
+
+        assert_eq!(result, Ok(()));
+        assert_eq!(d.received_on(&new_vrchat).await.0, Osc::Typing(false));
+        let mut buf = [0u8; 1024];
+        assert!(
+            d.vrchat.try_recv(&mut buf).is_err(),
+            "the old port received a message after the change"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_the_audio_settings_apply_before_the_audio_input_starts_and_on_update() {
+        let (mut processing, mut d) =
+            processing_loop(|config| config.audio.noise_gate_threshold = 0.2).await;
+        assert_ne!(Config::default().audio.noise_gate_threshold, 0.2);
+        // What the audio callback reads when the input starts
+        let threshold_at_start = Arc::new(Mutex::new(None));
+        let (app_state, seen) = (Arc::clone(&d.app_state), Arc::clone(&threshold_at_start));
+        processing.on_audio_start = Some(Box::new(move || {
+            *seen.lock().unwrap() = Some(app_state.audio_params.get_noise_gate_threshold());
+        }));
+        let result = processing
+            .run_with(async {
+                d.start_audio();
+                d.update_config(|config| config.audio.noise_gate_threshold = 0.4)
+                    .await;
+                // The loop handles commands in order
+                d.command(AppCommand::SetEnabled(true)).await;
+                d.logged("Translation enabled").await;
+                assert_eq!(d.app_state.audio_params.get_noise_gate_threshold(), 0.4);
+                d.shut_down().await;
+            })
+            .await;
+
+        assert_eq!(result, Ok(()));
+        assert_eq!(*threshold_at_start.lock().unwrap(), Some(0.2));
     }
 }

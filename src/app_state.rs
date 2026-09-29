@@ -2,7 +2,7 @@ use crate::config::{AudioConfig, Config};
 use crate::shutdown::Shutdown;
 use eframe::egui;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::sync::{Arc, OnceLock, RwLock};
+use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 use tokio::sync::mpsc;
 
@@ -199,7 +199,6 @@ impl AudioParams {
 }
 
 pub struct AppState {
-    pub config: Arc<RwLock<Config>>,
     pub enabled: Arc<AtomicBool>,
     pub shutdown: Shutdown,
     pub command_tx: mpsc::Sender<AppCommand>,
@@ -209,7 +208,9 @@ pub struct AppState {
     pub gui_waker: GuiWaker,
     /// Current audio input level (f32 stored as bits) for the level meter
     pub current_audio_level: Arc<AtomicU32>,
-    /// Hot-reloadable audio parameters shared with the audio thread
+    /// Hot-reloadable audio parameters shared with the audio thread. The
+    /// processing loop sets them from its settings before the audio input
+    /// starts and when the settings change.
     pub audio_params: Arc<AudioParams>,
     /// Flag indicating test recording mode is active
     pub test_mode_active: Arc<AtomicBool>,
@@ -245,16 +246,11 @@ pub enum AppCommand {
 }
 
 impl AppState {
-    pub fn new(
-        config: Config,
-        command_tx: mpsc::Sender<AppCommand>,
-        log_tx: mpsc::Sender<LogEntry>,
-    ) -> Self {
-        let audio_params = Arc::new(AudioParams::new(&config.audio));
+    pub fn new(command_tx: mpsc::Sender<AppCommand>, log_tx: mpsc::Sender<LogEntry>) -> Self {
+        let audio_params = Arc::new(AudioParams::new(&AudioConfig::default()));
         let gui_waker = GuiWaker::default();
         let logger = Logger::new(log_tx.clone(), gui_waker.clone());
         Self {
-            config: Arc::new(RwLock::new(config)),
             enabled: Arc::new(AtomicBool::new(true)),
             shutdown: Shutdown::new(),
             command_tx,
