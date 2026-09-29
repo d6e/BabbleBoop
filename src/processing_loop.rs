@@ -17,6 +17,7 @@ use crate::types::{AudioEvent, CapturedAudio, Extent};
 use crate::typing_indicator::TypingIndicator;
 use crate::upload_audio::encode_upload_wav;
 use std::error::Error;
+use std::net::SocketAddr;
 use std::ops::ControlFlow;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, MutexGuard, PoisonError};
@@ -51,18 +52,21 @@ pub async fn run_processing_loop<O: PlaybackOutput>(
     start_audio: impl FnOnce() -> AudioInput,
     open_output: impl Fn() -> Result<O, Box<dyn Error + Send + Sync>>,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
-    // Where the socket in use is bound. After a failed rebind this differs
-    // from the address in the settings.
+    // The address in the settings that the socket in use was opened for,
+    // or that resolves to where it is bound. After a failed rebind this
+    // differs from the address in the settings.
     let mut socket_address = osc_socket_address(&config);
     let socket = UdpSocket::bind(&socket_address).await.map_err(|e| {
         format!(
             "cannot open OSC port {}: {}{}",
             socket_address,
             e,
-            osc_port_busy_hint(&e)
+            osc_port_busy_hint(&e, false)
         )
     })?;
     let socket = Arc::new(socket);
+    // The socket that the pipeline sends from
+    let mut socket_in_use = Arc::clone(&socket);
 
     // Before the audio input starts, so a failure here does not leave
     // audio capture running with nothing to receive it.
@@ -145,12 +149,17 @@ pub async fn run_processing_loop<O: PlaybackOutput>(
                         }
                         let new_socket_address = osc_socket_address(&new_config);
                         if new_socket_address != socket_address {
-                            match rebind_osc_socket(&socket_address, &new_socket_address, &app_state).await {
-                                ControlFlow::Continue(Some(socket)) => {
-                                    pipeline.set_socket(socket);
+                            match rebind_osc_socket(&socket_in_use, &socket_address, &new_socket_address, &app_state).await {
+                                ControlFlow::Continue(Rebind::Opened(socket)) => {
+                                    pipeline.set_socket(Arc::clone(&socket));
+                                    socket_in_use = socket;
                                     socket_address = new_socket_address;
                                 }
-                                ControlFlow::Continue(None) => {}
+                                // So a later save does not try again
+                                ControlFlow::Continue(Rebind::SameAddress) => {
+                                    socket_address = new_socket_address;
+                                }
+                                ControlFlow::Continue(Rebind::Failed) => {}
                                 ControlFlow::Break(()) => break,
                             }
                         }
@@ -261,50 +270,88 @@ fn osc_destination(config: &Config) -> (&str, u16) {
     (&config.osc.address, config.osc.output_port)
 }
 
-/// Open an OSC socket at `new_address` to use in place of the socket at
-/// `old_address`. Returns the new socket, or `None` if it cannot be
-/// opened: the error goes to the activity log and the old socket stays in
-/// use. Breaks if shutdown is requested first, as a host name in the
-/// address can wait for DNS.
+/// What `rebind_osc_socket` did.
+enum Rebind {
+    /// Opened a socket to use in place of the socket in use
+    Opened(Arc<UdpSocket>),
+    /// The new address resolves to the address of the socket in use, so
+    /// that socket stays in use
+    SameAddress,
+    /// Cannot open the new address. The error is in the activity log, and
+    /// the socket in use stays in use.
+    Failed,
+}
+
+/// Open an OSC socket at `new_address` to use in place of `socket_in_use`,
+/// which was opened for `old_address`. The socket in use stays open until
+/// the new one is open. Breaks if shutdown is requested first, as a host
+/// name in the address can wait for DNS.
 async fn rebind_osc_socket(
+    socket_in_use: &UdpSocket,
     old_address: &str,
     new_address: &str,
     app_state: &AppState,
-) -> ControlFlow<(), Option<Arc<UdpSocket>>> {
+) -> ControlFlow<(), Rebind> {
     let logger = &app_state.logger;
-    let Some(bound) = app_state
+    let log_failure = |e: &std::io::Error, port_open_here: bool| {
+        logger.error(format!(
+            "Cannot open OSC port {}: {}. The old port {} stays in use.{}",
+            new_address,
+            e,
+            old_address,
+            osc_port_busy_hint(e, port_open_here)
+        ));
+    };
+    let Some(resolved) = app_state
         .shutdown
-        .run_until(UdpSocket::bind(new_address))
+        .run_until(tokio::net::lookup_host(new_address))
         .await
     else {
         return ControlFlow::Break(());
     };
-    match bound {
+    let new_addresses: Vec<SocketAddr> = match resolved {
+        Ok(addresses) => addresses.collect(),
+        Err(e) => {
+            log_failure(&e, false);
+            return ControlFlow::Continue(Rebind::Failed);
+        }
+    };
+    let in_use = socket_in_use.local_addr().ok();
+    if in_use.is_some_and(|in_use| new_addresses.contains(&in_use)) {
+        return ControlFlow::Continue(Rebind::SameAddress);
+    }
+    match UdpSocket::bind(&new_addresses[..]).await {
         Ok(socket) => {
             logger.info(format!("OSC port is now {}", new_address));
-            ControlFlow::Continue(Some(Arc::new(socket)))
+            ControlFlow::Continue(Rebind::Opened(Arc::new(socket)))
         }
         Err(e) => {
-            logger.error(format!(
-                "Cannot open OSC port {}: {}. The old port {} stays in use.{}",
-                new_address,
-                e,
-                old_address,
-                osc_port_busy_hint(&e)
-            ));
-            ControlFlow::Continue(None)
+            // The same port with a wildcard address on either side: the
+            // socket in use can be what holds the port
+            let port_open_here = in_use.is_some_and(|in_use| {
+                new_addresses.iter().any(|new| {
+                    new.port() == in_use.port()
+                        && (new.ip().is_unspecified() || in_use.ip().is_unspecified())
+                })
+            });
+            log_failure(&e, port_open_here);
+            ControlFlow::Continue(Rebind::Failed)
         }
     }
 }
 
 /// Extra guidance appended to a failed OSC bind when the port is already in
-/// use, naming the setting to change. Empty for any other error.
-fn osc_port_busy_hint(e: &std::io::Error) -> &'static str {
-    if e.kind() == std::io::ErrorKind::AddrInUse {
+/// use. `port_open_here` is true when the socket that the loop has open
+/// can be what holds the port. Empty for any other error.
+fn osc_port_busy_hint(e: &std::io::Error, port_open_here: bool) -> &'static str {
+    if e.kind() != std::io::ErrorKind::AddrInUse {
+        ""
+    } else if port_open_here {
+        " BabbleBoop has this port open at the old address. \
+To use the new address, restart BabbleBoop."
+    } else {
         " Another OSC app may be listening on this port. \
 To use a different port, change Input Port in OSC Settings."
-    } else {
-        ""
     }
 }
 
@@ -905,6 +952,24 @@ mod tests {
                 Ok(Some(entry)) => entry,
                 _ => panic!("{:?} not logged after {:?}", text, seen),
             }
+        }
+
+        /// Wait for an activity log line that contains `text`. Returns the
+        /// lines before it.
+        async fn logged_before(&mut self, text: &str) -> Vec<LogEntry> {
+            let mut before = Vec::new();
+            let found = tokio::time::timeout(self.wait, async {
+                while let Some(entry) = self.log.recv().await {
+                    if entry.message.contains(text) {
+                        return true;
+                    }
+                    before.push(entry);
+                }
+                false
+            })
+            .await;
+            assert_eq!(found, Ok(true), "{:?} not logged after {:?}", text, before);
+            before
         }
 
         /// The next message that VRChat receives.
@@ -1712,6 +1777,126 @@ To use a different port, change Input Port in OSC Settings."
                 d.event(AudioEvent::StartRecording).await;
                 let (typing, sender) = d.received_on(&d.vrchat).await;
                 assert_eq!((typing, sender.port()), (Osc::Typing(true), busy_port));
+                d.shut_down().await;
+            })
+            .await;
+
+        assert_eq!(result, Ok(()));
+    }
+
+    #[tokio::test]
+    async fn test_another_name_for_the_address_in_use_keeps_the_socket_without_an_error() {
+        // The address is also where the messages go. Start at the first
+        // address that localhost resolves to on this host, so the messages
+        // to localhost still reach VRChat after the change.
+        let local = tokio::net::lookup_host("localhost:0")
+            .await
+            .unwrap()
+            .next()
+            .unwrap()
+            .ip();
+        let vrchat = UdpSocket::bind(SocketAddr::new(local, 0)).await.unwrap();
+        let output_port = vrchat.local_addr().unwrap().port();
+        let port = UdpSocket::bind(SocketAddr::new(local, 0))
+            .await
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let (processing, mut d) = processing_loop(|config| {
+            config.osc.address = local.to_string();
+            config.osc.input_port = port;
+            config.osc.output_port = output_port;
+        })
+        .await;
+        let result = processing
+            .run_with(async {
+                d.start_audio();
+                d.event(AudioEvent::StartRecording).await;
+                let (typing, in_use) = d.received_on(&vrchat).await;
+                assert_eq!(
+                    (typing, in_use),
+                    (Osc::Typing(true), SocketAddr::new(local, port))
+                );
+
+                // Saved twice: the second save must not try again
+                for _ in 0..2 {
+                    d.update_config(|config| {
+                        config.osc.address = "localhost".to_string();
+                        config.osc.input_port = port;
+                        config.osc.output_port = output_port;
+                    })
+                    .await;
+                    d.command(AppCommand::SetEnabled(true)).await;
+                    let lines = d.logged_before("Translation enabled").await;
+                    assert!(
+                        lines.iter().all(|line| line.level != LogLevel::Error
+                            && !line.message.contains("OSC port")),
+                        "{:?}",
+                        lines
+                    );
+                }
+                // Every message until the next recording starts comes from
+                // the socket of the start
+                d.event(AudioEvent::StopRecording).await;
+                d.event(AudioEvent::StartRecording).await;
+                loop {
+                    let (osc, sender) = d.received_on(&vrchat).await;
+                    assert_eq!(sender, in_use, "{:?}", osc);
+                    if osc == Osc::Typing(true) {
+                        break;
+                    }
+                }
+                d.shut_down().await;
+            })
+            .await;
+
+        assert_eq!(result, Ok(()));
+    }
+
+    // Linux refuses to bind the wildcard address on a port that another
+    // socket has open at a local address (EADDRINUSE, seen on Linux 6.8).
+    // Windows lets the same user bind it when neither socket sets
+    // SO_REUSEADDR or SO_EXCLUSIVEADDRUSE, and mio 1.1.1 sets neither
+    // (src/sys/windows/udp.rs): see the table under "Enhanced Socket
+    // Security" in "Using SO_REUSEADDR and SO_EXCLUSIVEADDRUSE" on
+    // Microsoft Learn. There the rebind succeeds.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn test_a_port_that_the_loop_has_open_at_another_address_is_not_blamed_on_another_app() {
+        let port = free_port().await;
+        let (processing, mut d) = processing_loop(|config| config.osc.input_port = port).await;
+        let result = processing
+            .run_with(async {
+                d.start_audio();
+                d.update_config(|config| {
+                    config.osc.address = "0.0.0.0".to_string();
+                    config.osc.input_port = port;
+                })
+                .await;
+                let error = d.logged("Cannot open OSC port").await;
+                assert_eq!(error.level, LogLevel::Error);
+                assert!(
+                    error
+                        .message
+                        .starts_with(&format!("Cannot open OSC port 0.0.0.0:{}: ", port))
+                        && error
+                            .message
+                            .contains(&format!(". The old port 127.0.0.1:{} stays in use.", port))
+                        && !error.message.contains("Another OSC app")
+                        && error.message.ends_with(
+                            "BabbleBoop has this port open at the old address. \
+To use the new address, restart BabbleBoop."
+                        ),
+                    "{}",
+                    error.message
+                );
+                // The old socket is still open
+                let rebound = UdpSocket::bind(("127.0.0.1", port)).await;
+                assert_eq!(
+                    rebound.map(|_| ()).map_err(|e| e.kind()),
+                    Err(std::io::ErrorKind::AddrInUse)
+                );
                 d.shut_down().await;
             })
             .await;
