@@ -2699,7 +2699,7 @@ requests_per_minute = 50
 
 #[cfg(test)]
 mod gui_tests {
-    use crate::app_state::{AppState, LogEntry, LogLevel};
+    use crate::app_state::{AppCommand, AppState, LogEntry, LogLevel};
     use crate::config::Config;
     use crate::gui::BabbleBoopApp;
     use eframe::egui;
@@ -3556,5 +3556,85 @@ mod gui_tests {
         assert_eq!(saved.translation.target_language, "German");
         assert_eq!(saved.openai.api_key, "sk-test");
         assert_eq!(files, ["config.toml"]);
+    }
+
+    // ===========================================================================
+    // Test: The GUI does not wait for a busy processing loop
+    // ===========================================================================
+
+    /// Run `body` on another thread, and fail if it does not return within
+    /// 5 s. A GUI that waits for the processing loop blocks in it.
+    fn without_blocking<T: Send + 'static>(body: impl FnOnce() -> T + Send + 'static) -> T {
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || done_tx.send(body()));
+        done_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the GUI waited for the processing loop")
+    }
+
+    /// A command channel with the room of the channel in `main.rs`, full of
+    /// commands. The receiver reads none of them.
+    fn full_command_channel() -> (
+        tokio::sync::mpsc::Sender<AppCommand>,
+        tokio::sync::mpsc::Receiver<AppCommand>,
+    ) {
+        let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel(32);
+        while cmd_tx.try_send(AppCommand::SetEnabled(true)).is_ok() {}
+        assert_eq!(cmd_tx.capacity(), 0);
+        (cmd_tx, cmd_rx)
+    }
+
+    #[test]
+    fn test_a_command_to_a_full_channel_fails_without_waiting() {
+        let (cmd_tx, cmd_rx) = full_command_channel();
+        let (log_tx, log_rx) = tokio::sync::mpsc::channel(100);
+        let app_state = Arc::new(AppState::new(cmd_tx, log_tx));
+        let app = BabbleBoopApp::new(app_state, Config::default(), log_rx, unused_config_file());
+
+        let result = without_blocking(move || app.send_command(AppCommand::SetEnabled(false)));
+
+        let error = result.unwrap_err();
+        assert!(error.starts_with("Failed to send command: "), "{}", error);
+        drop(cmd_rx);
+    }
+
+    #[test]
+    fn test_save_with_a_full_channel_writes_the_file_and_says_it_is_not_applied() {
+        use std::fs;
+
+        let dir =
+            std::env::temp_dir().join(format!("babble_boop_gui_save_full_{}", std::process::id()));
+        if dir.exists() {
+            fs::remove_dir_all(&dir).unwrap();
+        }
+        fs::create_dir_all(&dir).unwrap();
+        let config_file = dir.join("config.toml");
+        let mut file_config = Config::default();
+        file_config.openai.api_key = "sk-test".to_string();
+        file_config.save(&config_file).unwrap();
+        let (cmd_tx, cmd_rx) = full_command_channel();
+        let (log_tx, log_rx) = tokio::sync::mpsc::channel(100);
+        let app_state = Arc::new(AppState::new(cmd_tx, log_tx));
+        let mut app = BabbleBoopApp::new(app_state, file_config, log_rx, config_file.clone());
+        app.config_draft.translation.target_language = "German".to_string();
+
+        let text = without_blocking(move || {
+            let ctx = egui::Context::default();
+            let output = run_until_idle(&ctx, &mut app);
+            click(&ctx, &mut app, text_center(&output, "Save Settings"));
+            painted_text(&run_until_idle(&ctx, &mut app))
+        });
+        let saved = Config::load(&config_file).map_err(|e| e.to_string());
+        // Clean up before asserting, so a failure does not leave files behind
+        fs::remove_dir_all(&dir).unwrap();
+
+        assert!(
+            text.iter().any(|line| line
+                .starts_with("Settings saved to file, but not applied. Failed to send command: ")),
+            "{:?}",
+            text
+        );
+        assert_eq!(saved.unwrap().config.translation.target_language, "German");
+        drop(cmd_rx);
     }
 }

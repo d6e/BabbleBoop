@@ -379,7 +379,9 @@ impl BabbleBoopApp {
         self.file_differs = false;
         match self.send_command(AppCommand::UpdateConfig(new_config)) {
             Ok(()) => self.set_status_success("Settings saved successfully"),
-            Err(e) => self.set_status_error(format!("Settings saved to file, but {}", e)),
+            Err(e) => {
+                self.set_status_error(format!("Settings saved to file, but not applied. {}", e))
+            }
         }
     }
 
@@ -462,10 +464,13 @@ impl BabbleBoopApp {
         self.status_message = Some((msg.into(), StatusType::Info, std::time::Instant::now()));
     }
 
-    fn send_command(&self, cmd: AppCommand) -> Result<(), String> {
+    /// Send `cmd` to the processing loop. Does not wait: the GUI thread
+    /// must not block while the loop is busy, so a full or closed channel
+    /// is an error.
+    pub(crate) fn send_command(&self, cmd: AppCommand) -> Result<(), String> {
         self.app_state
             .command_tx
-            .blocking_send(cmd)
+            .try_send(cmd)
             .map_err(|e| format!("Failed to send command: {}", e))
     }
 
