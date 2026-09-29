@@ -2726,8 +2726,11 @@ mod gui_tests {
     }
 
     fn test_app() -> (BabbleBoopApp, tokio::sync::mpsc::Sender<LogEntry>) {
-        let (app, app_state) = test_app_with_state();
-        (app, app_state.log_tx.clone())
+        let (cmd_tx, _cmd_rx) = tokio::sync::mpsc::channel(10);
+        let (log_tx, log_rx) = tokio::sync::mpsc::channel(100);
+        let app_state = Arc::new(AppState::new(cmd_tx, log_tx.clone()));
+        let app = BabbleBoopApp::new(app_state, Config::default(), log_rx, unused_config_file());
+        (app, log_tx)
     }
 
     fn raw_input() -> egui::RawInput {

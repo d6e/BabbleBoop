@@ -285,7 +285,6 @@ pub struct AppState {
     pub enabled: Arc<AtomicBool>,
     pub shutdown: Shutdown,
     pub command_tx: mpsc::Sender<AppCommand>,
-    pub log_tx: mpsc::Sender<LogEntry>,
     pub logger: Logger,
     /// Wakes the GUI when state it shows changes on another thread
     pub gui_waker: GuiWaker,
@@ -315,7 +314,6 @@ impl AppState {
             enabled: Arc::new(AtomicBool::new(true)),
             shutdown: Shutdown::new(),
             command_tx,
-            log_tx,
             logger,
             gui_waker,
             audio: Arc::new(AudioShared::new()),
