@@ -54,9 +54,14 @@ pub async fn run_processing_loop<O: PlaybackOutput>(
     // Where the socket in use is bound. After a failed rebind this differs
     // from the address in the settings.
     let mut socket_address = osc_socket_address(&config);
-    let socket = UdpSocket::bind(&socket_address)
-        .await
-        .map_err(|e| format!("cannot open OSC port {}: {}", socket_address, e))?;
+    let socket = UdpSocket::bind(&socket_address).await.map_err(|e| {
+        format!(
+            "cannot open OSC port {}: {}{}",
+            socket_address,
+            e,
+            osc_port_busy_hint(&e)
+        )
+    })?;
     let socket = Arc::new(socket);
 
     // Before the audio input starts, so a failure here does not leave
@@ -270,11 +275,25 @@ async fn rebind_osc_socket(
         }
         Err(e) => {
             logger.error(format!(
-                "Cannot open OSC port {}: {}. The old port {} stays in use.",
-                new_address, e, old_address
+                "Cannot open OSC port {}: {}. The old port {} stays in use.{}",
+                new_address,
+                e,
+                old_address,
+                osc_port_busy_hint(&e)
             ));
             ControlFlow::Continue(None)
         }
+    }
+}
+
+/// Extra guidance appended to a failed OSC bind when the port is already in
+/// use, naming the setting to change. Empty for any other error.
+fn osc_port_busy_hint(e: &std::io::Error) -> &'static str {
+    if e.kind() == std::io::ErrorKind::AddrInUse {
+        " Another OSC app may be listening on this port. \
+To use a different port, change Input Port in OSC Settings."
+    } else {
+        ""
     }
 }
 
@@ -1062,6 +1081,14 @@ mod tests {
             "{}",
             error
         );
+        assert!(
+            error.ends_with(
+                "Another OSC app may be listening on this port. \
+To use a different port, change Input Port in OSC Settings."
+            ),
+            "{}",
+            error
+        );
         assert!(!d.audio_started.load(Ordering::SeqCst));
     }
 
@@ -1584,7 +1611,11 @@ mod tests {
                         .starts_with(&format!("Cannot open OSC port 127.0.0.1:{}: ", busy_port))
                         && error
                             .message
-                            .ends_with(". The old port 127.0.0.1:0 stays in use."),
+                            .contains(". The old port 127.0.0.1:0 stays in use.")
+                        && error.message.ends_with(
+                            "Another OSC app may be listening on this port. \
+To use a different port, change Input Port in OSC Settings."
+                        ),
                     "{}",
                     error.message
                 );
