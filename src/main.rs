@@ -1,7 +1,7 @@
 use babble_boop::api_client::OPENAI_BASE_URL;
 use babble_boop::app_state::{run_logging_failure, AppCommand, AppState, LogEntry};
 use babble_boop::audio_playback::AudioOutput;
-use babble_boop::audio_recording::{start_audio_recording, SharedAudioState};
+use babble_boop::audio_recording::start_audio_recording;
 use babble_boop::config::Config;
 use babble_boop::data_dir;
 use babble_boop::gui::{run_error_dialog, run_gui};
@@ -121,7 +121,7 @@ fn main() {
 /// loop calls this after its other startup steps.
 fn start_audio_input(app_state: &Arc<AppState>) -> AudioInput {
     let (tx, events) = mpsc::channel::<AudioEvent>(100);
-    let shared_audio = SharedAudioState::new(app_state);
+    let shared_audio = Arc::clone(&app_state.audio);
     let audio_app_state = Arc::clone(app_state);
     let audio_logger = app_state.logger.clone();
     let (init_tx, started) = oneshot::channel();

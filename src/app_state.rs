@@ -1,8 +1,9 @@
 use crate::config::{AudioConfig, Config};
+use crate::recorder::{RecorderSettings, RecorderStatus};
 use crate::shutdown::Shutdown;
 use eframe::egui;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError, TryLockError};
 use std::time::Instant;
 use tokio::sync::mpsc;
 
@@ -159,42 +160,124 @@ pub fn panic_reason(payload: &(dyn std::any::Any + Send)) -> &str {
         .unwrap_or("unknown panic")
 }
 
-/// Shared audio parameters that can be hot-reloaded without restarting the audio stream.
-/// Uses atomics for lock-free access from the audio callback thread.
+/// An `f32` that threads share without a lock, stored as its bits in an
+/// `AtomicU32`. Loads and stores are `Relaxed`: each value stands alone and
+/// orders no other memory.
+#[derive(Debug, Default)]
+pub struct AtomicF32(AtomicU32);
+
+impl AtomicF32 {
+    pub fn new(value: f32) -> Self {
+        Self(AtomicU32::new(value.to_bits()))
+    }
+
+    pub fn load(&self) -> f32 {
+        f32::from_bits(self.0.load(Ordering::Relaxed))
+    }
+
+    pub fn store(&self, value: f32) {
+        self.0.store(value.to_bits(), Ordering::Relaxed);
+    }
+}
+
+/// Audio settings that change without a restart of the audio stream. The
+/// audio callback reads them for each buffer.
 pub struct AudioParams {
-    pub noise_gate_threshold: AtomicU32, // f32 stored as bits
-    pub noise_gate_hold_time: AtomicU32, // f32 stored as bits
-    pub silence_duration: AtomicU32,     // f32 stored as bits
+    noise_gate_threshold: AtomicF32,
+    noise_gate_hold_time: AtomicF32,
+    silence_duration: AtomicF32,
 }
 
 impl AudioParams {
     pub fn new(config: &AudioConfig) -> Self {
         Self {
-            noise_gate_threshold: AtomicU32::new(config.noise_gate_threshold.to_bits()),
-            noise_gate_hold_time: AtomicU32::new(config.noise_gate_hold_time.to_bits()),
-            silence_duration: AtomicU32::new(config.silence_duration.to_bits()),
+            noise_gate_threshold: AtomicF32::new(config.noise_gate_threshold),
+            noise_gate_hold_time: AtomicF32::new(config.noise_gate_hold_time),
+            silence_duration: AtomicF32::new(config.silence_duration),
         }
     }
 
     pub fn update(&self, config: &AudioConfig) {
-        self.noise_gate_threshold
-            .store(config.noise_gate_threshold.to_bits(), Ordering::Relaxed);
-        self.noise_gate_hold_time
-            .store(config.noise_gate_hold_time.to_bits(), Ordering::Relaxed);
-        self.silence_duration
-            .store(config.silence_duration.to_bits(), Ordering::Relaxed);
+        self.noise_gate_threshold.store(config.noise_gate_threshold);
+        self.noise_gate_hold_time.store(config.noise_gate_hold_time);
+        self.silence_duration.store(config.silence_duration);
     }
 
-    pub fn get_noise_gate_threshold(&self) -> f32 {
-        f32::from_bits(self.noise_gate_threshold.load(Ordering::Relaxed))
+    /// The settings for the recorder. A change between two loads can mix
+    /// old and new values for one buffer; the next buffer has all new ones.
+    pub fn recorder_settings(&self) -> RecorderSettings {
+        RecorderSettings {
+            noise_gate_threshold: self.noise_gate_threshold.load(),
+            noise_gate_hold_time: self.noise_gate_hold_time.load(),
+            silence_duration: self.silence_duration.load(),
+        }
+    }
+}
+
+/// The state that the audio callback shares with the GUI and the processing
+/// loop. The callback must never wait, so it reads and writes this state
+/// with atomics and `try_lock` only.
+pub struct AudioShared {
+    /// Set by the processing loop from its settings
+    pub params: AudioParams,
+    /// Peak level of the last buffer, for the level meter
+    pub level: AtomicF32,
+    /// The recorder status after the last buffer. One snapshot, so the GUI
+    /// never shows fields of two different buffers.
+    status: Mutex<RecorderStatus>,
+    /// Whether a test recording runs. While it does, the callback copies
+    /// the input into `test_buffer` instead of the recorder.
+    pub test_mode: AtomicBool,
+    /// The samples of the test recording. The callback writes it; the
+    /// processing loop swaps it at start and stop (`TestRecording`).
+    pub test_buffer: Mutex<Vec<f32>>,
+}
+
+impl AudioShared {
+    /// Shared state with default settings and an idle recorder.
+    pub fn new() -> Self {
+        Self {
+            params: AudioParams::new(&AudioConfig::default()),
+            level: AtomicF32::default(),
+            status: Mutex::new(RecorderStatus::default()),
+            test_mode: AtomicBool::new(false),
+            test_buffer: Mutex::new(Vec::new()),
+        }
     }
 
-    pub fn get_noise_gate_hold_time(&self) -> f32 {
-        f32::from_bits(self.noise_gate_hold_time.load(Ordering::Relaxed))
+    /// Replace the recorder status, unless another thread holds the lock.
+    /// Called from the audio callback, which must not wait: the GUI then
+    /// shows the old status until the next buffer publishes again.
+    pub fn publish(&self, status: RecorderStatus) {
+        match self.status.try_lock() {
+            Ok(mut current) => *current = status,
+            // The lock only guards a copy of a `Copy` value, so the value
+            // is whole even if a thread panicked while it held the lock.
+            Err(TryLockError::Poisoned(poisoned)) => *poisoned.into_inner() = status,
+            Err(TryLockError::WouldBlock) => {}
+        }
     }
 
-    pub fn get_silence_duration(&self) -> f32 {
-        f32::from_bits(self.silence_duration.load(Ordering::Relaxed))
+    /// The last published recorder status.
+    pub fn status(&self) -> RecorderStatus {
+        *self.lock_status()
+    }
+
+    /// Hold the status lock. `status` holds it only to copy the value.
+    fn lock_status(&self) -> MutexGuard<'_, RecorderStatus> {
+        self.status.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Hold the status lock, as the GUI does while it copies the status.
+    #[cfg(test)]
+    pub(crate) fn hold_status(&self) -> MutexGuard<'_, RecorderStatus> {
+        self.lock_status()
+    }
+}
+
+impl Default for AudioShared {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -206,32 +289,12 @@ pub struct AppState {
     pub logger: Logger,
     /// Wakes the GUI when state it shows changes on another thread
     pub gui_waker: GuiWaker,
-    /// Current audio input level (f32 stored as bits) for the level meter
-    pub current_audio_level: Arc<AtomicU32>,
-    /// Hot-reloadable audio parameters shared with the audio thread. The
-    /// processing loop sets them from its settings before the audio input
-    /// starts and when the settings change.
-    pub audio_params: Arc<AudioParams>,
-    /// Flag indicating test recording mode is active
-    pub test_mode_active: Arc<AtomicBool>,
-    /// Buffer for test recording samples. The audio callback writes it; the
-    /// processing thread swaps it at start and stop (`TestRecording`).
-    pub test_recording_buffer: Arc<std::sync::Mutex<Vec<f32>>>,
+    /// State shared with the audio callback. The processing loop sets its
+    /// parameters from its settings before the audio input starts and when
+    /// the settings change.
+    pub audio: Arc<AudioShared>,
     /// Total API cost (f64 stored as bits) for display in GUI
     pub total_cost: Arc<std::sync::atomic::AtomicU64>,
-    /// Whether audio is currently being recorded
-    pub is_recording: Arc<AtomicBool>,
-    /// Seconds of input since the noise gate closed during the current
-    /// recording (f32 stored as bits)
-    pub quiet_time: Arc<AtomicU32>,
-    /// Whether the noise gate is currently active/open
-    pub noise_gate_active: Arc<AtomicBool>,
-    /// Remaining hold time in seconds (f32 stored as bits)
-    pub noise_gate_hold_remaining: Arc<AtomicU32>,
-    /// Current recording duration in seconds (f32 stored as bits)
-    pub recording_duration: Arc<AtomicU32>,
-    /// Whether the current recording reached the length limit
-    pub recording_split: Arc<AtomicBool>,
     /// Set when the processing thread ends
     processing_stopped: AtomicBool,
 }
@@ -247,7 +310,6 @@ pub enum AppCommand {
 
 impl AppState {
     pub fn new(command_tx: mpsc::Sender<AppCommand>, log_tx: mpsc::Sender<LogEntry>) -> Self {
-        let audio_params = Arc::new(AudioParams::new(&AudioConfig::default()));
         let gui_waker = GuiWaker::default();
         let logger = Logger::new(log_tx.clone(), gui_waker.clone());
         Self {
@@ -257,17 +319,8 @@ impl AppState {
             log_tx,
             logger,
             gui_waker,
-            current_audio_level: Arc::new(AtomicU32::new(0)),
-            audio_params,
-            test_mode_active: Arc::new(AtomicBool::new(false)),
-            test_recording_buffer: Arc::new(std::sync::Mutex::new(Vec::new())),
+            audio: Arc::new(AudioShared::new()),
             total_cost: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            is_recording: Arc::new(AtomicBool::new(false)),
-            quiet_time: Arc::new(AtomicU32::new(0)),
-            noise_gate_active: Arc::new(AtomicBool::new(false)),
-            noise_gate_hold_remaining: Arc::new(AtomicU32::new(0)),
-            recording_duration: Arc::new(AtomicU32::new(0)),
-            recording_split: Arc::new(AtomicBool::new(false)),
             processing_stopped: AtomicBool::new(false),
         }
     }
@@ -298,5 +351,49 @@ impl AppState {
 
     pub fn is_shutdown_requested(&self) -> bool {
         self.shutdown.is_requested()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::AtomicBool;
+
+    #[test]
+    fn test_the_status_is_read_as_one_snapshot() {
+        // Every field differs between the two, so a status with fields of
+        // both is neither
+        let first = RecorderStatus {
+            is_recording: true,
+            quiet_time: 1.0,
+            gate_open: true,
+            hold_remaining: 1.0,
+            recording_duration: 1.0,
+            split: true,
+        };
+        let second = RecorderStatus {
+            is_recording: false,
+            quiet_time: 2.0,
+            gate_open: false,
+            hold_remaining: 2.0,
+            recording_duration: 2.0,
+            split: false,
+        };
+        let audio = AudioShared::new();
+        audio.publish(first);
+        let done = AtomicBool::new(false);
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                while !done.load(Ordering::Relaxed) {
+                    audio.publish(second);
+                    audio.publish(first);
+                }
+            });
+            let mixed = (0..200_000)
+                .map(|_| audio.status())
+                .find(|status| *status != first && *status != second);
+            done.store(true, Ordering::Relaxed);
+            assert_eq!(mixed, None);
+        });
     }
 }

@@ -6,7 +6,7 @@ use crate::config::{
 };
 use crate::models;
 use crate::processing_loop::TEST_RECORDING_LIMIT;
-use crate::recorder::MAX_RECORDING;
+use crate::recorder::{RecorderStatus, MAX_RECORDING};
 use crate::theme::{self, AppColors};
 use eframe::egui;
 use std::path::PathBuf;
@@ -859,8 +859,7 @@ impl BabbleBoopApp {
         let colors = self.colors;
         // Audio level meter at the top
         ui.label("Input Level:");
-        let level_bits = self.app_state.current_audio_level.load(Ordering::Relaxed);
-        let current_level = f32::from_bits(level_bits);
+        let current_level = self.app_state.audio.level.load();
         draw_audio_level_meter(
             ui,
             current_level,
@@ -869,18 +868,15 @@ impl BabbleBoopApp {
         );
         ui.add_space(4.0);
 
-        // Read audio state from atomics
-        let is_recording = self.app_state.is_recording.load(Ordering::Relaxed);
-        let quiet_time = f32::from_bits(self.app_state.quiet_time.load(Ordering::Relaxed));
-        let noise_gate_active = self.app_state.noise_gate_active.load(Ordering::Relaxed);
-        let hold_remaining = f32::from_bits(
-            self.app_state
-                .noise_gate_hold_remaining
-                .load(Ordering::Relaxed),
-        );
-        let recording_duration =
-            f32::from_bits(self.app_state.recording_duration.load(Ordering::Relaxed));
-        let recording_split = self.app_state.recording_split.load(Ordering::Relaxed);
+        // One snapshot, so all lines below show the same buffer
+        let RecorderStatus {
+            is_recording,
+            quiet_time,
+            gate_open: noise_gate_active,
+            hold_remaining,
+            recording_duration,
+            split: recording_split,
+        } = self.app_state.audio.status();
 
         // Noise gate state visualization
         ui.horizontal(|ui| {
@@ -944,7 +940,7 @@ impl BabbleBoopApp {
         }
 
         // Test Microphone button
-        let is_testing = self.app_state.test_mode_active.load(Ordering::Relaxed);
+        let is_testing = self.app_state.audio.test_mode.load(Ordering::Relaxed);
         ui.horizontal(|ui| {
             if is_testing {
                 if ui

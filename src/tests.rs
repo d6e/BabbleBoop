@@ -2445,10 +2445,10 @@ requests_per_minute = 50
         assert_eq!(test.stop(), None);
 
         test.start();
-        assert!(app_state.test_mode_active.load(Ordering::SeqCst));
+        assert!(app_state.audio.test_mode.load(Ordering::SeqCst));
         // As the callback does, within the reserved capacity
         let reserved = {
-            let mut buffer = app_state.test_recording_buffer.lock().unwrap();
+            let mut buffer = app_state.audio.test_buffer.lock().unwrap();
             buffer.extend_from_slice(&[0.1, 0.2, 0.3, 0.4]);
             buffer.capacity()
         };
@@ -2463,12 +2463,9 @@ requests_per_minute = 50
                 sample_rate: 48_000,
             })
         );
-        assert!(!app_state.test_mode_active.load(Ordering::SeqCst));
+        assert!(!app_state.audio.test_mode.load(Ordering::SeqCst));
         // A callback that still sees test mode on has no room to write
-        assert_eq!(
-            app_state.test_recording_buffer.lock().unwrap().capacity(),
-            0
-        );
+        assert_eq!(app_state.audio.test_buffer.lock().unwrap().capacity(), 0);
         assert_eq!(test.stop(), None);
     }
 
@@ -2479,7 +2476,7 @@ requests_per_minute = 50
         let (app_state, _cmd_rx, _log_rx) = app_state_for_test();
         let mut test = TestRecording::new(&app_state, 1, 16_000);
         test.start();
-        app_state.test_recording_buffer.lock().unwrap().push(0.5);
+        app_state.audio.test_buffer.lock().unwrap().push(0.5);
         test.start();
         assert_eq!(test.stop().map(|audio| audio.samples), Some(Vec::new()));
     }
@@ -2702,6 +2699,7 @@ mod gui_tests {
     use crate::app_state::{AppCommand, AppState, LogEntry, LogLevel};
     use crate::config::Config;
     use crate::gui::BabbleBoopApp;
+    use crate::recorder::RecorderStatus;
     use eframe::egui;
     use std::path::PathBuf;
     use std::sync::Arc;
@@ -2918,13 +2916,15 @@ mod gui_tests {
     #[test]
     fn test_meter_tracks_follow_the_theme() {
         use crate::config::ThemeMode;
-        use std::sync::atomic::Ordering;
 
         for theme in [ThemeMode::Dark, ThemeMode::Light] {
             let (mut app, app_state) = themed_app(theme);
             // Recording shows the silence and duration meters. Level,
             // silence and duration are zero, so only the tracks are painted.
-            app_state.is_recording.store(true, Ordering::Relaxed);
+            app_state.audio.publish(RecorderStatus {
+                is_recording: true,
+                ..RecorderStatus::default()
+            });
             let output = egui::Context::default().run(raw_input(), |ctx| {
                 egui::CentralPanel::default().show(ctx, |ui| app.audio_settings_ui(ui));
             });
@@ -2954,17 +2954,14 @@ mod gui_tests {
     /// One frame of the audio settings while a recording that is 0.5 s long
     /// is in progress, with a minimum transcription duration of 1 s.
     fn recording_frame(recording_split: bool) -> egui::FullOutput {
-        use std::sync::atomic::Ordering;
-
         let (mut app, app_state) = test_app_with_state();
         app.config_draft.audio.min_transcription_duration = 1.0;
-        app_state.is_recording.store(true, Ordering::Relaxed);
-        app_state
-            .recording_duration
-            .store(0.5_f32.to_bits(), Ordering::Relaxed);
-        app_state
-            .recording_split
-            .store(recording_split, Ordering::Relaxed);
+        app_state.audio.publish(RecorderStatus {
+            is_recording: true,
+            recording_duration: 0.5,
+            split: recording_split,
+            ..RecorderStatus::default()
+        });
         egui::Context::default().run(raw_input(), |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| app.audio_settings_ui(ui));
         })
@@ -3031,14 +3028,13 @@ mod gui_tests {
     /// One frame of the audio settings while a recording is in progress,
     /// 0.5 s after the noise gate closed, with a silence duration of 2 s.
     fn silence_frame() -> egui::FullOutput {
-        use std::sync::atomic::Ordering;
-
         let (mut app, app_state) = test_app_with_state();
         app.config_draft.audio.silence_duration = 2.0;
-        app_state.is_recording.store(true, Ordering::Relaxed);
-        app_state
-            .quiet_time
-            .store(0.5_f32.to_bits(), Ordering::Relaxed);
+        app_state.audio.publish(RecorderStatus {
+            is_recording: true,
+            quiet_time: 0.5,
+            ..RecorderStatus::default()
+        });
         egui::Context::default().run(raw_input(), |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| app.audio_settings_ui(ui));
         })
@@ -3056,6 +3052,75 @@ mod gui_tests {
         // The gate is closed and the duration is 0, so only the silence
         // meter has a filled part.
         assert_eq!(small_meter_fill_widths(&silence_frame()), [50.0]);
+    }
+
+    // ===========================================================================
+    // Test: The audio settings show the published recorder status
+    // ===========================================================================
+
+    /// The texts from the gate state to the Test Microphone button in one
+    /// frame of the audio settings, with a silence duration of 3 s and a
+    /// minimum transcription duration of 2 s.
+    fn status_texts(app: &mut BabbleBoopApp) -> Vec<String> {
+        app.config_draft.audio.silence_duration = 3.0;
+        app.config_draft.audio.min_transcription_duration = 2.0;
+        let output = egui::Context::default().run(raw_input(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| app.audio_settings_ui(ui));
+        });
+        painted_text(&output)
+            .into_iter()
+            .skip_while(|text| text != "Gate:")
+            .skip(1)
+            .take_while(|text| text != "Test Microphone")
+            .collect()
+    }
+
+    #[test]
+    fn test_the_audio_settings_show_the_published_status() {
+        let (mut app, app_state) = test_app_with_state();
+        app_state.audio.publish(RecorderStatus {
+            is_recording: true,
+            quiet_time: 0.7,
+            gate_open: true,
+            hold_remaining: 0.25,
+            recording_duration: 1.5,
+            split: false,
+        });
+        assert_eq!(
+            status_texts(&mut app),
+            [
+                "Hold (0.25s)",
+                "Silence:",
+                "0.7s / 3.0s",
+                "Duration:",
+                "1.5s / 2.0s"
+            ]
+        );
+
+        app_state.audio.publish(RecorderStatus {
+            is_recording: true,
+            quiet_time: 0.2,
+            gate_open: false,
+            hold_remaining: 0.0,
+            recording_duration: 1.0,
+            split: true,
+        });
+        assert_eq!(
+            status_texts(&mut app),
+            [
+                "Closed",
+                "Silence:",
+                "0.2s / 3.0s",
+                "Duration:",
+                "1.0s (ready)"
+            ]
+        );
+
+        app_state.audio.publish(RecorderStatus {
+            gate_open: true,
+            ..RecorderStatus::default()
+        });
+        assert_eq!(status_texts(&mut app), ["Open"]);
     }
 
     #[test]

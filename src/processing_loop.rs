@@ -4,7 +4,7 @@
 //! and gives it the audio input and output devices.
 
 use crate::api_client::{ApiError, OpenAi};
-use crate::app_state::{AppCommand, AppState, Logger};
+use crate::app_state::{AppCommand, AppState, AudioShared, Logger};
 use crate::audio_playback::{convert_for_output, PlaybackOutput};
 use crate::audio_processing::process_audio;
 use crate::audio_recording::AudioStreamInfo;
@@ -23,8 +23,8 @@ use crate::upload_audio::encode_upload_wav;
 use std::error::Error;
 use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::atomic::Ordering;
+use std::sync::{Arc, MutexGuard, PoisonError};
 use std::time::Duration;
 use tokio::net::UdpSocket;
 use tokio::sync::{mpsc, oneshot};
@@ -76,7 +76,7 @@ pub async fn run_processing_loop<O: PlaybackOutput>(
     ));
 
     // The audio callback reads them from its first buffer
-    app_state.audio_params.update(&config.audio);
+    app_state.audio.params.update(&config.audio);
     let AudioInput { started, events } = start_audio();
     let mut audio_events = AudioEvents::new(events, app_state.logger.clone());
 
@@ -141,7 +141,7 @@ pub async fn run_processing_loop<O: PlaybackOutput>(
                                 ControlFlow::Break(()) => break,
                             }
                         }
-                        app_state.audio_params.update(&new_config.audio);
+                        app_state.audio.params.update(&new_config.audio);
                         services.apply_config(&new_config, &app_state.logger);
                         config = new_config;
                     }
@@ -358,8 +358,7 @@ fn test_recording_samples(channels: u16, sample_rate: u32) -> usize {
 /// the input into the test buffer instead of the recorder. The Stop button
 /// in the GUI or `TEST_RECORDING_LIMIT` ends it.
 pub struct TestRecording {
-    active: Arc<AtomicBool>,
-    buffer: Arc<Mutex<Vec<f32>>>,
+    audio: Arc<AudioShared>,
     channels: u16,
     sample_rate: u32,
     /// When the running test recording reaches the limit
@@ -370,8 +369,7 @@ impl TestRecording {
     /// Test recordings of the input stream with this format.
     pub fn new(app_state: &AppState, channels: u16, sample_rate: u32) -> Self {
         Self {
-            active: Arc::clone(&app_state.test_mode_active),
-            buffer: Arc::clone(&app_state.test_recording_buffer),
+            audio: Arc::clone(&app_state.audio),
             channels,
             sample_rate,
             deadline: None,
@@ -385,14 +383,14 @@ impl TestRecording {
         let previous = std::mem::replace(&mut *self.lock_buffer(), reserved);
         drop(previous);
         self.deadline = Some(Instant::now() + TEST_RECORDING_LIMIT);
-        self.active.store(true, Ordering::SeqCst);
+        self.audio.test_mode.store(true, Ordering::SeqCst);
     }
 
     /// Stop the test recording and return what it recorded. Returns `None`
     /// if no test recording runs.
     pub fn stop(&mut self) -> Option<CapturedAudio> {
         self.deadline.take()?;
-        self.active.store(false, Ordering::SeqCst);
+        self.audio.test_mode.store(false, Ordering::SeqCst);
         // Leaves a buffer with no capacity, so the callback adds nothing
         // if it still sees test mode on.
         let samples = std::mem::take(&mut *self.lock_buffer());
@@ -415,7 +413,10 @@ impl TestRecording {
     /// The callback only copies samples while it holds the lock, so a
     /// poisoned lock still holds a valid buffer.
     fn lock_buffer(&self) -> MutexGuard<'_, Vec<f32>> {
-        self.buffer.lock().unwrap_or_else(PoisonError::into_inner)
+        self.audio
+            .test_buffer
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
     }
 }
 
@@ -697,7 +698,8 @@ mod tests {
     use rosc::{OscPacket, OscType};
     use std::future::Future;
     use std::net::SocketAddr;
-    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::{AtomicBool, AtomicUsize};
+    use std::sync::Mutex;
 
     /// The input and output format of the tests. The output plays the
     /// input format, so a test recording plays unchanged.
@@ -1136,7 +1138,8 @@ mod tests {
                 d.logged("Test recording started").await;
                 // What the audio callback does in test mode
                 d.app_state
-                    .test_recording_buffer
+                    .audio
+                    .test_buffer
                     .lock()
                     .unwrap()
                     .extend_from_slice(&recorded);
@@ -1168,7 +1171,8 @@ mod tests {
                 d.logged("Test recording started").await;
                 let started = Instant::now();
                 d.app_state
-                    .test_recording_buffer
+                    .audio
+                    .test_buffer
                     .lock()
                     .unwrap()
                     .extend_from_slice(&recorded);
@@ -1675,7 +1679,13 @@ mod tests {
         let threshold_at_start = Arc::new(Mutex::new(None));
         let (app_state, seen) = (Arc::clone(&d.app_state), Arc::clone(&threshold_at_start));
         processing.on_audio_start = Some(Box::new(move || {
-            *seen.lock().unwrap() = Some(app_state.audio_params.get_noise_gate_threshold());
+            *seen.lock().unwrap() = Some(
+                app_state
+                    .audio
+                    .params
+                    .recorder_settings()
+                    .noise_gate_threshold,
+            );
         }));
         let result = processing
             .run_with(async {
@@ -1685,7 +1695,14 @@ mod tests {
                 // The loop handles commands in order
                 d.command(AppCommand::SetEnabled(true)).await;
                 d.logged("Translation enabled").await;
-                assert_eq!(d.app_state.audio_params.get_noise_gate_threshold(), 0.4);
+                assert_eq!(
+                    d.app_state
+                        .audio
+                        .params
+                        .recorder_settings()
+                        .noise_gate_threshold,
+                    0.4
+                );
                 d.shut_down().await;
             })
             .await;

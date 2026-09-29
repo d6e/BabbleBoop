@@ -1,70 +1,15 @@
-use crate::app_state::{panic_reason, AppState, AudioParams};
-use crate::recorder::{peak_level, Recorder, RecorderEvent, RecorderSettings, RecorderStatus};
+use crate::app_state::{panic_reason, AudioShared};
+use crate::recorder::{peak_level, Recorder, RecorderEvent};
 use crate::stream_errors::StreamErrorReporter;
 use crate::types::{AudioEvent, CapturedAudio};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::Stream;
 use std::error::Error;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::error::TrySendError;
-
-/// State that the audio callback shares with the GUI and the processing loop.
-pub struct SharedAudioState {
-    pub audio_params: Arc<AudioParams>,
-    /// Peak level of the last buffer, for the level meter
-    pub audio_level: Arc<AtomicU32>,
-    pub test_mode_active: Arc<AtomicBool>,
-    pub test_recording_buffer: Arc<Mutex<Vec<f32>>>,
-    pub is_recording: Arc<AtomicBool>,
-    /// Seconds of quiet input in the recording (f32 stored as bits)
-    pub quiet_time: Arc<AtomicU32>,
-    pub noise_gate_active: Arc<AtomicBool>,
-    pub noise_gate_hold_remaining: Arc<AtomicU32>,
-    pub recording_duration: Arc<AtomicU32>,
-    pub recording_split: Arc<AtomicBool>,
-}
-
-impl SharedAudioState {
-    pub fn new(app_state: &AppState) -> Self {
-        Self {
-            audio_params: Arc::clone(&app_state.audio_params),
-            audio_level: Arc::clone(&app_state.current_audio_level),
-            test_mode_active: Arc::clone(&app_state.test_mode_active),
-            test_recording_buffer: Arc::clone(&app_state.test_recording_buffer),
-            is_recording: Arc::clone(&app_state.is_recording),
-            quiet_time: Arc::clone(&app_state.quiet_time),
-            noise_gate_active: Arc::clone(&app_state.noise_gate_active),
-            noise_gate_hold_remaining: Arc::clone(&app_state.noise_gate_hold_remaining),
-            recording_duration: Arc::clone(&app_state.recording_duration),
-            recording_split: Arc::clone(&app_state.recording_split),
-        }
-    }
-
-    fn recorder_settings(&self) -> RecorderSettings {
-        RecorderSettings {
-            noise_gate_threshold: self.audio_params.get_noise_gate_threshold(),
-            noise_gate_hold_time: self.audio_params.get_noise_gate_hold_time(),
-            silence_duration: self.audio_params.get_silence_duration(),
-        }
-    }
-
-    fn publish(&self, status: &RecorderStatus) {
-        self.noise_gate_active
-            .store(status.gate_open, Ordering::Relaxed);
-        self.noise_gate_hold_remaining
-            .store(status.hold_remaining.to_bits(), Ordering::Relaxed);
-        self.is_recording
-            .store(status.is_recording, Ordering::Relaxed);
-        self.quiet_time
-            .store(status.quiet_time.to_bits(), Ordering::Relaxed);
-        self.recording_duration
-            .store(status.recording_duration.to_bits(), Ordering::Relaxed);
-        self.recording_split.store(status.split, Ordering::Relaxed);
-    }
-}
 
 /// Queues events for the processing loop without blocking.
 struct EventQueue {
@@ -97,10 +42,12 @@ impl EventQueue {
 /// Handles the input buffers of one stream, converted to f32.
 ///
 /// This runs on the audio thread, which can be real time. It updates
-/// atomics, copies samples and queues events with `try_send`. In test mode
-/// it copies the samples into the test buffer if its lock is free
-/// (`try_lock`). Logging and encoding happen on the processing side when
-/// it receives the events.
+/// atomics, copies samples and queues events with `try_send`. It publishes
+/// the recorder status if its lock is free (`try_lock`); while the GUI
+/// copies the status, the publish is skipped and the next buffer publishes
+/// again. In test mode it copies the samples into the test buffer if its
+/// lock is free (`try_lock`). Logging and encoding happen on the processing
+/// side when it receives the events.
 ///
 /// The callback can still allocate, free memory or take a lock:
 /// - `Recorder` allocates a 5 s buffer when it sends a part, and when a
@@ -120,9 +67,13 @@ impl EventQueue {
 ///   loop runs in `Runtime::block_on` in `main.rs`).
 /// - An event that `try_send` rejects is dropped here, and so are its
 ///   samples.
+/// - A `try_lock` of the status or the test buffer does not wait. But if
+///   another thread starts to wait for that lock, the unlock here wakes it
+///   with a system call (Rust 1.97 on Linux and Windows,
+///   `library/std/src/sys/sync/mutex/futex.rs` lines 89 to 95).
 /// - `PanicGuard` formats a crash report after a panic.
 struct InputHandler {
-    shared: SharedAudioState,
+    shared: Arc<AudioShared>,
     recorder: Recorder,
     events: EventQueue,
     channels: u16,
@@ -133,7 +84,7 @@ struct InputHandler {
 
 impl InputHandler {
     fn new(
-        shared: SharedAudioState,
+        shared: Arc<AudioShared>,
         tx: mpsc::Sender<AudioEvent>,
         channels: u16,
         sample_rate: u32,
@@ -151,12 +102,10 @@ impl InputHandler {
 
     fn process(&mut self, data: &[f32], now: Instant) {
         self.events.report_dropped();
-        self.shared
-            .audio_level
-            .store(peak_level(data).to_bits(), Ordering::Relaxed);
+        self.shared.level.store(peak_level(data));
 
         // If test mode is active, write raw samples to the test buffer and skip normal processing
-        if self.shared.test_mode_active.load(Ordering::Relaxed) {
+        if self.shared.test_mode.load(Ordering::Relaxed) {
             if !self.in_test_mode {
                 self.in_test_mode = true;
                 // The recorder does not run during the test. A recording
@@ -166,19 +115,20 @@ impl InputHandler {
                     self.events.send(AudioEvent::RecordingDiscarded);
                     self.events.send(AudioEvent::StopRecording);
                 }
-                self.shared.publish(&self.recorder.status(now));
             }
+            // On each buffer, as the publish skips while the lock is held
+            self.shared.publish(self.recorder.status(now));
             // The processing side holds the lock only to swap the buffer.
             // If it does so now, this buffer is lost; waiting could make the
             // audio thread miss its deadline.
-            if let Ok(mut buffer) = self.shared.test_recording_buffer.try_lock() {
+            if let Ok(mut buffer) = self.shared.test_buffer.try_lock() {
                 append_within_capacity(&mut buffer, data, self.channels);
             }
             return;
         }
         self.in_test_mode = false;
 
-        let settings = self.shared.recorder_settings();
+        let settings = self.shared.params.recorder_settings();
         let Self {
             recorder,
             events,
@@ -203,7 +153,7 @@ impl InputHandler {
                 events.send(AudioEvent::StopRecording);
             }
         });
-        self.shared.publish(&self.recorder.status(now));
+        self.shared.publish(self.recorder.status(now));
     }
 }
 
@@ -326,7 +276,7 @@ pub struct AudioStreamInfo {
 }
 
 pub fn start_audio_recording(
-    shared: SharedAudioState,
+    shared: Arc<AudioShared>,
     tx: mpsc::Sender<AudioEvent>,
 ) -> Result<(Stream, AudioStreamInfo), Box<dyn Error>> {
     let host = cpal::default_host();
@@ -363,8 +313,9 @@ pub fn start_audio_recording(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app_state::AppCommand;
+    use crate::app_state::{AppCommand, AppState};
     use crate::config::AudioConfig;
+    use crate::recorder::RecorderStatus;
     use crate::tests::regression_tests::{check_against_minimum, MinimumCheck};
     use crate::types::{CapturedAudio, Extent};
     use std::time::Duration;
@@ -393,7 +344,7 @@ mod tests {
             let (cmd_tx, cmd_rx) = mpsc::channel(1);
             let (log_tx, log_rx) = mpsc::channel(10);
             let app_state = AppState::new(cmd_tx, log_tx);
-            app_state.audio_params.update(&AudioConfig {
+            app_state.audio.params.update(&AudioConfig {
                 silence_duration: TWO_QUIET_BUFFERS,
                 noise_gate_threshold: 0.1,
                 noise_gate_hold_time: 0.0,
@@ -401,7 +352,7 @@ mod tests {
             });
             let (tx, rx) = mpsc::channel(capacity);
             let now = Instant::now();
-            let handler = InputHandler::new(SharedAudioState::new(&app_state), tx, 2, 48_000, now);
+            let handler = InputHandler::new(Arc::clone(&app_state.audio), tx, 2, 48_000, now);
             Setup {
                 app_state,
                 handler,
@@ -419,14 +370,35 @@ mod tests {
         /// Turn on test mode with room for `capacity` samples, as the
         /// processing side does.
         fn start_test_mode(&self, capacity: usize) {
-            *self.app_state.test_recording_buffer.lock().unwrap() = Vec::with_capacity(capacity);
+            *self.app_state.audio.test_buffer.lock().unwrap() = Vec::with_capacity(capacity);
             self.app_state
-                .test_mode_active
+                .audio
+                .test_mode
                 .store(true, Ordering::Relaxed);
         }
 
         fn test_buffer(&self) -> Vec<f32> {
-            self.app_state.test_recording_buffer.lock().unwrap().clone()
+            self.app_state.audio.test_buffer.lock().unwrap().clone()
+        }
+
+        /// Feed `data` on another thread while this thread holds the
+        /// status lock, as the GUI does while it copies the status.
+        /// Returns whether the callback returned within 5 s.
+        fn feed_while_status_held(&mut self, data: &[f32]) -> bool {
+            self.now += Duration::from_millis(10);
+            let (handler, audio, now) = (&mut self.handler, &self.app_state.audio, self.now);
+            let held = audio.hold_status();
+            let (done_tx, done_rx) = std::sync::mpsc::channel();
+            std::thread::scope(|scope| {
+                scope.spawn(move || {
+                    handler.process(data, now);
+                    done_tx.send(()).unwrap();
+                });
+                let returned = done_rx.recv_timeout(Duration::from_secs(5)).is_ok();
+                // Let a blocked callback finish so the scope can end
+                drop(held);
+                returned
+            })
         }
 
         fn events(&mut self) -> Vec<AudioEvent> {
@@ -472,13 +444,13 @@ mod tests {
     fn test_recording_state_is_published_for_the_gui() {
         let mut s = Setup::new(10);
         s.feed(&LOUD);
-        assert!(s.app_state.is_recording.load(Ordering::Relaxed));
-        assert!(s.app_state.noise_gate_active.load(Ordering::Relaxed));
+        assert!(s.app_state.audio.status().is_recording);
+        assert!(s.app_state.audio.status().gate_open);
         s.feed(&QUIET);
-        let quiet_time = f32::from_bits(s.app_state.quiet_time.load(Ordering::Relaxed));
+        let quiet_time = s.app_state.audio.status().quiet_time;
         assert_eq!(quiet_time, 2.0 / 48_000.0);
-        assert!(!s.app_state.noise_gate_active.load(Ordering::Relaxed));
-        let level = f32::from_bits(s.app_state.current_audio_level.load(Ordering::Relaxed));
+        assert!(!s.app_state.audio.status().gate_open);
+        let level = s.app_state.audio.level.load();
         assert_eq!(level, 0.05);
     }
 
@@ -492,17 +464,17 @@ mod tests {
             min_transcription_duration: 0.0,
         };
         s.feed(&LOUD);
-        s.app_state.audio_params.update(&audio);
+        s.app_state.audio.params.update(&audio);
         for _ in 0..3 {
             s.feed(&QUIET);
         }
-        assert!(s.app_state.is_recording.load(Ordering::Relaxed));
+        assert!(s.app_state.audio.status().is_recording);
         // Saved settings with a shorter duration: the next quiet buffer
         // makes 8 quiet frames, more than 4
         audio.silence_duration = TWO_QUIET_BUFFERS;
-        s.app_state.audio_params.update(&audio);
+        s.app_state.audio.params.update(&audio);
         s.feed(&QUIET);
-        assert!(!s.app_state.is_recording.load(Ordering::Relaxed));
+        assert!(!s.app_state.audio.status().is_recording);
         assert_eq!(s.events().last(), Some(&AudioEvent::StopRecording));
     }
 
@@ -513,10 +485,10 @@ mod tests {
         s.feed(&LOUD);
         s.feed(&QUIET);
         assert!(s.events().is_empty());
-        assert!(!s.app_state.is_recording.load(Ordering::Relaxed));
-        let buffer = s.app_state.test_recording_buffer.lock().unwrap().clone();
+        assert!(!s.app_state.audio.status().is_recording);
+        let buffer = s.app_state.audio.test_buffer.lock().unwrap().clone();
         assert_eq!(buffer, [LOUD, QUIET].concat());
-        let level = f32::from_bits(s.app_state.current_audio_level.load(Ordering::Relaxed));
+        let level = s.app_state.audio.level.load();
         assert_eq!(level, 0.05);
     }
 
@@ -538,17 +510,14 @@ mod tests {
         );
         // The GUI shows no recording, and the level meter stays live
         let state = &s.app_state;
-        assert!(!state.is_recording.load(Ordering::Relaxed));
-        assert_eq!(
-            f32::from_bits(state.quiet_time.load(Ordering::Relaxed)),
-            0.0
-        );
-        let duration = f32::from_bits(state.recording_duration.load(Ordering::Relaxed));
+        assert!(!state.audio.status().is_recording);
+        assert_eq!(state.audio.status().quiet_time, 0.0);
+        let duration = state.audio.status().recording_duration;
         assert_eq!(duration, 0.0);
-        let level = f32::from_bits(state.current_audio_level.load(Ordering::Relaxed));
+        let level = state.audio.level.load();
         assert_eq!(level, 0.05);
 
-        s.app_state.test_mode_active.store(false, Ordering::Relaxed);
+        s.app_state.audio.test_mode.store(false, Ordering::Relaxed);
         s.feed(&QUIET);
         assert!(s.events().is_empty());
         s.feed(&LOUD);
@@ -578,7 +547,7 @@ mod tests {
             s.feed(&LOUD);
             s.start_test_mode(100);
             s.feed(&LOUD);
-            s.app_state.test_mode_active.store(false, Ordering::Relaxed);
+            s.app_state.audio.test_mode.store(false, Ordering::Relaxed);
         }
         let discarded = || {
             [
@@ -605,10 +574,7 @@ mod tests {
         }
         assert_eq!(s.test_buffer(), [LOUD, LOUD].concat());
         // The callback did not allocate a larger buffer
-        assert_eq!(
-            s.app_state.test_recording_buffer.lock().unwrap().capacity(),
-            8
-        );
+        assert_eq!(s.app_state.audio.test_buffer.lock().unwrap().capacity(), 8);
     }
 
     #[test]
@@ -625,7 +591,7 @@ mod tests {
     fn test_test_mode_does_not_wait_for_a_locked_buffer() {
         let mut s = Setup::new(10);
         s.start_test_mode(100);
-        let locked = s.app_state.test_recording_buffer.lock().unwrap();
+        let locked = s.app_state.audio.test_buffer.lock().unwrap();
         let (done_tx, done_rx) = std::sync::mpsc::channel();
         std::thread::scope(|scope| {
             scope.spawn(|| {
@@ -640,6 +606,69 @@ mod tests {
         // The samples of that buffer are lost, the next buffer is kept
         s.feed(&QUIET);
         assert_eq!(s.test_buffer(), QUIET.to_vec());
+    }
+
+    #[test]
+    fn test_the_callback_skips_the_status_while_the_gui_holds_it() {
+        let mut s = Setup::new(10);
+        assert!(
+            s.feed_while_status_held(&LOUD),
+            "the callback waited for the status lock"
+        );
+        // The recording started, but the GUI still has the old status
+        assert_eq!(s.events(), vec![AudioEvent::StartRecording]);
+        assert_eq!(s.app_state.audio.status(), RecorderStatus::default());
+        // The level meter does not need the lock
+        assert_eq!(s.app_state.audio.level.load(), 0.5);
+        // The next buffer publishes again
+        s.feed(&QUIET);
+        let status = s.app_state.audio.status();
+        assert!(status.is_recording);
+        assert_eq!(status.quiet_time, 2.0 / 48_000.0);
+    }
+
+    #[test]
+    fn test_a_status_skipped_when_test_mode_starts_is_published_later() {
+        let mut s = Setup::new(10);
+        s.feed(&LOUD);
+        s.start_test_mode(100);
+        assert!(
+            s.feed_while_status_held(&LOUD),
+            "the callback waited for the status lock"
+        );
+        assert!(s.app_state.audio.status().is_recording);
+        // The recording was discarded; the next test buffer shows it
+        s.feed(&LOUD);
+        assert_eq!(s.app_state.audio.status(), RecorderStatus::default());
+    }
+
+    #[test]
+    fn test_changed_gate_settings_apply_to_the_next_buffer() {
+        let mut s = Setup::new(10);
+        let mut audio = AudioConfig {
+            silence_duration: TWO_QUIET_BUFFERS,
+            noise_gate_threshold: 0.6,
+            noise_gate_hold_time: 0.0,
+            min_transcription_duration: 0.0,
+        };
+        s.app_state.audio.params.update(&audio);
+        s.feed(&LOUD);
+        assert!(s.events().is_empty(), "0.5 is below the threshold");
+
+        audio.noise_gate_threshold = 0.1;
+        audio.noise_gate_hold_time = 1.0;
+        s.app_state.audio.params.update(&audio);
+        s.feed(&LOUD);
+        assert_eq!(s.events(), vec![AudioEvent::StartRecording]);
+        // 10 ms after the loud buffer, the gate holds for 0.99 s more
+        s.feed(&QUIET);
+        let status = s.app_state.audio.status();
+        assert!(status.gate_open);
+        assert!(
+            (status.hold_remaining - 0.99).abs() < 1e-4,
+            "{}",
+            status.hold_remaining
+        );
     }
 
     #[test]
@@ -671,12 +700,12 @@ mod tests {
         };
         assert_eq!(part.samples.len(), 30 * 2 * 48_000);
         assert_eq!((part.channels, part.sample_rate), (2, 48_000));
-        assert!(s.app_state.is_recording.load(Ordering::Relaxed));
+        assert!(s.app_state.audio.status().is_recording);
         // The GUI shows that the minimum does not apply to the rest
-        assert!(s.app_state.recording_split.load(Ordering::Relaxed));
+        assert!(s.app_state.audio.status().split);
         s.feed(&QUIET);
         s.feed(&QUIET);
-        assert!(!s.app_state.recording_split.load(Ordering::Relaxed));
+        assert!(!s.app_state.audio.status().split);
     }
 
     #[test]
@@ -702,7 +731,7 @@ mod tests {
             "{:?}",
             events.get(2..)
         );
-        assert!(!s.app_state.is_recording.load(Ordering::Relaxed));
+        assert!(!s.app_state.audio.status().is_recording);
     }
 
     /// The recorded audio that `process_audio` receives after the events

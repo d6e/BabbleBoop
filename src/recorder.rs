@@ -53,8 +53,9 @@ pub enum RecorderEvent {
     LimitReached(Vec<f32>),
 }
 
-/// State the GUI shows in the audio settings.
-#[derive(Clone, Copy, Debug, PartialEq)]
+/// State the GUI shows in the audio settings. The default is the status of
+/// an idle recorder.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct RecorderStatus {
     pub is_recording: bool,
     /// Seconds of input since the gate closed, 0 while it is open or when
