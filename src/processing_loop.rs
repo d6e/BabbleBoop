@@ -342,11 +342,6 @@ async fn finish_test_recording<O: PlaybackOutput>(
 /// Longest test recording. The Stop button in the GUI ends it earlier.
 pub const TEST_RECORDING_LIMIT: Duration = Duration::from_secs(30);
 
-/// Number of interleaved samples in `TEST_RECORDING_LIMIT`.
-fn test_recording_samples(channels: u16, sample_rate: u32) -> usize {
-    TEST_RECORDING_LIMIT.as_secs() as usize * sample_rate as usize * usize::from(channels)
-}
-
 /// The test microphone recording. While it runs, the audio callback copies
 /// the input into the test buffer instead of the recorder. The Stop button
 /// in the GUI or `TEST_RECORDING_LIMIT` ends it.
@@ -372,7 +367,11 @@ impl TestRecording {
     /// Start a test recording. A test recording that runs starts again.
     pub fn start(&mut self) {
         // The callback adds samples only up to this capacity
-        let reserved = Vec::with_capacity(test_recording_samples(self.channels, self.sample_rate));
+        let reserved = Vec::with_capacity(crate::recorder::samples_in(
+            TEST_RECORDING_LIMIT,
+            self.channels,
+            self.sample_rate,
+        ));
         let previous = std::mem::replace(&mut *self.lock_buffer(), reserved);
         drop(previous);
         self.deadline = Some(Instant::now() + TEST_RECORDING_LIMIT);

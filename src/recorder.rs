@@ -21,7 +21,7 @@ pub const MAX_RECORDING: Duration = Duration::from_secs(30);
 const INITIAL_RESERVE: Duration = Duration::from_secs(5);
 
 /// Number of interleaved samples in `length` of audio, in whole seconds.
-fn samples_in(length: Duration, channels: u16, sample_rate: u32) -> usize {
+pub(crate) fn samples_in(length: Duration, channels: u16, sample_rate: u32) -> usize {
     length.as_secs() as usize * sample_rate as usize * usize::from(channels)
 }
 
