@@ -1,6 +1,7 @@
 use crate::app_state::{FailureLog, Logger};
 use crate::config::Config;
 use rosc::{encoder::encode, OscMessage, OscPacket, OscType};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use tokio::net::UdpSocket;
 
@@ -15,6 +16,8 @@ pub struct TypingIndicator {
     /// cannot be reached at the configured address, every send fails the
     /// same way.
     send_failure: Mutex<FailureLog>,
+    /// The state of the last call, also when its send failed
+    typing: AtomicBool,
 }
 
 impl TypingIndicator {
@@ -23,7 +26,14 @@ impl TypingIndicator {
             socket,
             logger,
             send_failure: Mutex::default(),
+            typing: AtomicBool::new(false),
         }
+    }
+
+    /// Whether the last call turned the indicator on. The send of that
+    /// call can have failed.
+    pub fn is_typing(&self) -> bool {
+        self.typing.load(Ordering::Relaxed)
     }
 
     /// Send from `socket` from now on.
@@ -35,6 +45,7 @@ impl TypingIndicator {
     /// `config`. A failed send goes to the activity log, once until a send
     /// works again or fails with a different message.
     async fn set_typing(&self, is_typing: bool, config: &Config) {
+        self.typing.store(is_typing, Ordering::Relaxed);
         let typing_message = OscMessage {
             addr: "/chatbox/typing".to_string(),
             args: vec![OscType::Bool(is_typing)],
@@ -82,6 +93,22 @@ mod tests {
         std::iter::from_fn(|| log_rx.try_recv().ok())
             .map(|entry| (entry.level, entry.message))
             .collect()
+    }
+
+    #[tokio::test]
+    async fn test_the_state_of_the_last_call_is_kept_also_when_its_send_fails() {
+        let socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let (log_tx, _log_rx) = mpsc::channel(10);
+        let indicator = TypingIndicator::new(socket, Logger::new(log_tx, Default::default()));
+        let mut config = Config::default();
+        // An IPv4 socket cannot send to an IPv6 address
+        config.osc.address = "[::1]".to_string();
+
+        assert!(!indicator.is_typing());
+        indicator.start_typing(&config).await;
+        assert!(indicator.is_typing());
+        indicator.stop_typing(&config).await;
+        assert!(!indicator.is_typing());
     }
 
     #[tokio::test]
