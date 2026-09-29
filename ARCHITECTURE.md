@@ -66,6 +66,8 @@ Tests live next to the module they exercise, in a `#[cfg(test)] mod tests` block
 
 Gate command, run before every commit: `cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test`.
 
+Some tests and helpers are built only on Unix or Linux, so also run `cargo clippy --target x86_64-pc-windows-gnu --all-targets -- -D warnings` (after `rustup target add x86_64-pc-windows-gnu`) to check the Windows build; CI runs the same clippy on Windows.
+
 ## Where files live at run time
 
 BabbleBoop keeps `config.toml`, `total_cost.txt`, and the `recordings` folder in one data folder chosen at startup; see [Where BabbleBoop keeps its files](README.md#where-babbleboop-keeps-its-files) in the README for the lookup order.

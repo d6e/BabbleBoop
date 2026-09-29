@@ -149,6 +149,14 @@ fn make_writable(path: &Path) {
     {
         if let Ok(metadata) = fs::metadata(path) {
             let mut perms = metadata.permissions();
+            // The lint warns that on Unix this makes the file writable by
+            // all users. This branch is not built for Unix. On Windows it
+            // only clears FILE_ATTRIBUTE_READONLY (std sys/fs/windows.rs,
+            // FilePermissions::set_readonly).
+            #[expect(
+                clippy::permissions_set_readonly_false,
+                reason = "not built for Unix; on Windows this only clears the read only attribute"
+            )]
             perms.set_readonly(false);
             _ = fs::set_permissions(path, perms);
         }

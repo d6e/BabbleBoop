@@ -144,7 +144,9 @@ fn slugify(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::RecordingManager;
+    #[cfg(unix)]
     use crate::app_state::LogLevel;
+    #[cfg(unix)]
     use crate::test_support::LogCapture;
     use std::fs;
     #[cfg(unix)]
