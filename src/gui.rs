@@ -275,6 +275,9 @@ pub struct BabbleBoopApp {
     /// The config file has values that the loader replaced, so the file
     /// differs from `saved_config` until the next successful save.
     file_differs: bool,
+    /// The processing loop did not get `saved_config`, because the command
+    /// could not be sent, so Save sends it again.
+    saved_config_not_applied: bool,
     status_message: Option<(String, StatusType, std::time::Instant)>,
     log_rx: mpsc::Receiver<LogEntry>,
     log_entries: Vec<LogEntry>,
@@ -300,6 +303,7 @@ impl BabbleBoopApp {
             config_draft,
             saved_config,
             file_differs: false,
+            saved_config_not_applied: false,
             status_message: None,
             log_rx,
             log_entries: Vec::new(),
@@ -341,6 +345,12 @@ impl BabbleBoopApp {
         self.file_differs || self.draft_changed()
     }
 
+    /// Save has something to do: write changes to the file, or send saved
+    /// settings that the processing loop did not get.
+    fn can_save(&self) -> bool {
+        self.has_unsaved_changes() || self.saved_config_not_applied
+    }
+
     fn reload_config(&mut self, ctx: &egui::Context) {
         self.config_draft = self.saved_config.clone();
         self.colors = theme::get_colors(self.config_draft.theme);
@@ -378,9 +388,13 @@ impl BabbleBoopApp {
         self.saved_config = new_config.clone();
         self.file_differs = false;
         match self.send_command(AppCommand::UpdateConfig(new_config)) {
-            Ok(()) => self.set_status_success("Settings saved successfully"),
+            Ok(()) => {
+                self.saved_config_not_applied = false;
+                self.set_status_success("Settings saved successfully");
+            }
             Err(e) => {
-                self.set_status_error(format!("Settings saved to file, but not applied. {}", e))
+                self.saved_config_not_applied = true;
+                self.set_status_error(format!("Settings saved to file, but not applied. {}", e));
             }
         }
     }
@@ -487,6 +501,16 @@ impl BabbleBoopApp {
                         egui::RichText::new("● Unsaved changes").color(colors.unsaved_indicator),
                     );
                     ui.separator();
+                } else if self.saved_config_not_applied {
+                    ui.label(
+                        egui::RichText::new("● Settings not applied")
+                            .color(colors.unsaved_indicator),
+                    )
+                    .on_hover_text(
+                        "The settings are saved to the file, but are not in use. \
+                        Click Save Settings to apply them.",
+                    );
+                    ui.separator();
                 }
 
                 // Reset button (only show if the draft has changes)
@@ -500,10 +524,8 @@ impl BabbleBoopApp {
                 }
 
                 // Save button
-                let save_button = ui.add_enabled(
-                    self.has_unsaved_changes(),
-                    egui::Button::new("Save Settings"),
-                );
+                let save_button =
+                    ui.add_enabled(self.can_save(), egui::Button::new("Save Settings"));
 
                 if save_button.clicked() {
                     match self.config_to_save() {
@@ -1890,6 +1912,7 @@ mod tests {
     // ===========================================================================
 
     const UNSAVED: &str = "● Unsaved changes";
+    const NOT_APPLIED: &str = "● Settings not applied";
 
     /// The app after a start with the default config file, but with
     /// `osc.display_time` set to `display_time` in the file. The API key is
@@ -2110,5 +2133,97 @@ mod tests {
         );
         assert_eq!(saved.unwrap().config.translation.target_language, "German");
         drop(cmd_rx);
+    }
+
+    /// The target language of each `UpdateConfig` in `commands`.
+    fn sent_languages(commands: &[AppCommand]) -> Vec<String> {
+        commands
+            .iter()
+            .filter_map(|command| match command {
+                AppCommand::UpdateConfig(config) => {
+                    Some(config.translation.target_language.clone())
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_save_after_a_full_channel_sends_the_saved_settings_again() {
+        use std::fs;
+
+        let dir =
+            std::env::temp_dir().join(format!("babble_boop_gui_save_retry_{}", std::process::id()));
+        if dir.exists() {
+            fs::remove_dir_all(&dir).unwrap();
+        }
+        fs::create_dir_all(&dir).unwrap();
+        let config_file = dir.join("config.toml");
+        let mut file_config = Config::default();
+        file_config.openai.api_key = "sk-test".to_string();
+        file_config.save(&config_file).unwrap();
+        let (cmd_tx, mut cmd_rx) = full_command_channel();
+        let (log_tx, log_rx) = tokio::sync::mpsc::channel(100);
+        let app_state = Arc::new(AppState::new(cmd_tx, log_tx));
+        let mut app = BabbleBoopApp::new(app_state, file_config, log_rx, config_file.clone());
+        app.config_draft.translation.target_language = "German".to_string();
+
+        let (queued, after_failure, sent_again, after_retry, sent_when_clean) =
+            without_blocking(move || {
+                let mut receive_all = || -> Vec<AppCommand> {
+                    std::iter::from_fn(|| cmd_rx.try_recv().ok()).collect()
+                };
+                let ctx = egui::Context::default();
+                let output = run_until_idle(&ctx, &mut app);
+                click(&ctx, &mut app, text_center(&output, "Save Settings"));
+                let after_failure = run_until_idle(&ctx, &mut app);
+                // The loop reads the commands that filled the channel
+                let queued = receive_all();
+                click(&ctx, &mut app, text_center(&after_failure, "Save Settings"));
+                let after_retry = run_until_idle(&ctx, &mut app);
+                let sent_again = receive_all();
+                click(&ctx, &mut app, text_center(&after_retry, "Save Settings"));
+                run_until_idle(&ctx, &mut app);
+                let sent_when_clean = receive_all();
+                (
+                    queued,
+                    painted_text(&after_failure),
+                    sent_again,
+                    painted_text(&after_retry),
+                    sent_when_clean,
+                )
+            });
+        // Clean up before asserting, so a failure does not leave files behind
+        fs::remove_dir_all(&dir).unwrap();
+
+        assert_eq!(queued.len(), 32);
+        assert_eq!(sent_languages(&queued), Vec::<String>::new());
+        assert_eq!(sent_languages(&sent_again), ["German"]);
+        assert!(
+            after_failure.contains(&NOT_APPLIED.to_string()),
+            "{:?}",
+            after_failure
+        );
+        assert!(
+            !after_failure.contains(&UNSAVED.to_string()),
+            "{:?}",
+            after_failure
+        );
+        assert!(
+            after_retry.contains(&"Settings saved successfully".to_string()),
+            "{:?}",
+            after_retry
+        );
+        assert!(
+            !after_retry.contains(&NOT_APPLIED.to_string()),
+            "{:?}",
+            after_retry
+        );
+        assert!(
+            !after_retry.contains(&UNSAVED.to_string()),
+            "{:?}",
+            after_retry
+        );
+        assert_eq!(sent_languages(&sent_when_clean), Vec::<String>::new());
     }
 }
