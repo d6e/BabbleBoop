@@ -613,3 +613,507 @@ pub async fn convert_for_playback(
         .await
         .map_err(|e| format!("converting the test recording failed: {}", e))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app_state::LogEntry;
+    use rosc::{OscPacket, OscType};
+    use std::future::Future;
+    use std::sync::atomic::AtomicUsize;
+
+    /// The input and output format of the tests. The output plays the
+    /// input format, so a test recording plays unchanged.
+    const SAMPLE_RATE: u32 = 16_000;
+
+    /// A message that VRChat received from the loop.
+    #[derive(Debug, PartialEq)]
+    enum Osc {
+        Typing(bool),
+        Input(String),
+    }
+
+    /// An output device that plays nothing. It sends the samples of each
+    /// playback to the test and counts the playbacks that are kept alive.
+    #[derive(Clone)]
+    struct FakeOutput {
+        played: mpsc::UnboundedSender<Vec<f32>>,
+        alive: Arc<AtomicUsize>,
+    }
+
+    struct FakePlayback(Arc<AtomicUsize>);
+
+    impl Drop for FakePlayback {
+        fn drop(&mut self) {
+            self.0.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+
+    impl PlaybackOutput for FakeOutput {
+        type Playback = FakePlayback;
+
+        fn channels(&self) -> u16 {
+            1
+        }
+
+        fn sample_rate(&self) -> u32 {
+            SAMPLE_RATE
+        }
+
+        fn play(
+            &self,
+            samples: Vec<f32>,
+            _errors: mpsc::Sender<String>,
+        ) -> Result<FakePlayback, Box<dyn Error + Send + Sync>> {
+            self.played.send(samples)?;
+            self.alive.fetch_add(1, Ordering::SeqCst);
+            Ok(FakePlayback(Arc::clone(&self.alive)))
+        }
+    }
+
+    /// The processing loop with fakes for its devices: the audio input is
+    /// a channel that the test fills, and the output is a `FakeOutput`.
+    struct LoopUnderTest {
+        app_state: Arc<AppState>,
+        cmd_rx: mpsc::Receiver<AppCommand>,
+        input: AudioInput,
+        output: FakeOutput,
+        audio_started: Arc<AtomicBool>,
+        ended: oneshot::Sender<()>,
+    }
+
+    impl LoopUnderTest {
+        /// Run the loop together with `test` until both end. Returns the
+        /// result of the loop.
+        async fn run_with(self, test: impl Future<Output = ()>) -> Result<(), String> {
+            let Self {
+                app_state,
+                cmd_rx,
+                input,
+                output,
+                audio_started,
+                ended,
+            } = self;
+            let data_dir = DataDir::new(
+                std::env::temp_dir()
+                    .join(format!("babble_boop_no_data_dir_{}", std::process::id())),
+            );
+            let processing = async {
+                let result = run_processing_loop(
+                    app_state,
+                    cmd_rx,
+                    data_dir,
+                    move || {
+                        audio_started.store(true, Ordering::SeqCst);
+                        input
+                    },
+                    move || Ok(output.clone()),
+                )
+                .await;
+                ended
+                    .send(())
+                    .expect("the test does not wait for the end of the loop");
+                result.map_err(|e| e.to_string())
+            };
+            let (result, ()) = tokio::join!(processing, test);
+            result
+        }
+    }
+
+    /// What the test does to the loop and what it sees of it.
+    struct Driver {
+        app_state: Arc<AppState>,
+        commands: mpsc::Sender<AppCommand>,
+        events: mpsc::Sender<AudioEvent>,
+        started: Option<oneshot::Sender<Result<AudioStreamInfo, String>>>,
+        vrchat: UdpSocket,
+        log: mpsc::Receiver<LogEntry>,
+        played: mpsc::UnboundedReceiver<Vec<f32>>,
+        playbacks_alive: Arc<AtomicUsize>,
+        audio_started: Arc<AtomicBool>,
+        ended: oneshot::Receiver<()>,
+        /// Longest wait for an effect of the loop. Only a failing test
+        /// waits this long.
+        wait: Duration,
+    }
+
+    /// A processing loop that sends to a local VRChat socket, with the
+    /// settings that `configure` changes.
+    async fn processing_loop(configure: impl FnOnce(&mut Config)) -> (LoopUnderTest, Driver) {
+        let vrchat = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let mut config = Config::default();
+        config.osc.address = "127.0.0.1".to_string();
+        config.osc.input_port = 0;
+        config.osc.output_port = vrchat.local_addr().unwrap().port();
+        configure(&mut config);
+        let (cmd_tx, cmd_rx) = mpsc::channel(32);
+        let (log_tx, log) = mpsc::channel(100);
+        let app_state = Arc::new(AppState::new(config, cmd_tx.clone(), log_tx));
+        let (events_tx, events) = mpsc::channel(100);
+        let (started_tx, started) = oneshot::channel();
+        let (played_tx, played) = mpsc::unbounded_channel();
+        let playbacks_alive = Arc::new(AtomicUsize::new(0));
+        let audio_started = Arc::new(AtomicBool::new(false));
+        let (ended_tx, ended) = oneshot::channel();
+        let processing = LoopUnderTest {
+            app_state: Arc::clone(&app_state),
+            cmd_rx,
+            input: AudioInput { started, events },
+            output: FakeOutput {
+                played: played_tx,
+                alive: Arc::clone(&playbacks_alive),
+            },
+            audio_started: Arc::clone(&audio_started),
+            ended: ended_tx,
+        };
+        let driver = Driver {
+            app_state,
+            commands: cmd_tx,
+            events: events_tx,
+            started: Some(started_tx),
+            vrchat,
+            log,
+            played,
+            playbacks_alive,
+            audio_started,
+            ended,
+            wait: Duration::from_secs(5),
+        };
+        (processing, driver)
+    }
+
+    impl Driver {
+        /// Report that the audio input started, as the audio thread does.
+        fn start_audio(&mut self) {
+            self.report_audio_start(Ok(AudioStreamInfo {
+                sample_rate: SAMPLE_RATE,
+                channels: 1,
+            }));
+        }
+
+        fn report_audio_start(&mut self, result: Result<AudioStreamInfo, String>) {
+            let started = self
+                .started
+                .take()
+                .expect("the audio start is reported once");
+            assert!(
+                started.send(result).is_ok(),
+                "the loop does not wait for the audio start"
+            );
+        }
+
+        async fn command(&self, command: AppCommand) {
+            self.commands.send(command).await.unwrap();
+        }
+
+        async fn event(&self, event: AudioEvent) {
+            self.events.send(event).await.unwrap();
+        }
+
+        /// Wait for an activity log line that contains `text`, and skip the
+        /// lines before it.
+        async fn logged(&mut self, text: &str) {
+            let mut seen = Vec::new();
+            let found = tokio::time::timeout(self.wait, async {
+                while let Some(entry) = self.log.recv().await {
+                    if entry.message.contains(text) {
+                        return true;
+                    }
+                    seen.push(entry.message);
+                }
+                false
+            })
+            .await;
+            assert_eq!(found, Ok(true), "{:?} not logged after {:?}", text, seen);
+        }
+
+        /// The next message that VRChat receives.
+        async fn received(&self) -> Osc {
+            let mut buf = [0u8; 1024];
+            let len = tokio::time::timeout(self.wait, self.vrchat.recv(&mut buf))
+                .await
+                .expect("VRChat received no message")
+                .unwrap();
+            let OscPacket::Message(message) = rosc::decoder::decode_udp(&buf[..len]).unwrap().1
+            else {
+                panic!("VRChat received a bundle");
+            };
+            match (message.addr.as_str(), message.args.first()) {
+                ("/chatbox/typing", Some(OscType::Bool(typing))) => Osc::Typing(*typing),
+                ("/chatbox/input", Some(OscType::String(text))) => Osc::Input(text.clone()),
+                _ => panic!("unexpected OSC message {:?}", message),
+            }
+        }
+
+        /// The samples of the next playback on the output.
+        async fn played(&mut self) -> Vec<f32> {
+            tokio::time::timeout(self.wait, self.played.recv())
+                .await
+                .expect("nothing was played")
+                .unwrap()
+        }
+
+        /// Wait for the loop to end.
+        async fn ended(&mut self) {
+            tokio::time::timeout(self.wait, &mut self.ended)
+                .await
+                .expect("the processing loop did not end")
+                .unwrap();
+        }
+
+        /// Request shutdown and wait for the loop to end.
+        async fn shut_down(&mut self) {
+            self.app_state.shutdown.request();
+            self.ended().await;
+        }
+    }
+
+    /// `seconds` of a constant mono signal.
+    fn sound(seconds: f32) -> CapturedAudio {
+        CapturedAudio {
+            samples: vec![0.25; (SAMPLE_RATE as f32 * seconds) as usize],
+            channels: 1,
+            sample_rate: SAMPLE_RATE,
+        }
+    }
+
+    /// Settings that skip every whole recording before the transcription
+    /// request.
+    fn skip_short_recordings(config: &mut Config) {
+        config.audio.min_transcription_duration = 10.0;
+    }
+
+    #[tokio::test]
+    async fn test_a_short_recording_turns_typing_on_and_off_without_a_request() {
+        let (processing, mut d) = processing_loop(skip_short_recordings).await;
+        let result = processing
+            .run_with(async {
+                d.start_audio();
+                d.event(AudioEvent::StartRecording).await;
+                d.event(AudioEvent::AudioData(sound(0.5), Extent::Whole))
+                    .await;
+                d.event(AudioEvent::StopRecording).await;
+                // On at the start, off when process_audio skips the
+                // recording, off at the stop
+                assert_eq!(d.received().await, Osc::Typing(true));
+                assert_eq!(d.received().await, Osc::Typing(false));
+                assert_eq!(d.received().await, Osc::Typing(false));
+                d.logged("Audio too short").await;
+                d.shut_down().await;
+            })
+            .await;
+
+        assert_eq!(result, Ok(()));
+        // Off at shutdown
+        assert_eq!(d.received().await, Osc::Typing(false));
+    }
+
+    #[tokio::test]
+    async fn test_speech_while_translation_is_off_does_not_turn_typing_on() {
+        let (processing, mut d) = processing_loop(skip_short_recordings).await;
+        let result = processing
+            .run_with(async {
+                d.start_audio();
+                // The GUI stores the toggle before it sends the command
+                d.app_state.enabled.store(false, Ordering::Relaxed);
+                d.command(AppCommand::SetEnabled(false)).await;
+                assert_eq!(d.received().await, Osc::Typing(false));
+                d.event(AudioEvent::StartRecording).await;
+                d.event(AudioEvent::AudioData(sound(0.5), Extent::Whole))
+                    .await;
+                // The loop logs an event when it receives it, so it handled
+                // the StartRecording before
+                d.logged("Silence detected").await;
+                d.shut_down().await;
+            })
+            .await;
+
+        assert_eq!(result, Ok(()));
+        // Off at shutdown, and not on before
+        assert_eq!(d.received().await, Osc::Typing(false));
+    }
+
+    #[tokio::test]
+    async fn test_a_discarded_recording_is_logged_and_turns_typing_off() {
+        let (processing, mut d) = processing_loop(skip_short_recordings).await;
+        let result = processing
+            .run_with(async {
+                d.start_audio();
+                d.event(AudioEvent::StartRecording).await;
+                d.event(AudioEvent::RecordingDiscarded).await;
+                d.event(AudioEvent::StopRecording).await;
+                assert_eq!(d.received().await, Osc::Typing(true));
+                assert_eq!(d.received().await, Osc::Typing(false));
+                d.logged("Test Microphone started, the recording in progress is discarded")
+                    .await;
+                d.shut_down().await;
+            })
+            .await;
+
+        assert_eq!(result, Ok(()));
+        assert_eq!(d.received().await, Osc::Typing(false));
+    }
+
+    #[tokio::test]
+    async fn test_an_audio_input_error_is_logged_and_turns_typing_off() {
+        let (processing, mut d) = processing_loop(skip_short_recordings).await;
+        let result = processing
+            .run_with(async {
+                d.start_audio();
+                d.event(AudioEvent::StartRecording).await;
+                d.event(AudioEvent::InputError(
+                    "Audio input error: unplugged".into(),
+                ))
+                .await;
+                assert_eq!(d.received().await, Osc::Typing(true));
+                assert_eq!(d.received().await, Osc::Typing(false));
+                d.logged("Audio input error: unplugged").await;
+                d.shut_down().await;
+            })
+            .await;
+
+        assert_eq!(result, Ok(()));
+        assert_eq!(d.received().await, Osc::Typing(false));
+    }
+
+    #[tokio::test]
+    async fn test_an_audio_start_error_ends_the_loop_with_the_error() {
+        let (processing, mut d) = processing_loop(|_| {}).await;
+        let result = processing
+            .run_with(async {
+                d.report_audio_start(Err("No input device available".into()));
+                d.ended().await;
+            })
+            .await;
+
+        assert_eq!(
+            result,
+            Err("cannot start audio input: No input device available".to_string())
+        );
+        assert!(!d.app_state.is_shutdown_requested());
+    }
+
+    #[tokio::test]
+    async fn test_a_busy_osc_port_ends_the_loop_before_the_audio_input_starts() {
+        let busy = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let port = busy.local_addr().unwrap().port();
+        let (processing, mut d) = processing_loop(|config| config.osc.input_port = port).await;
+        let result = processing.run_with(d.ended()).await;
+
+        let error = result.unwrap_err();
+        assert!(
+            error.starts_with(&format!("cannot open OSC port 127.0.0.1:{}", port)),
+            "{}",
+            error
+        );
+        assert!(!d.audio_started.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn test_a_stopped_test_recording_plays_on_the_output() {
+        let (processing, mut d) = processing_loop(|_| {}).await;
+        let recorded: Vec<f32> = (0..160).map(|n| n as f32 / 160.0).collect();
+        let result = processing
+            .run_with(async {
+                d.start_audio();
+                d.command(AppCommand::StartTestRecording).await;
+                d.logged("Test recording started").await;
+                // What the audio callback does in test mode
+                d.app_state
+                    .test_recording_buffer
+                    .lock()
+                    .unwrap()
+                    .extend_from_slice(&recorded);
+                d.command(AppCommand::StopTestRecording).await;
+                assert_eq!(d.played().await, recorded);
+                // The loop keeps the playback after it handles the next
+                // command
+                d.command(AppCommand::SetEnabled(true)).await;
+                d.logged("Translation enabled").await;
+                assert_eq!(d.playbacks_alive.load(Ordering::SeqCst), 1);
+                d.shut_down().await;
+            })
+            .await;
+
+        assert_eq!(result, Ok(()));
+        assert_eq!(d.playbacks_alive.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_a_test_recording_plays_when_it_reaches_its_limit() {
+        let (processing, mut d) = processing_loop(|_| {}).await;
+        // The paused clock moves on to the limit while the test waits
+        d.wait = TEST_RECORDING_LIMIT * 2;
+        let recorded = vec![0.5; 160];
+        let result = processing
+            .run_with(async {
+                d.start_audio();
+                d.command(AppCommand::StartTestRecording).await;
+                d.logged("Test recording started").await;
+                let started = Instant::now();
+                d.app_state
+                    .test_recording_buffer
+                    .lock()
+                    .unwrap()
+                    .extend_from_slice(&recorded);
+                assert_eq!(d.played().await, recorded);
+                assert_eq!(started.elapsed(), TEST_RECORDING_LIMIT);
+                d.shut_down().await;
+            })
+            .await;
+
+        assert_eq!(result, Ok(()));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_shutdown_during_an_utterance_ends_the_loop_and_turns_typing_off() {
+        let (processing, mut d) = processing_loop(|config| {
+            config.audio.min_transcription_duration = 0.0;
+            // The rate limiter waits a minute before the transcription
+            // request. Every wait of the test is shorter, so the test
+            // sends no request, also when it fails.
+            config.rate_limit.requests_per_minute = 0;
+        })
+        .await;
+        let result = processing
+            .run_with(async {
+                d.start_audio();
+                d.event(AudioEvent::StartRecording).await;
+                assert_eq!(d.received().await, Osc::Typing(true));
+                d.event(AudioEvent::AudioData(sound(1.0), Extent::Whole))
+                    .await;
+                d.logged("Silence detected").await;
+                // The paused clock moves only when every task waits for a
+                // timer, and not while the recording is encoded on a
+                // blocking thread. So this sleep ends when the loop waits
+                // for the rate limiter in process_audio.
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                d.shut_down().await;
+            })
+            .await;
+
+        assert_eq!(result, Ok(()));
+        assert_eq!(d.received().await, Osc::Typing(false));
+    }
+
+    #[tokio::test]
+    async fn test_shutdown_comes_before_the_events_that_wait() {
+        let (processing, mut d) = processing_loop(|_| {}).await;
+        let result = processing
+            .run_with(async {
+                d.start_audio();
+                // The loop waits in its select after it logs this
+                d.command(AppCommand::SetEnabled(true)).await;
+                d.logged("Translation enabled").await;
+                // Both are ready the next time the loop runs
+                d.app_state.shutdown.request();
+                d.event(AudioEvent::StartRecording).await;
+                d.ended().await;
+            })
+            .await;
+
+        assert_eq!(result, Ok(()));
+        // Off at shutdown; the StartRecording was not handled
+        assert_eq!(d.received().await, Osc::Typing(false));
+    }
+}
