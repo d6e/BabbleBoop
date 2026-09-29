@@ -399,18 +399,17 @@ requests_per_minute = 50
     // Test: API error messages are truncated by characters, not bytes
     // ===========================================================================
 
-    /// Sends `message` as an OpenAI style JSON error through `Logger::error_api`
-    /// and returns the text shown in the activity log.
+    /// The text shown in the activity log for an OpenAI style JSON error
+    /// with `message`.
     fn displayed_api_error(message: &str) -> String {
-        use crate::app_state::Logger;
+        use crate::api_client::ApiError;
 
-        let (log_tx, mut log_rx) = tokio::sync::mpsc::channel(1);
         let body = serde_json::json!({ "error": { "message": message, "code": "other" } });
-        Logger::new(log_tx, Default::default()).error_api(format!("API error: {}", body));
-        log_rx
-            .try_recv()
-            .expect("error_api sends one log entry")
-            .message
+        ApiError::Http {
+            status: reqwest::StatusCode::BAD_REQUEST,
+            body: body.to_string(),
+        }
+        .to_string()
     }
 
     #[test]
@@ -519,7 +518,7 @@ requests_per_minute = 50
 
     #[tokio::test]
     async fn test_api_client_times_out_when_server_never_responds() {
-        use crate::api_client::client_with_timeouts;
+        use crate::api_client::{ApiError, OpenAi};
         use std::time::Duration;
         use tokio::net::TcpListener;
 
@@ -531,11 +530,15 @@ requests_per_minute = 50
             std::future::pending::<()>().await;
         });
 
-        let client =
-            client_with_timeouts(Duration::from_secs(5), Duration::from_millis(200)).unwrap();
+        let api = OpenAi::with_timeouts(
+            &format!("http://{}/v1", addr),
+            Duration::from_secs(5),
+            Duration::from_millis(200),
+        )
+        .unwrap();
         let result = tokio::time::timeout(
             Duration::from_secs(10),
-            client.get(format!("http://{}/", addr)).send(),
+            api.post_json("chat/completions", "sk-test", &serde_json::json!({})),
         )
         .await;
         server.abort();
@@ -544,8 +547,8 @@ requests_per_minute = 50
             .expect("request was not stopped by the client timeout")
             .expect_err("server never responds");
         assert!(
-            error.is_timeout(),
-            "expected a timeout error, got {}",
+            matches!(&error, ApiError::Transport(e) if e.is_timeout()),
+            "expected a timeout error, got {:?}",
             error
         );
     }
@@ -1242,7 +1245,7 @@ requests_per_minute = 50
             use std::time::Duration;
 
             if let Err(e) = result {
-                self.app_state.logger.error_api(format!("Error: {}", e));
+                crate::processing_loop::log_processing_error(&*e, &self.app_state.logger);
             }
             if self.cost_file.exists() {
                 std::fs::remove_file(&self.cost_file).unwrap();
@@ -2139,39 +2142,26 @@ requests_per_minute = 50
     }
 
     /// Run `process_audio` on `audio`, which holds `extent` of a recording,
-    /// with `min_seconds` as the minimum transcription duration. The API client sends its requests through a
-    /// local proxy, which accepts the connection and closes it, so no
-    /// request leaves the machine.
+    /// with `min_seconds` as the minimum transcription duration. The API is
+    /// a local server that answers every request with 404.
     pub(crate) async fn check_against_minimum(
         audio: crate::types::CapturedAudio,
         extent: crate::types::Extent,
         min_seconds: f32,
     ) -> MinimumCheck {
+        use crate::api_client::test_server::TestServer;
+        use crate::api_client::OpenAi;
         use crate::app_state::AppState;
         use crate::audio_processing::process_audio;
         use crate::chatbox::Chatbox;
         use crate::processing_loop::encode_for_upload;
         use crate::typing_indicator::TypingIndicator;
-        use std::sync::atomic::{AtomicBool, Ordering};
         use std::sync::{Arc, RwLock};
         use std::time::Duration;
-        use tokio::net::{TcpListener, UdpSocket};
+        use tokio::net::UdpSocket;
 
-        let proxy = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let proxy_addr = proxy.local_addr().unwrap();
-        let requested = Arc::new(AtomicBool::new(false));
-        let proxy_task = tokio::spawn({
-            let requested = requested.clone();
-            async move {
-                // The client gets its error only when this drops the connection
-                let (_connection, _) = proxy.accept().await.unwrap();
-                requested.store(true, Ordering::SeqCst);
-            }
-        });
-        let client = reqwest::Client::builder()
-            .proxy(reqwest::Proxy::all(format!("http://{}", proxy_addr)).unwrap())
-            .build()
-            .unwrap();
+        let mut server = TestServer::start(Vec::new()).await;
+        let api = OpenAi::new(&server.base_url).unwrap();
 
         let chatbox = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
@@ -2192,7 +2182,7 @@ requests_per_minute = 50
         let result = tokio::time::timeout(
             Duration::from_secs(10),
             process_audio(
-                &client,
+                &api,
                 wav,
                 extent,
                 &config,
@@ -2206,10 +2196,9 @@ requests_per_minute = 50
         )
         .await
         .expect("process_audio did not finish");
-        proxy_task.abort();
 
-        if requested.load(Ordering::SeqCst) {
-            assert!(result.is_err(), "the proxy closed the connection");
+        if !server.received().is_empty() {
+            assert!(result.is_err(), "the server answered 404");
             MinimumCheck::Transcribed
         } else {
             assert!(result.is_ok(), "{:?}", result.err());
@@ -2384,7 +2373,7 @@ requests_per_minute = 50
             log_tx.clone(),
             waker.clone()
         )
-        .error_api("API error")));
+        .error_with_details("API error", "HTTP 500")));
     }
 
     #[test]

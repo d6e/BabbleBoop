@@ -1,3 +1,4 @@
+use crate::api_client::OpenAi;
 use crate::config::OpenAiConfig;
 use crate::models::{self, InstructionsRole};
 use crate::price_estimator::TokenCounts;
@@ -221,25 +222,74 @@ impl ChatGptChoice {
     }
 }
 
+/// Send `request` to Chat Completions. An error of the API is an
+/// `ApiError` in the box.
 pub async fn ask_chatgpt(
-    client: &reqwest::Client,
+    api: &OpenAi,
     request: &ChatGptRequest,
     config: &OpenAiConfig,
     rate_limiter: &mut RateLimiter,
 ) -> Result<Translation, Box<dyn Error>> {
     rate_limiter.wait().await;
 
-    let res = client
-        .post("https://api.openai.com/v1/chat/completions")
-        .bearer_auth(&config.api_key)
-        .json(request)
-        .send()
+    let body = api
+        .post_json("chat/completions", &config.api_key, request)
         .await?;
+    request.parse_response(&body)
+}
 
-    if !res.status().is_success() {
-        let error_text = res.text().await?;
-        return Err(format!("ChatGPT API request failed: {}", error_text).into());
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::api_client::test_server::{Response, TestServer};
+
+    #[tokio::test]
+    async fn test_the_request_goes_to_the_chat_completions_path_with_the_key() {
+        let mut server = TestServer::start(vec![(
+            "chat/completions",
+            Response::ok(
+                r#"{"choices": [{"message": {"content": "Bonjour"}, "finish_reason": "stop"}],
+                    "usage": {"prompt_tokens": 30, "completion_tokens": 2}}"#,
+            ),
+        )])
+        .await;
+        let api = OpenAi::new(&server.base_url).unwrap();
+        let config = OpenAiConfig {
+            api_key: "sk-test".to_string(),
+            model: "gpt-4o-mini".to_string(),
+            ..OpenAiConfig::default()
+        };
+        let request = ChatGptRequest::translation(&config.model, "French", "Hello");
+
+        let translation = ask_chatgpt(&api, &request, &config, &mut RateLimiter::new(50))
+            .await
+            .unwrap();
+
+        assert_eq!(translation.text, Ok("Bonjour".to_string()));
+        assert_eq!(
+            (translation.tokens.input, translation.tokens.output),
+            (30, 2)
+        );
+        let received = server.request().await;
+        assert_eq!(received.method, "POST");
+        assert_eq!(received.path, "/v1/chat/completions");
+        assert_eq!(received.header("authorization"), Some("Bearer sk-test"));
+        assert_eq!(received.header("content-type"), Some("application/json"));
+        let body: serde_json::Value = serde_json::from_slice(&received.body).unwrap();
+        assert_eq!(body["model"], "gpt-4o-mini");
+        assert_eq!(body["messages"][0]["role"], "system");
+        assert!(
+            body["messages"][0]["content"]
+                .as_str()
+                .unwrap()
+                .contains("Translate each user message into French"),
+            "{}",
+            body
+        );
+        assert_eq!(
+            body["messages"][1],
+            serde_json::json!({ "role": "user", "content": "Hello" })
+        );
+        assert_eq!(body["messages"].as_array().unwrap().len(), 2);
     }
-
-    request.parse_response(&res.text().await?)
 }

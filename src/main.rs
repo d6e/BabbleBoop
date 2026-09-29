@@ -1,3 +1,4 @@
+use babble_boop::api_client::OPENAI_BASE_URL;
 use babble_boop::app_state::{run_logging_failure, AppCommand, AppState, LogEntry};
 use babble_boop::audio_playback::AudioOutput;
 use babble_boop::audio_recording::{start_audio_recording, SharedAudioState};
@@ -73,6 +74,7 @@ fn main() {
                 Arc::clone(&app_state_clone),
                 cmd_rx,
                 data.dir,
+                OPENAI_BASE_URL,
                 || start_audio_input(&app_state_clone),
                 AudioOutput::open_default,
             ))

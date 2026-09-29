@@ -1,7 +1,6 @@
 use crate::config::{AudioConfig, Config};
 use crate::shutdown::Shutdown;
 use eframe::egui;
-use serde_json::Value;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, OnceLock, RwLock};
 use std::time::Instant;
@@ -83,11 +82,13 @@ impl Logger {
         self.send(msg, LogLevel::Error);
     }
 
-    /// Log an API error. Shows raw details to stderr but a cleaner message to the activity log.
-    pub fn error_api(&self, message: impl Into<String>) {
-        let raw_msg = message.into();
-        eprintln!("{}", raw_msg);
-        self.send(parse_api_error_for_display(&raw_msg), LogLevel::Error);
+    /// Log an error with `message` in the activity log, and with `message`
+    /// and `details` on stderr. For an error whose whole text does not
+    /// help the user, such as the raw response of an API.
+    pub fn error_with_details(&self, message: impl Into<String>, details: &str) {
+        let msg = message.into();
+        eprintln!("{}\n  {}", msg, details);
+        self.send(msg, LogLevel::Error);
     }
 
     /// Add an entry to the activity log and wake the GUI to show it.
@@ -156,50 +157,6 @@ pub fn panic_reason(payload: &(dyn std::any::Any + Send)) -> &str {
         .copied()
         .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
         .unwrap_or("unknown panic")
-}
-
-/// Parse an API error message and extract a user-friendly version for display.
-fn parse_api_error_for_display(error: &str) -> String {
-    // Try to find JSON in the error message
-    if let Some(json) = error.find('{').and_then(|start| error.get(start..)) {
-        if let Ok(parsed) = serde_json::from_str::<Value>(json) {
-            if let Some(err_obj) = parsed.get("error") {
-                // Extract the error code if available
-                let code = err_obj.get("code").and_then(|c| c.as_str()).unwrap_or("");
-
-                // Map common error codes to user-friendly messages
-                match code {
-                    "invalid_api_key" => {
-                        return "Invalid API key. Check your OpenAI API key in settings.".into();
-                    }
-                    "insufficient_quota" => {
-                        return "OpenAI API quota exceeded. Check your billing.".into();
-                    }
-                    "rate_limit_exceeded" => {
-                        return "Rate limit exceeded. Please wait and try again.".into();
-                    }
-                    "model_not_found" => {
-                        return "Model not found. Check your model settings.".into();
-                    }
-                    _ => {}
-                }
-
-                // Fall back to the message field if no specific code matched
-                if let Some(message) = err_obj.get("message").and_then(|m| m.as_str()) {
-                    // Truncate if too long. Count characters, not bytes, so the
-                    // cut cannot fall inside a multibyte character.
-                    if message.chars().count() > 120 {
-                        let truncated: String = message.chars().take(117).collect();
-                        return format!("{}...", truncated);
-                    }
-                    return message.to_string();
-                }
-            }
-        }
-    }
-
-    // Fall back to original message if parsing fails
-    error.to_string()
 }
 
 /// Shared audio parameters that can be hot-reloaded without restarting the audio stream.

@@ -3,7 +3,7 @@
 //! typing indicator to VRChat. `main.rs` runs it on the processing thread
 //! and gives it the audio input and output devices.
 
-use crate::api_client::build_api_client;
+use crate::api_client::{ApiError, OpenAi};
 use crate::app_state::{AppCommand, AppState, Logger};
 use crate::audio_playback::{convert_for_output, PlaybackOutput};
 use crate::audio_processing::process_audio;
@@ -41,13 +41,15 @@ pub struct AudioInput {
 }
 
 /// Run the processing loop until shutdown is requested or the command
-/// channel closes. `start_audio` starts the audio input, and
+/// channel closes. The loop sends its API requests to `api_base_url`,
+/// such as `OPENAI_BASE_URL`. `start_audio` starts the audio input, and
 /// `open_output` opens the output device for each test recording
 /// playback. Returns an error if the loop cannot start.
 pub async fn run_processing_loop<O: PlaybackOutput>(
     app_state: Arc<AppState>,
     mut cmd_rx: mpsc::Receiver<AppCommand>,
     data_dir: DataDir,
+    api_base_url: &str,
     start_audio: impl FnOnce() -> AudioInput,
     open_output: impl Fn() -> Result<O, Box<dyn Error + Send + Sync>>,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
@@ -66,8 +68,8 @@ pub async fn run_processing_loop<O: PlaybackOutput>(
 
     // Before the audio input starts, so a failure here does not leave
     // audio capture running with nothing to receive it.
-    let api_client =
-        build_api_client().map_err(|e| format!("cannot create the HTTP client: {}", e))?;
+    let api =
+        OpenAi::new(api_base_url).map_err(|e| format!("cannot create the HTTP client: {}", e))?;
 
     app_state.logger.info("Starting audio recording...");
     app_state.logger.info(format!(
@@ -195,7 +197,7 @@ pub async fn run_processing_loop<O: PlaybackOutput>(
                 // Shutdown drops the work, including the chatbox
                 // display pause and rate limiter wait.
                 let result = app_state.shutdown.run_until(process_audio(
-                    &api_client,
+                    &api,
                     audio_data,
                     extent,
                     &current_config,
@@ -209,7 +211,7 @@ pub async fn run_processing_loop<O: PlaybackOutput>(
                 .await;
                 match result {
                     Some(Ok(())) => {}
-                    Some(Err(e)) => app_state.logger.error_api(format!("Error: {}", e)),
+                    Some(Err(e)) => log_processing_error(&*e, &app_state.logger),
                     None => break,
                 }
                 if recording_goes_on {
@@ -224,6 +226,16 @@ pub async fn run_processing_loop<O: PlaybackOutput>(
     typing_indicator.stop_typing().await;
 
     Ok(())
+}
+
+/// Log an error of `process_audio`. An error of the API shows its message
+/// for the user in the activity log, and its details on stderr; any other
+/// error shows as it is.
+pub(crate) fn log_processing_error(error: &(dyn Error + 'static), logger: &Logger) {
+    match error.downcast_ref::<ApiError>() {
+        Some(api_error) => logger.error_with_details(api_error.to_string(), &api_error.details()),
+        None => logger.error(format!("Error: {}", error)),
+    }
 }
 
 /// Stop the test recording and play it back on an output that
@@ -676,6 +688,8 @@ mod tests {
     struct LoopUnderTest {
         app_state: Arc<AppState>,
         cmd_rx: mpsc::Receiver<AppCommand>,
+        /// The API that the loop sends its requests to
+        api_base_url: String,
         input: AudioInput,
         output: FakeOutput,
         audio_started: Arc<AtomicBool>,
@@ -689,6 +703,7 @@ mod tests {
             let Self {
                 app_state,
                 cmd_rx,
+                api_base_url,
                 input,
                 output,
                 audio_started,
@@ -703,6 +718,7 @@ mod tests {
                     app_state,
                     cmd_rx,
                     data_dir,
+                    &api_base_url,
                     move || {
                         audio_started.store(true, Ordering::SeqCst);
                         input
@@ -758,6 +774,9 @@ mod tests {
         let processing = LoopUnderTest {
             app_state: Arc::clone(&app_state),
             cmd_rx,
+            // Port 1 of the local host, where nothing listens, so a request
+            // fails at once. A test with a server sets its URL.
+            api_base_url: "http://127.0.0.1:1/v1".to_string(),
             input: AudioInput { started, events },
             output: FakeOutput {
                 played: played_tx,

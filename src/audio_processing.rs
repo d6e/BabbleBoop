@@ -1,3 +1,4 @@
+use crate::api_client::OpenAi;
 use crate::app_state::AppState;
 use crate::chatbox::Chatbox;
 use crate::config::Config;
@@ -16,7 +17,7 @@ use std::time::Duration;
 
 #[allow(clippy::too_many_arguments)]
 pub async fn process_audio(
-    client: &reqwest::Client,
+    api: &OpenAi,
     audio_data: Vec<u8>,
     extent: Extent,
     config: &Config,
@@ -40,7 +41,7 @@ pub async fn process_audio(
         return Ok(());
     }
 
-    let text = transcribe_audio(client, audio_data.clone(), &config.openai, rate_limiter).await?;
+    let text = transcribe_audio(api, audio_data.clone(), &config.openai, rate_limiter).await?;
     let Some(transcription) = accept_transcription(
         text,
         audio_duration,
@@ -67,7 +68,7 @@ pub async fn process_audio(
         &transcription,
     );
 
-    let translation = ask_chatgpt(client, &request, &config.openai, rate_limiter).await?;
+    let translation = ask_chatgpt(api, &request, &config.openai, rate_limiter).await?;
     deliver_translation(
         translation,
         &transcription,
