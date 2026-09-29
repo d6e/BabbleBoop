@@ -1,5 +1,5 @@
-use std::time::{Duration, Instant};
-use tokio::time::sleep;
+use std::time::Duration;
+use tokio::time::{sleep, Instant};
 
 pub struct RateLimiter {
     last_request: Instant,

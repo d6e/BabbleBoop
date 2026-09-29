@@ -264,12 +264,9 @@ pub(crate) mod regression_tests {
             waits.push(start.elapsed());
         }
 
-        // The limiter measures the minute on the real clock, which moves a
-        // little while the paused test clock does not.
-        assert!(
-            waits[..2] == [Duration::ZERO; 2] && waits[2] >= Duration::from_secs(59),
-            "{:?}",
-            waits
+        assert_eq!(
+            waits,
+            [Duration::ZERO, Duration::ZERO, Duration::from_secs(60)]
         );
     }
 
