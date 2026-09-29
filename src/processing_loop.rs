@@ -155,8 +155,9 @@ pub async fn run_processing_loop<O: PlaybackOutput>(
                             break;
                         }
                     }
-                    Some(AppCommand::Quit) | None => {
-                        // Quit command received or channel closed
+                    None => {
+                        // The command channel only closes when the GUI side
+                        // is gone (the sender is dropped), so shut down.
                         break;
                     }
                 }

@@ -305,7 +305,6 @@ pub enum AppCommand {
     UpdateConfig(Config),
     StartTestRecording,
     StopTestRecording,
-    Quit,
 }
 
 impl AppState {

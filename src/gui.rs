@@ -523,12 +523,10 @@ impl BabbleBoopApp {
 
 impl eframe::App for BabbleBoopApp {
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
-        // Signal shutdown to all threads
+        // Signal shutdown to all threads; the processing loop's command
+        // channel then closes when this GUI's sender is dropped, which the
+        // loop also treats as a shutdown request.
         self.app_state.request_shutdown();
-        // Send Quit command to processing loop
-        if let Err(e) = self.send_command(AppCommand::Quit) {
-            eprintln!("Warning: {}", e);
-        }
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
