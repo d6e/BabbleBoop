@@ -734,7 +734,7 @@ mod tests {
         assert!(!s.app_state.audio.status().is_recording);
     }
 
-    /// The recorded audio that `process_audio` receives after the events
+    /// The recorded audio that `Pipeline::process` receives after the events
     /// of one recording.
     fn recorded_audio(events: Vec<AudioEvent>) -> (CapturedAudio, Extent) {
         let mut audio = events.into_iter().filter_map(|event| match event {

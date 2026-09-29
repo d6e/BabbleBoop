@@ -33,7 +33,7 @@ pub async fn transcribe_audio(
 }
 
 /// Reads the text of a transcription response body. The text can be empty
-/// or blank; `audio_processing::accept_transcription` decides what to do
+/// or blank; `pipeline::Pipeline::accept_transcription` decides what to do
 /// with it, after it adds the cost.
 pub(crate) fn parse_transcription(body: &str) -> Result<String, Box<dyn Error>> {
     #[derive(Deserialize)]

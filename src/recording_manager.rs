@@ -165,7 +165,7 @@ mod tests {
         let mut manager = RecordingManager::new(dir.clone(), 10);
 
         // The translation is not aborted: save_recording has no error to
-        // propagate, so a caller that drives it (process_audio) always
+        // propagate, so a caller that drives it (Pipeline::process) always
         // reaches the code after it.
         manager.save_recording(vec![0u8; 4], "first", &logger).await;
         let entries = new_entries(&mut log_rx);

@@ -6,23 +6,18 @@
 use crate::api_client::{ApiError, OpenAi};
 use crate::app_state::{AppCommand, AppState, AudioShared, Logger};
 use crate::audio_playback::{convert_for_output, PlaybackOutput};
-use crate::audio_processing::process_audio;
 use crate::audio_recording::AudioStreamInfo;
 use crate::chatbox::Chatbox;
 use crate::config::Config;
 use crate::data_dir::DataDir;
-use crate::models;
-use crate::price_estimator::PriceEstimator;
-use crate::rate_limiter::RateLimiter;
+use crate::pipeline::{Pipeline, ProcessingServices};
 use crate::recorder::MAX_RECORDING;
-use crate::recording_manager::RecordingManager;
 use crate::shutdown::Shutdown;
 use crate::types::{AudioEvent, CapturedAudio, Extent};
 use crate::typing_indicator::TypingIndicator;
 use crate::upload_audio::encode_upload_wav;
 use std::error::Error;
 use std::ops::ControlFlow;
-use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, MutexGuard, PoisonError};
 use std::time::Duration;
@@ -92,12 +87,19 @@ pub async fn run_processing_loop<O: PlaybackOutput>(
         audio_stream_info.channels, audio_stream_info.sample_rate
     ));
 
-    let mut services = ProcessingServices::new(&config, &data_dir, &app_state.logger);
+    let services = ProcessingServices::new(&config, &data_dir, &app_state.logger);
     // Initialize the shared cost from the loaded value
     app_state.set_total_cost(services.price_estimator.total_cost);
 
-    let mut typing_indicator = TypingIndicator::new(Arc::clone(&socket), app_state.logger.clone());
-    let mut chatbox = Chatbox::new(socket);
+    let typing_indicator = TypingIndicator::new(Arc::clone(&socket), app_state.logger.clone());
+    let chatbox = Chatbox::new(socket);
+    let mut pipeline = Pipeline::new(
+        Arc::clone(&app_state),
+        api,
+        chatbox,
+        typing_indicator,
+        services,
+    );
 
     let mut test_recording = TestRecording::new(
         &app_state,
@@ -117,7 +119,7 @@ pub async fn run_processing_loop<O: PlaybackOutput>(
             cmd = cmd_rx.recv() => {
                 match cmd {
                     Some(AppCommand::SetEnabled(enabled)) => {
-                        apply_enabled(enabled, &config, &typing_indicator, &app_state.logger).await;
+                        apply_enabled(enabled, &config, &pipeline.typing_indicator, &app_state.logger).await;
                     }
                     // The only place where the settings change. The loop
                     // handles a command between utterances, so each
@@ -127,14 +129,13 @@ pub async fn run_processing_loop<O: PlaybackOutput>(
                         if osc_destination(&new_config) != osc_destination(&config) {
                             // Typing can be on at the old destination, and
                             // the StopRecording goes to the new one
-                            typing_indicator.stop_typing(&config).await;
+                            pipeline.typing_indicator.stop_typing(&config).await;
                         }
                         let new_socket_address = osc_socket_address(&new_config);
                         if new_socket_address != socket_address {
                             match rebind_osc_socket(&socket_address, &new_socket_address, &app_state).await {
                                 ControlFlow::Continue(Some(socket)) => {
-                                    typing_indicator.set_socket(Arc::clone(&socket));
-                                    chatbox.set_socket(socket);
+                                    pipeline.set_socket(socket);
                                     socket_address = new_socket_address;
                                 }
                                 ControlFlow::Continue(None) => {}
@@ -142,7 +143,7 @@ pub async fn run_processing_loop<O: PlaybackOutput>(
                             }
                         }
                         app_state.audio.params.update(&new_config.audio);
-                        services.apply_config(&new_config, &app_state.logger);
+                        pipeline.services.apply_config(&new_config, &app_state.logger);
                         config = new_config;
                     }
                     Some(AppCommand::StartTestRecording) => {
@@ -179,15 +180,15 @@ pub async fn run_processing_loop<O: PlaybackOutput>(
                 }
 
                 // A part of a long recording: the typing indicator is to stay
-                // on after process_audio turns it off.
+                // on after Pipeline::process turns it off.
                 let recording_goes_on = matches!(event, AudioEvent::AudioPart(_));
                 let (audio, extent) = match event {
                     AudioEvent::StartRecording => {
-                        typing_indicator.start_typing(&config).await;
+                        pipeline.typing_indicator.start_typing(&config).await;
                         continue;
                     }
                     AudioEvent::StopRecording => {
-                        typing_indicator.stop_typing(&config).await;
+                        pipeline.typing_indicator.stop_typing(&config).await;
                         continue;
                     }
                     // Logged above. The callback follows a discarded
@@ -209,34 +210,25 @@ pub async fn run_processing_loop<O: PlaybackOutput>(
                 };
                 // Shutdown drops the work, including the chatbox
                 // display pause and rate limiter wait.
-                let result = app_state.shutdown.run_until(process_audio(
-                    &api,
-                    audio_data,
-                    extent,
-                    &config,
-                    &mut chatbox,
-                    &mut services.rate_limiter,
-                    &typing_indicator,
-                    &mut services.price_estimator,
-                    services.recording_manager.as_mut(),
-                    &app_state,
-                ))
-                .await;
+                let result = app_state
+                    .shutdown
+                    .run_until(pipeline.process(audio_data, extent, &config))
+                    .await;
                 match result {
                     Some(Ok(())) => {}
                     Some(Err(e)) => log_processing_error(&*e, &app_state.logger),
                     None => break,
                 }
                 if recording_goes_on {
-                    typing_indicator.start_typing(&config).await;
+                    pipeline.typing_indicator.start_typing(&config).await;
                 }
             }
         }
     }
 
     // Shutdown can stop processing between StartRecording and the end of
-    // process_audio. Do not leave VRChat showing the typing indicator.
-    typing_indicator.stop_typing(&config).await;
+    // Pipeline::process. Do not leave VRChat showing the typing indicator.
+    pipeline.typing_indicator.stop_typing(&config).await;
 
     Ok(())
 }
@@ -285,7 +277,7 @@ async fn rebind_osc_socket(
     }
 }
 
-/// Log an error of `process_audio`. An error of the API shows its message
+/// Log an error of `Pipeline::process`. An error of the API shows its message
 /// for the user in the activity log, and its details on stderr; any other
 /// error shows as it is.
 pub(crate) fn log_processing_error(error: &(dyn Error + 'static), logger: &Logger) {
@@ -418,62 +410,6 @@ impl TestRecording {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
     }
-}
-
-/// Processing loop state that depends on the settings.
-pub struct ProcessingServices {
-    pub rate_limiter: RateLimiter,
-    pub price_estimator: PriceEstimator,
-    pub recording_manager: Option<RecordingManager>,
-    /// Where the recording manager saves recordings
-    recordings_dir: PathBuf,
-}
-
-impl ProcessingServices {
-    /// Services that keep the total cost and the recordings in `data_dir`.
-    pub fn new(config: &Config, data_dir: &DataDir, logger: &Logger) -> Self {
-        log_model_warnings(config, logger);
-        let recordings_dir = data_dir.recordings_dir();
-        Self {
-            rate_limiter: RateLimiter::new(config.rate_limit.requests_per_minute),
-            price_estimator: PriceEstimator::new(
-                data_dir.cost_file(),
-                &config.openai.model,
-                &config.openai.transcription_model,
-            ),
-            recording_manager: recording_manager(config, &recordings_dir),
-            recordings_dir,
-        }
-    }
-
-    /// Apply settings saved in the GUI.
-    pub fn apply_config(&mut self, config: &Config, logger: &Logger) {
-        // Keep the requests already counted; a new limiter would reset them.
-        self.rate_limiter
-            .set_max_requests(config.rate_limit.requests_per_minute);
-        self.price_estimator
-            .set_models(&config.openai.model, &config.openai.transcription_model);
-        self.recording_manager = recording_manager(config, &self.recordings_dir);
-        log_model_warnings(config, logger);
-    }
-}
-
-/// Tell the user when a model is scheduled to shut down, or when the cost
-/// display cannot be accurate. The GUI accepts any model name.
-fn log_model_warnings(config: &Config, logger: &Logger) {
-    let (model, transcription_model) = (&config.openai.model, &config.openai.transcription_model);
-    for warning in models::shutdown_warnings(model, transcription_model)
-        .into_iter()
-        .chain(PriceEstimator::unknown_pricing(model, transcription_model))
-    {
-        logger.info(warning);
-    }
-}
-
-fn recording_manager(config: &Config, recordings_dir: &Path) -> Option<RecordingManager> {
-    config
-        .keep_audio_files
-        .then(|| RecordingManager::new(recordings_dir.to_path_buf(), config.max_audio_files))
 }
 
 /// Handle the translation toggle from the GUI.
@@ -694,10 +630,12 @@ mod tests {
     use super::*;
     use crate::api_client::test_server::{Response, TestServer};
     use crate::app_state::{LogEntry, LogLevel};
-    use crate::price_estimator::TokenCounts;
+    use crate::models;
+    use crate::price_estimator::{PriceEstimator, TokenCounts};
     use rosc::{OscPacket, OscType};
     use std::future::Future;
     use std::net::SocketAddr;
+    use std::path::PathBuf;
     use std::sync::atomic::{AtomicBool, AtomicUsize};
     use std::sync::Mutex;
 
@@ -1011,7 +949,7 @@ mod tests {
                 d.event(AudioEvent::AudioData(sound(0.5), Extent::Whole))
                     .await;
                 d.event(AudioEvent::StopRecording).await;
-                // On at the start, off when process_audio skips the
+                // On at the start, off when Pipeline::process skips the
                 // recording, off at the stop
                 assert_eq!(d.received().await, Osc::Typing(true));
                 assert_eq!(d.received().await, Osc::Typing(false));
@@ -1206,7 +1144,7 @@ mod tests {
                 // The paused clock moves only when every task waits for a
                 // timer, and not while the recording is encoded on a
                 // blocking thread. So this sleep ends when the loop waits
-                // for the rate limiter in process_audio.
+                // for the rate limiter in Pipeline::process.
                 tokio::time::sleep(Duration::from_secs(1)).await;
                 d.shut_down().await;
             })
@@ -1291,7 +1229,7 @@ mod tests {
             &config.openai.transcription_model,
         );
         let wav = encode_upload_wav(&sound(seconds)).unwrap();
-        let duration = crate::audio_processing::calculate_audio_duration(&wav).unwrap();
+        let duration = crate::pipeline::calculate_audio_duration(&wav).unwrap();
         let one =
             prices.estimate_transcription_cost(duration) + prices.estimate_translation_cost(TOKENS);
         (0..utterances).fold(0.0, |total, _| total + one)

@@ -700,7 +700,12 @@ requests_per_minute = 50
 
         let mut fixture = DeliveryFixture::new("refusal_after_message").await;
         fixture.config.osc.display_time = 10_000;
-        fixture.sender.send("first", &fixture.config).await.unwrap();
+        fixture
+            .pipeline
+            .chatbox
+            .send("first", &fixture.config)
+            .await
+            .unwrap();
         let body = chat_completion_body_with(
             "null",
             r#""I can't help with that.""#,
@@ -716,16 +721,10 @@ requests_per_minute = 50
         .unwrap();
 
         let start = Instant::now();
-        let result = crate::audio_processing::deliver_translation(
-            translation,
-            "Hello",
-            &fixture.config,
-            &mut fixture.sender,
-            &fixture.typing_indicator,
-            &mut fixture.price_estimator,
-            &fixture.app_state,
-        )
-        .await;
+        let result = fixture
+            .pipeline
+            .deliver_translation(translation, "Hello", &fixture.config)
+            .await;
 
         assert!(start.elapsed().is_zero(), "waited {:?}", start.elapsed());
         let delivery = fixture.finish(result).await;
@@ -754,13 +753,18 @@ requests_per_minute = 50
     async fn fixture_showing_first(test_name: &str) -> DeliveryFixture {
         let mut fixture = DeliveryFixture::new(test_name).await;
         fixture.config.osc.display_time = 10_000;
-        fixture.sender.send("first", &fixture.config).await.unwrap();
+        fixture
+            .pipeline
+            .chatbox
+            .send("first", &fixture.config)
+            .await
+            .unwrap();
         fixture
     }
 
     /// Set the translation toggle to `enabled` after `delay`, as the GUI
     /// does: it stores the value at once, and the processing loop handles
-    /// the `SetEnabled` command only after `process_audio` returns.
+    /// the `SetEnabled` command only after `Pipeline::process` returns.
     fn toggle_after(
         app_state: &std::sync::Arc<crate::app_state::AppState>,
         delay: std::time::Duration,
@@ -788,16 +792,10 @@ requests_per_minute = 50
         )
         .parse_response(&body)
         .unwrap();
-        crate::audio_processing::deliver_translation(
-            translation,
-            "Hello",
-            &fixture.config,
-            &mut fixture.sender,
-            &fixture.typing_indicator,
-            &mut fixture.price_estimator,
-            &fixture.app_state,
-        )
-        .await
+        fixture
+            .pipeline
+            .deliver_translation(translation, "Hello", &fixture.config)
+            .await
     }
 
     /// The log lines of a translation that was not sent because
@@ -1180,21 +1178,27 @@ requests_per_minute = 50
 
     /// A chatbox on a local UDP socket, the activity log, and a total cost
     /// that starts at zero, in a file of its own named after the test.
+    /// A chatbox on a local UDP socket, the activity log, and a total cost
+    /// that starts at zero, in a data folder of its own named after the
+    /// test. The pipeline sends its requests to an address that nothing
+    /// answers; the tests that use this fixture call `accept_transcription`
+    /// or `deliver_translation` directly, so no request goes out.
     struct DeliveryFixture {
         config: Config,
         chatbox: tokio::net::UdpSocket,
-        sender: crate::chatbox::Chatbox,
+        pipeline: crate::pipeline::Pipeline,
         app_state: std::sync::Arc<crate::app_state::AppState>,
         log_rx: tokio::sync::mpsc::Receiver<crate::app_state::LogEntry>,
-        typing_indicator: crate::typing_indicator::TypingIndicator,
-        price_estimator: PriceEstimator,
         cost_file: std::path::PathBuf,
     }
 
     impl DeliveryFixture {
         async fn new(test_name: &str) -> Self {
+            use crate::api_client::OpenAi;
             use crate::app_state::AppState;
             use crate::chatbox::Chatbox;
+            use crate::data_dir::DataDir;
+            use crate::pipeline::{Pipeline, ProcessingServices};
             use crate::typing_indicator::TypingIndicator;
             use std::sync::Arc;
             use tokio::net::UdpSocket;
@@ -1209,46 +1213,51 @@ requests_per_minute = 50
             let (log_tx, log_rx) = tokio::sync::mpsc::channel(10);
             let app_state = Arc::new(AppState::new(cmd_tx, log_tx));
             let typing_indicator = TypingIndicator::new(socket.clone(), app_state.logger.clone());
-            let cost_file = std::env::temp_dir().join(format!(
-                "babble_boop_{}_{}_total_cost.txt",
+            let data_dir_path = std::env::temp_dir().join(format!(
+                "babble_boop_{}_{}_delivery_fixture",
                 test_name,
                 std::process::id()
             ));
+            std::fs::create_dir_all(&data_dir_path).unwrap();
+            let data_dir = DataDir::new(data_dir_path);
+            let cost_file = data_dir.cost_file();
             if cost_file.exists() {
                 std::fs::remove_file(&cost_file).unwrap();
             }
-            let price_estimator = PriceEstimator::new(
-                cost_file.clone(),
-                &config.openai.model,
-                &config.openai.transcription_model,
+            let services = ProcessingServices::new(&config, &data_dir, &app_state.logger);
+            let api = OpenAi::new("http://127.0.0.1:1/v1").unwrap();
+            let pipeline = Pipeline::new(
+                Arc::clone(&app_state),
+                api,
+                Chatbox::new(socket),
+                typing_indicator,
+                services,
             );
             DeliveryFixture {
                 config,
                 chatbox,
-                sender: Chatbox::new(socket),
+                pipeline,
                 app_state,
                 log_rx,
-                typing_indicator,
-                price_estimator,
                 cost_file,
             }
         }
 
         /// Log an error as the processing loop logs an error of
-        /// `process_audio`, then collect what reached the activity log and
-        /// the chatbox.
+        /// `Pipeline::process`, then collect what reached the activity log
+        /// and the chatbox.
         async fn finish(mut self, result: Result<(), Box<dyn std::error::Error>>) -> Delivery {
             use std::time::Duration;
 
             if let Err(e) = result {
                 crate::processing_loop::log_processing_error(&*e, &self.app_state.logger);
             }
-            if self.cost_file.exists() {
-                std::fs::remove_file(&self.cost_file).unwrap();
+            if let Some(data_dir) = self.cost_file.parent() {
+                std::fs::remove_dir_all(data_dir).unwrap();
             }
             assert_eq!(
                 self.app_state.get_total_cost(),
-                self.price_estimator.total_cost
+                self.pipeline.services.price_estimator.total_cost
             );
 
             let mut chatbox_messages = Vec::new();
@@ -1268,7 +1277,7 @@ requests_per_minute = 50
                     .map(|entry| (entry.level, entry.message))
                     .collect(),
                 chatbox: chatbox_messages,
-                total_cost: self.price_estimator.total_cost,
+                total_cost: self.pipeline.services.price_estimator.total_cost,
             }
         }
     }
@@ -1276,7 +1285,6 @@ requests_per_minute = 50
     /// Give the Chat Completions response `body` to `parse_response` and
     /// `deliver_translation` in a `DeliveryFixture`.
     async fn deliver_response(test_name: &str, body: &str) -> Delivery {
-        use crate::audio_processing::deliver_translation;
         use crate::translation::ChatGptRequest;
 
         let mut fixture = DeliveryFixture::new(test_name).await;
@@ -1284,16 +1292,10 @@ requests_per_minute = 50
 
         let result = match request.parse_response(body) {
             Ok(translation) => {
-                deliver_translation(
-                    translation,
-                    "Hello",
-                    &fixture.config,
-                    &mut fixture.sender,
-                    &fixture.typing_indicator,
-                    &mut fixture.price_estimator,
-                    &fixture.app_state,
-                )
-                .await
+                fixture
+                    .pipeline
+                    .deliver_translation(translation, "Hello", &fixture.config)
+                    .await
             }
             Err(e) => Err(e),
         };
@@ -1530,22 +1532,16 @@ requests_per_minute = 50
         test_name: &str,
         body: &str,
     ) -> (Option<String>, Delivery) {
-        use crate::audio_processing::accept_transcription;
         use crate::transcription::parse_transcription;
         use std::time::Duration;
 
         let mut fixture = DeliveryFixture::new(test_name).await;
         let (text, result) = match parse_transcription(body) {
             Ok(text) => (
-                accept_transcription(
-                    text,
-                    Duration::from_secs(1),
-                    &fixture.config,
-                    &fixture.typing_indicator,
-                    &mut fixture.price_estimator,
-                    &fixture.app_state,
-                )
-                .await,
+                fixture
+                    .pipeline
+                    .accept_transcription(text, Duration::from_secs(1), &fixture.config)
+                    .await,
                 Ok(()),
             ),
             Err(e) => (None, Err(e)),
@@ -1610,7 +1606,7 @@ requests_per_minute = 50
         }
     }
 
-    /// A body with a null text is an error of `process_audio`, and there
+    /// A body with a null text is an error of `Pipeline::process`, and there
     /// is no transcription to cost.
     #[tokio::test]
     async fn test_transcription_body_with_null_text_is_an_error() {
@@ -1638,7 +1634,7 @@ requests_per_minute = 50
 
     #[test]
     fn test_config_update_applies_new_model_prices_and_keeps_total() {
-        use crate::processing_loop::ProcessingServices;
+        use crate::pipeline::ProcessingServices;
         use std::time::Duration;
 
         let mut config = Config::default();
@@ -1677,7 +1673,7 @@ requests_per_minute = 50
 
     #[tokio::test]
     async fn test_cost_and_recordings_are_saved_in_the_data_folder() {
-        use crate::processing_loop::ProcessingServices;
+        use crate::pipeline::ProcessingServices;
         use std::fs;
 
         let dir =
@@ -1748,7 +1744,7 @@ requests_per_minute = 50
 
     #[test]
     fn test_unknown_model_pricing_is_logged() {
-        use crate::processing_loop::ProcessingServices;
+        use crate::pipeline::ProcessingServices;
 
         let mut config = Config::default();
         config.openai.model = "my-finetuned-model".to_string();
@@ -1769,7 +1765,7 @@ requests_per_minute = 50
 
     #[test]
     fn test_model_shutdown_date_is_logged_at_start_and_on_save() {
-        use crate::processing_loop::ProcessingServices;
+        use crate::pipeline::ProcessingServices;
 
         let mut config = Config::default();
         config.openai.model = "gpt-3.5-turbo".to_string();
@@ -1794,7 +1790,7 @@ requests_per_minute = 50
 
     #[test]
     fn test_suggested_models_are_not_scheduled_to_shut_down() {
-        use crate::processing_loop::ProcessingServices;
+        use crate::pipeline::ProcessingServices;
 
         for model in crate::models::suggested_chat_models() {
             for transcription_model in crate::models::suggested_transcription_models() {
@@ -1811,7 +1807,7 @@ requests_per_minute = 50
 
     #[test]
     fn test_known_model_pricing_is_not_logged() {
-        use crate::processing_loop::ProcessingServices;
+        use crate::pipeline::ProcessingServices;
 
         let config = Config::default();
         let entries = entries_logged_by(|logger| {
@@ -1824,7 +1820,7 @@ requests_per_minute = 50
     /// Time one more rate limiter wait after using up a budget of two
     /// requests and saving settings with `requests_per_minute` set to `limit`.
     async fn wait_after_saving_limit(limit: usize) -> std::time::Duration {
-        use crate::processing_loop::ProcessingServices;
+        use crate::pipeline::ProcessingServices;
         use tokio::time::Instant;
 
         let mut config = Config::default();
@@ -2071,7 +2067,7 @@ requests_per_minute = 50
         let wav = encode_for_upload(audio).await.unwrap();
 
         // The minimum duration check reads the duration from the WAV
-        let duration = crate::audio_processing::calculate_audio_duration(&wav).unwrap();
+        let duration = crate::pipeline::calculate_audio_duration(&wav).unwrap();
         assert!(
             (duration.as_secs_f32() - 0.5).abs() < 1e-3,
             "duration {:?}",
@@ -2110,7 +2106,7 @@ requests_per_minute = 50
             0
         );
 
-        let duration = crate::audio_processing::calculate_audio_duration(&wav);
+        let duration = crate::pipeline::calculate_audio_duration(&wav);
         assert!(duration.is_err(), "{:?}", duration);
     }
 
@@ -2118,7 +2114,7 @@ requests_per_minute = 50
     // Test: Any minimum transcription duration in config.toml is safe
     // ===========================================================================
 
-    /// What `process_audio` did with a recording.
+    /// What `Pipeline::process` did with a recording.
     #[derive(Debug, PartialEq)]
     pub(crate) enum MinimumCheck {
         /// The recording was skipped as too short.
@@ -2127,7 +2123,7 @@ requests_per_minute = 50
         Transcribed,
     }
 
-    /// Run `process_audio` on one second of audio with `min_seconds` as the
+    /// Run `Pipeline::process` on one second of audio with `min_seconds` as the
     /// minimum transcription duration.
     async fn check_one_second_against_minimum(min_seconds: f32) -> MinimumCheck {
         let second = crate::types::CapturedAudio {
@@ -2138,9 +2134,9 @@ requests_per_minute = 50
         check_against_minimum(second, crate::types::Extent::Whole, min_seconds).await
     }
 
-    /// Run `process_audio` on `audio`, which holds `extent` of a recording,
-    /// with `min_seconds` as the minimum transcription duration. The API is
-    /// a local server that answers every request with 404.
+    /// Run `Pipeline::process` on `audio`, which holds `extent` of a
+    /// recording, with `min_seconds` as the minimum transcription duration.
+    /// The API is a local server that answers every request with 404.
     pub(crate) async fn check_against_minimum(
         audio: crate::types::CapturedAudio,
         extent: crate::types::Extent,
@@ -2149,8 +2145,8 @@ requests_per_minute = 50
         use crate::api_client::test_server::TestServer;
         use crate::api_client::OpenAi;
         use crate::app_state::AppState;
-        use crate::audio_processing::process_audio;
         use crate::chatbox::Chatbox;
+        use crate::pipeline::{Pipeline, ProcessingServices};
         use crate::processing_loop::encode_for_upload;
         use crate::typing_indicator::TypingIndicator;
         use std::sync::Arc;
@@ -2172,23 +2168,24 @@ requests_per_minute = 50
         let typing_indicator = TypingIndicator::new(socket.clone(), app_state.logger.clone());
         let wav = encode_for_upload(audio).await.unwrap();
 
+        let mut services = ProcessingServices::new(&config, &missing_data_dir(), &app_state.logger);
+        services.rate_limiter = RateLimiter::new(50);
+        services.price_estimator =
+            price_estimator(&config.openai.model, &config.openai.transcription_model);
+        let mut pipeline = Pipeline::new(
+            Arc::clone(&app_state),
+            api,
+            Chatbox::new(socket),
+            typing_indicator,
+            services,
+        );
+
         let result = tokio::time::timeout(
             Duration::from_secs(10),
-            process_audio(
-                &api,
-                wav,
-                extent,
-                &config,
-                &mut Chatbox::new(socket),
-                &mut RateLimiter::new(50),
-                &typing_indicator,
-                &mut price_estimator(&config.openai.model, &config.openai.transcription_model),
-                None,
-                &app_state,
-            ),
+            pipeline.process(wav, extent, &config),
         )
         .await
-        .expect("process_audio did not finish");
+        .expect("Pipeline::process did not finish");
 
         if !server.received().is_empty() {
             assert!(result.is_err(), "the server answered 404");
