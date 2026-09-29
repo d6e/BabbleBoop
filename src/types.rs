@@ -31,6 +31,21 @@ pub struct CapturedAudio {
     pub sample_rate: u32,
 }
 
+impl CapturedAudio {
+    /// How much of a recording these samples hold. A sample rate or
+    /// channel count of 0 cannot happen from a real input stream; both are
+    /// clamped to 1, as `Recorder::new` clamps the sample rate, instead of
+    /// dividing by zero.
+    pub fn duration(&self) -> std::time::Duration {
+        let frames = (self.samples.len() / usize::from(self.channels.max(1))) as u64;
+        let sample_rate = u64::from(self.sample_rate.max(1));
+        let secs = frames / sample_rate;
+        let subsec_frames = frames % sample_rate;
+        let nanos = subsec_frames * 1_000_000_000 / sample_rate;
+        std::time::Duration::new(secs, nanos as u32)
+    }
+}
+
 /// How much of a recording some audio holds.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Extent {

@@ -206,19 +206,20 @@ pub async fn run_processing_loop<O: PlaybackOutput>(
                     AudioEvent::AudioData(audio, extent) => (audio, extent),
                     AudioEvent::AudioPart(audio) => (audio, Extent::Part),
                 };
-                let audio_data = match app_state.shutdown.run_until(encode_for_upload(audio)).await {
-                    Some(Ok(wav)) => wav,
-                    Some(Err(e)) => {
-                        app_state.logger.error(format!("Error: {}", e));
-                        continue;
-                    }
-                    None => break,
-                };
+                let (audio_data, audio_duration) =
+                    match app_state.shutdown.run_until(encode_for_upload(audio)).await {
+                        Some(Ok(encoded)) => encoded,
+                        Some(Err(e)) => {
+                            app_state.logger.error(format!("Error: {}", e));
+                            continue;
+                        }
+                        None => break,
+                    };
                 // Shutdown drops the work, including the chatbox
                 // display pause and rate limiter wait.
                 let result = app_state
                     .shutdown
-                    .run_until(pipeline.process(audio_data, extent, &config))
+                    .run_until(pipeline.process(audio_data, audio_duration, extent, &config))
                     .await;
                 match result {
                     Some(Ok(())) => {}
@@ -543,9 +544,12 @@ pub fn log_audio_event(event: &AudioEvent, logger: &Logger) {
 /// Encode a recording for upload on a blocking thread. The processing loop
 /// runs in `block_on` on the processing thread, so encoding in the loop
 /// would stop the loop, and its check for shutdown, until the encoding ends.
-pub async fn encode_for_upload(audio: CapturedAudio) -> Result<Vec<u8>, String> {
+/// Returns the WAV bytes and the duration of the original recording (not
+/// the resampled upload, though resampling keeps the duration the same).
+pub async fn encode_for_upload(audio: CapturedAudio) -> Result<(Vec<u8>, Duration), String> {
+    let duration = audio.duration();
     match tokio::task::spawn_blocking(move || encode_upload_wav(&audio)).await {
-        Ok(Ok(wav)) => Ok(wav),
+        Ok(Ok(wav)) => Ok((wav, duration)),
         Ok(Err(e)) => Err(format!("cannot encode the recording: {}", e)),
         Err(e) => Err(format!("encoding the recording failed: {}", e)),
     }
@@ -1255,8 +1259,7 @@ To use a different port, change Input Port in OSC Settings."
             &config.openai.model,
             &config.openai.transcription_model,
         );
-        let wav = encode_upload_wav(&sound(seconds)).unwrap();
-        let duration = crate::pipeline::calculate_audio_duration(&wav).unwrap();
+        let duration = sound(seconds).duration();
         let one =
             prices.estimate_transcription_cost(duration) + prices.estimate_translation_cost(TOKENS);
         (0..utterances).fold(0.0, |total, _| total + one)

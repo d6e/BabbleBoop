@@ -2054,6 +2054,7 @@ requests_per_minute = 50
     async fn test_recording_is_encoded_for_upload_with_its_duration() {
         use crate::processing_loop::encode_for_upload;
         use crate::types::CapturedAudio;
+        use std::time::Duration;
 
         // Half a second of stereo audio at 48 kHz
         let audio = CapturedAudio {
@@ -2061,50 +2062,26 @@ requests_per_minute = 50
             channels: 2,
             sample_rate: 48_000,
         };
-        let wav = encode_for_upload(audio).await.unwrap();
+        let (_wav, duration) = encode_for_upload(audio).await.unwrap();
 
-        // The minimum duration check reads the duration from the WAV
-        let duration = crate::pipeline::calculate_audio_duration(&wav).unwrap();
-        assert!(
-            (duration.as_secs_f32() - 0.5).abs() < 1e-3,
-            "duration {:?}",
-            duration
-        );
+        // Computed from the captured samples, not read back from the WAV,
+        // so it is exact.
+        assert_eq!(duration, Duration::from_millis(500));
     }
 
     #[test]
-    fn test_wav_with_a_sample_rate_of_zero_is_an_error() {
-        // The duration check reads the sample rate from the WAV header.
-        // hound cannot write a rate of 0, so build the file here: a PCM fmt
-        // chunk with 1 channel, a rate of 0 (and so 0 bytes per second), a
-        // block of 2 bytes and 16 bits, then one sample.
-        let mut wav = Vec::new();
-        wav.extend_from_slice(b"RIFF");
-        wav.extend_from_slice(&38u32.to_le_bytes());
-        wav.extend_from_slice(b"WAVEfmt ");
-        wav.extend_from_slice(&16u32.to_le_bytes());
-        for field in [1u16, 1] {
-            wav.extend_from_slice(&field.to_le_bytes());
-        }
-        for field in [0u32, 0] {
-            wav.extend_from_slice(&field.to_le_bytes());
-        }
-        for field in [2u16, 16] {
-            wav.extend_from_slice(&field.to_le_bytes());
-        }
-        wav.extend_from_slice(b"data");
-        wav.extend_from_slice(&2u32.to_le_bytes());
-        wav.extend_from_slice(&0i16.to_le_bytes());
-        assert_eq!(
-            hound::WavReader::new(wav.as_slice())
-                .unwrap()
-                .spec()
-                .sample_rate,
-            0
-        );
+    fn test_captured_audio_duration_with_a_zero_sample_rate_does_not_divide_by_zero() {
+        use crate::types::CapturedAudio;
+        use std::time::Duration;
 
-        let duration = crate::pipeline::calculate_audio_duration(&wav);
-        assert!(duration.is_err(), "{:?}", duration);
+        // A sample rate of 0 cannot come from a real input stream. Clamped
+        // to 1, as Recorder::new clamps it, instead of dividing by zero.
+        let audio = CapturedAudio {
+            samples: vec![0.0; 4],
+            channels: 1,
+            sample_rate: 0,
+        };
+        assert_eq!(audio.duration(), Duration::from_secs(4));
     }
 
     // ===========================================================================
@@ -2163,7 +2140,7 @@ requests_per_minute = 50
         let (log_tx, _log_rx) = tokio::sync::mpsc::channel(10);
         let app_state = Arc::new(AppState::new(cmd_tx, log_tx));
         let typing_indicator = TypingIndicator::new(socket.clone(), app_state.logger.clone());
-        let wav = encode_for_upload(audio).await.unwrap();
+        let (wav, audio_duration) = encode_for_upload(audio).await.unwrap();
 
         let mut services = ProcessingServices::new(&config, &missing_data_dir(), &app_state.logger);
         services.rate_limiter = RateLimiter::new(50);
@@ -2179,7 +2156,7 @@ requests_per_minute = 50
 
         let result = tokio::time::timeout(
             Duration::from_secs(10),
-            pipeline.process(wav, extent, &config),
+            pipeline.process(wav, audio_duration, extent, &config),
         )
         .await
         .expect("Pipeline::process did not finish");

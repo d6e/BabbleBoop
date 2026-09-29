@@ -67,15 +67,15 @@ impl Pipeline {
 
     /// Run one utterance through the pipeline: transcribe `upload`, add
     /// its cost, save it if debug recording is on, translate it, and
-    /// deliver the translation to the chatbox.
+    /// deliver the translation to the chatbox. `audio_duration` is the
+    /// duration of the captured recording `upload` was encoded from.
     pub async fn process(
         &mut self,
         upload: Vec<u8>,
+        audio_duration: Duration,
         extent: Extent,
         config: &Config,
     ) -> Result<(), Box<dyn Error>> {
-        let audio_duration = calculate_audio_duration(&upload)?;
-
         let min_duration = min_transcription_duration(config.audio.min_transcription_duration);
         if extent == Extent::Whole && audio_duration < min_duration {
             self.app_state.logger.info(format!(
@@ -293,11 +293,4 @@ fn min_transcription_duration(seconds: f32) -> Duration {
         Err(_) if seconds > 0.0 => Duration::MAX,
         Err(_) => Duration::ZERO,
     }
-}
-
-pub(crate) fn calculate_audio_duration(audio_data: &[u8]) -> Result<Duration, Box<dyn Error>> {
-    let reader = hound::WavReader::new(std::io::Cursor::new(audio_data))?;
-    let spec = reader.spec();
-    let duration = Duration::try_from_secs_f32(reader.duration() as f32 / spec.sample_rate as f32)?;
-    Ok(duration)
 }
