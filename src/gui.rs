@@ -545,9 +545,11 @@ impl BabbleBoopApp {
 
 impl eframe::App for BabbleBoopApp {
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
-        // Signal shutdown to all threads; the processing loop's command
-        // channel then closes when this GUI's sender is dropped, which the
-        // loop also treats as a shutdown request.
+        // Tell the processing loop and the audio input thread to stop,
+        // through `Shutdown`. This does not close the command channel. The
+        // channel closes when processing stops, which can come first, for
+        // example after a startup error. `main.rs` requests shutdown again
+        // after `run_gui` returns.
         self.app_state.request_shutdown();
     }
 

@@ -36,8 +36,8 @@ pub struct AudioInput {
     pub events: mpsc::Receiver<AudioEvent>,
 }
 
-/// Run the processing loop until shutdown is requested or the command
-/// channel closes. The loop owns its settings: it starts with `config`,
+/// Run the processing loop until shutdown is requested through
+/// `app_state.shutdown`. The loop owns its settings: it starts with `config`,
 /// and only `AppCommand::UpdateConfig` replaces them. The loop sends its
 /// API requests to `api_base_url`, such as `OPENAI_BASE_URL`.
 /// `start_audio` starts the audio input, and `open_output` opens the
@@ -128,7 +128,8 @@ pub async fn run_processing_loop<O: PlaybackOutput>(
 
     loop {
         tokio::select! {
-            // Prioritize shutdown and the command channel to quit promptly
+            // Shutdown first, so the loop quits promptly, then the commands
+            // from the GUI
             biased;
 
             _ = app_state.shutdown.requested() => break,
@@ -177,8 +178,11 @@ pub async fn run_processing_loop<O: PlaybackOutput>(
                         }
                     }
                     None => {
-                        // The command channel only closes when the GUI side
-                        // is gone (the sender is dropped), so shut down.
+                        // Not while the loop runs: `app_state.command_tx`
+                        // is a sender, and the loop holds `app_state`.
+                        // Shutdown comes through `Shutdown`.
+                        // Stops the loop if a later change lets the channel
+                        // close.
                         break;
                     }
                 }
