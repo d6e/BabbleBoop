@@ -24,7 +24,7 @@ pub async fn process_audio(
     rate_limiter: &mut RateLimiter,
     typing_indicator: &TypingIndicator,
     price_estimator: &mut PriceEstimator,
-    recording_manager: Option<&RecordingManager>,
+    recording_manager: Option<&mut RecordingManager>,
     app_state: &Arc<AppState>,
 ) -> Result<(), Box<dyn Error>> {
     let audio_duration = calculate_audio_duration(&audio_data)?;
@@ -53,9 +53,12 @@ pub async fn process_audio(
         return Ok(());
     };
 
-    // Save the audio recording if debug mode is enabled
+    // Save the audio recording if debug mode is enabled. A failed save is
+    // logged by the manager itself and does not stop the translation.
     if let Some(manager) = recording_manager {
-        manager.save_recording(audio_data, &transcription).await?;
+        manager
+            .save_recording(audio_data, &transcription, &app_state.logger)
+            .await;
     }
 
     let request = ChatGptRequest::translation(

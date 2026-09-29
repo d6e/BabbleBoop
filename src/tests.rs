@@ -462,8 +462,8 @@ requests_per_minute = 50
             fs::remove_dir_all(&dir).unwrap();
         }
 
-        let result = RecordingManager::new(dir.clone(), 10)
-            .save_recording(vec![0u8; 4], transcription)
+        RecordingManager::new(dir.clone(), 10)
+            .save_recording(vec![0u8; 4], transcription, &test_logger())
             .await;
         let names: Vec<String> = fs::read_dir(&dir)
             .map(|entries| {
@@ -479,7 +479,6 @@ requests_per_minute = 50
             fs::remove_dir_all(&dir).unwrap();
         }
 
-        result.expect("save_recording should succeed");
         assert_eq!(names.len(), 1, "expected one recording, found {:?}", names);
         let (_timestamp, rest) = names[0]
             .split_once('_')
@@ -1698,22 +1697,20 @@ requests_per_minute = 50
         let mut services = ProcessingServices::new(&config, &data_dir, &logger);
         let loaded_cost = services.price_estimator.total_cost;
         services.price_estimator.add_cost(0.5, &logger);
-        let first = services
+        services
             .recording_manager
-            .as_ref()
+            .as_mut()
             .expect("keep_audio_files is on")
-            .save_recording(vec![0u8; 4], "first")
-            .await
-            .map_err(|e| e.to_string());
+            .save_recording(vec![0u8; 4], "first", &logger)
+            .await;
         // Saved settings make a new recording manager
         services.apply_config(&config, &logger);
-        let second = services
+        services
             .recording_manager
-            .as_ref()
+            .as_mut()
             .expect("keep_audio_files is on")
-            .save_recording(vec![0u8; 4], "second")
-            .await
-            .map_err(|e| e.to_string());
+            .save_recording(vec![0u8; 4], "second", &logger)
+            .await;
         let saved_cost = fs::read_to_string(dir.join("total_cost.txt")).ok();
         let mut recordings: Vec<String> = fs::read_dir(dir.join("recordings"))
             .map(|entries| {
@@ -1729,8 +1726,6 @@ requests_per_minute = 50
 
         assert_eq!(loaded_cost, 1.5);
         assert_eq!(saved_cost.as_deref(), Some("2"));
-        assert_eq!(first, Ok(()));
-        assert_eq!(second, Ok(()));
         assert_eq!(recordings.len(), 2, "{:?}", recordings);
         assert!(recordings[0].ends_with("_first.wav"), "{:?}", recordings);
         assert!(recordings[1].ends_with("_second.wav"), "{:?}", recordings);

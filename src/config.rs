@@ -467,6 +467,12 @@ mod tests {
     use crate::rate_limiter::RateLimiter;
     use crate::recording_manager::RecordingManager;
 
+    /// Logger whose entries nobody reads.
+    fn test_logger() -> crate::app_state::Logger {
+        let (log_tx, _log_rx) = tokio::sync::mpsc::channel(10);
+        crate::app_state::Logger::new(log_tx, Default::default())
+    }
+
     /// `config.toml.example` of v0.5.0, the last release.
     const V0_5_0: &str = r#"
 keep_audio_files = false  # if true, saves audio recordings to disk for troubleshooting
@@ -883,12 +889,13 @@ requests_per_minute = 50          # adjust based on your API limits, it should c
             fs::write(dir.join(format!("{}_old.wav", i)), b"wav").unwrap();
         }
 
-        let manager = RecordingManager::new(dir.clone(), loaded.config.max_audio_files);
-        let saved = manager.save_recording(b"wav".to_vec(), "hello").await;
+        let mut manager = RecordingManager::new(dir.clone(), loaded.config.max_audio_files);
+        manager
+            .save_recording(b"wav".to_vec(), "hello", &test_logger())
+            .await;
         let kept = fs::read_dir(&dir).map(|entries| entries.count());
         fs::remove_dir_all(&dir).unwrap();
 
-        assert!(saved.is_ok(), "{:?}", saved.err());
         assert_eq!(kept.unwrap(), 151);
     }
 
@@ -945,12 +952,13 @@ requests_per_minute = 50          # adjust based on your API limits, it should c
         if dir.exists() {
             fs::remove_dir_all(&dir).unwrap();
         }
-        let manager = RecordingManager::new(dir.clone(), loaded.config.max_audio_files);
-        let saved = manager.save_recording(b"wav".to_vec(), "hello").await;
+        let mut manager = RecordingManager::new(dir.clone(), loaded.config.max_audio_files);
+        manager
+            .save_recording(b"wav".to_vec(), "hello", &test_logger())
+            .await;
         let kept = fs::read_dir(&dir).map(|entries| entries.count());
         fs::remove_dir_all(&dir).unwrap();
 
-        assert!(saved.is_ok(), "{:?}", saved.err());
         assert_eq!(kept.unwrap(), 1, "the recording just saved was deleted");
     }
 }

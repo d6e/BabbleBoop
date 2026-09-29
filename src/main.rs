@@ -353,7 +353,7 @@ async fn run_processing_loop(
                     &mut services.rate_limiter,
                     &typing_indicator,
                     &mut services.price_estimator,
-                    services.recording_manager.as_ref(),
+                    services.recording_manager.as_mut(),
                     &app_state,
                 ))
                 .await;
