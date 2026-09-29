@@ -61,7 +61,7 @@ pub async fn run_processing_loop<O: PlaybackOutput>(
             "cannot open OSC port {}: {}{}",
             socket_address,
             e,
-            osc_port_busy_hint(&e, false)
+            osc_port_busy_hint(&e, OscBindAt::Startup)
         )
     })?;
     let socket = Arc::new(socket);
@@ -303,7 +303,7 @@ async fn rebind_osc_socket(
             new_address,
             e,
             old_address,
-            osc_port_busy_hint(e, port_open_here)
+            osc_port_busy_hint(e, OscBindAt::Rebind { port_open_here })
         ));
     };
     let Some(resolved) = app_state
@@ -344,18 +344,43 @@ async fn rebind_osc_socket(
     }
 }
 
+/// Where the loop failed to open an OSC socket.
+#[derive(Clone, Copy)]
+enum OscBindAt {
+    /// At startup. The error ends the loop.
+    Startup,
+    /// On a settings change. The socket in use stays open, and
+    /// `port_open_here` is true when it can be what holds the port.
+    Rebind { port_open_here: bool },
+}
+
 /// Extra guidance appended to a failed OSC bind when the port is already in
-/// use. `port_open_here` is true when the socket that the loop has open
-/// can be what holds the port. Empty for any other error.
-fn osc_port_busy_hint(e: &std::io::Error, port_open_here: bool) -> &'static str {
+/// use, with the separator from the text before it. Empty for any other
+/// error.
+fn osc_port_busy_hint(e: &std::io::Error, at: OscBindAt) -> &'static str {
     if e.kind() != std::io::ErrorKind::AddrInUse {
-        ""
-    } else if port_open_here {
-        " BabbleBoop has this port open at the old address. \
+        return "";
+    }
+    match at {
+        // The loop has ended, so it does not receive the new settings. The
+        // GUI writes them to the config file before it sends them.
+        OscBindAt::Startup => {
+            ". Another OSC app may be listening on this port. \
+To use a different port, change Input Port in OSC Settings, \
+click Save Settings, and restart BabbleBoop."
+        }
+        OscBindAt::Rebind {
+            port_open_here: true,
+        } => {
+            " BabbleBoop has this port open at the old address. \
 To use the new address, restart BabbleBoop."
-    } else {
-        " Another OSC app may be listening on this port. \
+        }
+        OscBindAt::Rebind {
+            port_open_here: false,
+        } => {
+            " Another OSC app may be listening on this port. \
 To use a different port, change Input Port in OSC Settings."
+        }
     }
 }
 
@@ -1188,22 +1213,22 @@ mod tests {
     async fn test_a_busy_osc_port_ends_the_loop_before_the_audio_input_starts() {
         let busy = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let port = busy.local_addr().unwrap().port();
+        // The text of the error from this OS
+        let busy_error = UdpSocket::bind(("127.0.0.1", port)).await.unwrap_err();
         let (processing, mut d) = processing_loop(|config| config.osc.input_port = port).await;
         let result = processing.run_with(d.ended()).await;
 
-        let error = result.unwrap_err();
-        assert!(
-            error.starts_with(&format!("cannot open OSC port 127.0.0.1:{}", port)),
-            "{}",
-            error
-        );
-        assert!(
-            error.ends_with(
-                "Another OSC app may be listening on this port. \
-To use a different port, change Input Port in OSC Settings."
-            ),
-            "{}",
-            error
+        // The loop has ended, so a port saved in the settings does not
+        // apply until BabbleBoop starts again
+        assert_eq!(
+            result,
+            Err(format!(
+                "cannot open OSC port 127.0.0.1:{}: {}. \
+Another OSC app may be listening on this port. \
+To use a different port, change Input Port in OSC Settings, \
+click Save Settings, and restart BabbleBoop.",
+                port, busy_error
+            ))
         );
         assert!(!d.audio_started.load(Ordering::SeqCst));
     }
