@@ -1,4 +1,4 @@
-use crate::app_state::{FailureLog, Logger};
+use crate::app_state::{blocking_task_failure, FailureLog, Logger};
 use crate::models::{self, DEFAULT_CHAT_MODEL, DEFAULT_TRANSCRIPTION_MODEL};
 use std::error::Error;
 use std::fs;
@@ -87,9 +87,18 @@ impl PriceEstimator {
 
     /// Add to the total cost and save it. A failed save goes to the
     /// activity log, once until the save works again or fails differently.
-    pub fn add_cost(&mut self, cost: f64, logger: &Logger) {
+    /// The save runs on the blocking pool, so a slow disk does not stop
+    /// the async task of the processing loop.
+    pub async fn add_cost(&mut self, cost: f64, logger: &Logger) {
         self.total_cost += cost;
-        match fs::write(&self.cost_file, self.total_cost.to_string()) {
+        let (cost_file, total_cost) = (self.cost_file.clone(), self.total_cost);
+        let saved =
+            tokio::task::spawn_blocking(move || save_total_cost(&cost_file, total_cost)).await;
+        let saved = match saved {
+            Ok(saved) => saved.map_err(|e| e.to_string()),
+            Err(e) => Err(blocking_task_failure(&e).to_string()),
+        };
+        match saved {
             Ok(()) => {
                 if self.save_failure.succeeded() {
                     logger.info(format!(
@@ -109,10 +118,16 @@ impl PriceEstimator {
         }
     }
 
+    /// Blocks on the file system.
     fn load_total_cost(cost_file: &Path) -> Result<f64, Box<dyn Error>> {
         let content = fs::read_to_string(cost_file)?;
         Ok(content.trim().parse()?)
     }
+}
+
+/// Write `total_cost` to `cost_file`. Blocks on the file system.
+fn save_total_cost(cost_file: &Path, total_cost: f64) -> std::io::Result<()> {
+    fs::write(cost_file, total_cost.to_string())
 }
 
 #[cfg(test)]
@@ -121,8 +136,8 @@ mod tests {
     use crate::app_state::LogLevel;
     use crate::test_support::LogCapture;
 
-    #[test]
-    fn test_a_failed_cost_save_is_logged_once_per_distinct_error() {
+    #[tokio::test]
+    async fn test_a_failed_cost_save_is_logged_once_per_distinct_error() {
         let dir = std::env::temp_dir().join(format!("babble_boop_cost_{}", std::process::id()));
         if dir.exists() {
             fs::remove_dir_all(&dir).unwrap();
@@ -143,33 +158,33 @@ mod tests {
         };
 
         // The directory does not exist: every save fails the same way
-        estimator.add_cost(0.5, &logger);
+        estimator.add_cost(0.5, &logger).await;
         let not_found = saves_fail_with(log.entries());
-        estimator.add_cost(0.5, &logger);
-        estimator.add_cost(0.5, &logger);
+        estimator.add_cost(0.5, &logger).await;
+        estimator.add_cost(0.5, &logger).await;
         assert_eq!(log.entries(), []);
 
         // A different failure: the file is a directory
         fs::create_dir_all(&file).unwrap();
-        estimator.add_cost(0.5, &logger);
+        estimator.add_cost(0.5, &logger).await;
         let is_a_directory = saves_fail_with(log.entries());
         assert_ne!(is_a_directory, not_found);
-        estimator.add_cost(0.5, &logger);
+        estimator.add_cost(0.5, &logger).await;
         assert_eq!(log.entries(), []);
 
         // The save works again
         fs::remove_dir(&file).unwrap();
-        estimator.add_cost(0.5, &logger);
+        estimator.add_cost(0.5, &logger).await;
         let entries = log.entries();
         assert_eq!(entries.len(), 1, "{:?}", entries);
         assert_eq!(entries[0].0, LogLevel::Info, "{:?}", entries);
         assert_eq!(fs::read_to_string(&file).unwrap(), "3");
-        estimator.add_cost(0.5, &logger);
+        estimator.add_cost(0.5, &logger).await;
         assert_eq!(log.entries(), []);
 
         // The first failure again, after a save that worked
         fs::remove_dir_all(&dir).unwrap();
-        estimator.add_cost(0.5, &logger);
+        estimator.add_cost(0.5, &logger).await;
         assert_eq!(saves_fail_with(log.entries()), not_found);
     }
 

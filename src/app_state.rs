@@ -134,6 +134,17 @@ impl FailureLog {
     }
 }
 
+/// Why a `spawn_blocking` task gave no result, for a `FailureLog` message.
+/// Not the text of `e`, which holds the task id (Display for `JoinError`,
+/// tokio 1.48 src/runtime/task/error.rs), so each failure would log again.
+pub fn blocking_task_failure(e: &tokio::task::JoinError) -> &'static str {
+    if e.is_panic() {
+        "the task panicked"
+    } else {
+        "the task was cancelled"
+    }
+}
+
 /// Run the body of a background thread and log in the activity log if it
 /// returns an error or panics, so that the thread does not stop with a
 /// message on stderr only. The panic does not propagate.

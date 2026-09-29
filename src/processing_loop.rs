@@ -92,7 +92,14 @@ pub async fn run_processing_loop<O: PlaybackOutput>(
         audio_stream_info.channels, audio_stream_info.sample_rate
     ));
 
-    let services = ProcessingServices::new(&config, &data_dir, &app_state.logger);
+    let Some(services) = app_state
+        .shutdown
+        .run_until(load_services(&config, &data_dir, &app_state.logger))
+        .await
+    else {
+        return Ok(());
+    };
+    let services = services?;
     // Initialize the shared cost from the loaded value
     app_state.set_total_cost(services.price_estimator.total_cost);
 
@@ -555,6 +562,20 @@ pub async fn encode_for_upload(audio: CapturedAudio) -> Result<(Vec<u8>, Duratio
     }
 }
 
+/// Make the services of the pipeline on a blocking thread, as they read
+/// the total cost file, so a slow disk does not stop the loop and its check
+/// for shutdown.
+async fn load_services(
+    config: &Config,
+    data_dir: &DataDir,
+    logger: &Logger,
+) -> Result<ProcessingServices, String> {
+    let (config, data_dir, logger) = (config.clone(), data_dir.clone(), logger.clone());
+    tokio::task::spawn_blocking(move || ProcessingServices::new(&config, &data_dir, &logger))
+        .await
+        .map_err(|e| format!("loading the total cost failed: {}", e))
+}
+
 /// Longest wait for the audio input stream to start. Opening a device
 /// usually takes less than a second, but a driver can take a few seconds
 /// (for example a Bluetooth headset that changes to its microphone
@@ -737,16 +758,12 @@ mod tests {
                 on_audio_start,
                 ended,
             } = self;
-            let data_dir = DataDir::new(
-                std::env::temp_dir()
-                    .join(format!("babble_boop_no_data_dir_{}", std::process::id())),
-            );
             let processing = async {
                 let result = run_processing_loop(
                     app_state,
                     config,
                     cmd_rx,
-                    data_dir,
+                    crate::test_support::missing_data_dir(),
                     &api_base_url,
                     move || {
                         audio_started.store(true, Ordering::SeqCst);

@@ -146,7 +146,8 @@ impl Pipeline {
             .estimate_transcription_cost(audio_duration);
         self.services
             .price_estimator
-            .add_cost(cost, &self.app_state.logger);
+            .add_cost(cost, &self.app_state.logger)
+            .await;
         self.app_state
             .set_total_cost(self.services.price_estimator.total_cost);
 
@@ -182,7 +183,8 @@ impl Pipeline {
             .estimate_translation_cost(translation.tokens);
         self.services
             .price_estimator
-            .add_cost(translation_cost, &self.app_state.logger);
+            .add_cost(translation_cost, &self.app_state.logger)
+            .await;
         self.app_state
             .set_total_cost(self.services.price_estimator.total_cost);
 
@@ -931,7 +933,7 @@ mod tests {
 
         let mut services = ProcessingServices::new(&config, &data_dir, &logger);
         let loaded_cost = services.price_estimator.total_cost;
-        services.price_estimator.add_cost(0.5, &logger);
+        services.price_estimator.add_cost(0.5, &logger).await;
         services
             .recording_manager
             .as_mut()

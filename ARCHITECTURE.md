@@ -11,7 +11,7 @@ thread boundary, a channel, or the shutdown path.
 | Processing thread | A tokio runtime (`main.rs`) that runs `run_processing_loop` (`processing_loop.rs`). Owns session state: the current `Config`, the OSC socket, the `Pipeline`, and the test recording state. |
 | Audio input thread | Starts the cpal input stream and blocks in `hold_audio_stream` until shutdown. The stream's own real time callback runs `InputHandler::process` (`audio_recording.rs`), which is not this thread but a callback the audio backend invokes. |
 | cpal output callback | Plays back a Test Microphone recording. `AudioOutput::play` (`audio_playback.rs`) hands cpal a callback that copies converted samples into the output buffer; a `Stream` from `play` keeps it alive. |
-| `spawn_blocking` tasks | Run on the tokio blocking pool, one task per call: WAV encoding (`encode_for_upload`), test recording resampling (`convert_for_playback`), and the debug recording save (`RecordingManager::save_recording`). Each finishes and returns; none is a long lived thread. |
+| `spawn_blocking` tasks | Run on the tokio blocking pool, one task per call: WAV encoding (`encode_for_upload`), test recording resampling (`convert_for_playback`), the total cost load at startup (`load_services`) and save after each request (`PriceEstimator::add_cost`), and the debug recording save (`RecordingManager::save_recording`). Each finishes and returns; none is a long lived thread. |
 
 ## Data flow of one utterance
 
@@ -21,10 +21,10 @@ thread boundary, a channel, or the shutdown path.
 4. The loop encodes the captured samples to a WAV upload on the blocking pool: `encode_for_upload` (`processing_loop.rs`) calls `spawn_blocking` with `encode_upload_wav` (`upload_audio.rs`).
 5. The loop calls `Pipeline::process` (`pipeline.rs`), which runs the utterance:
    - Transcribes the upload (`transcription::transcribe_audio`).
-   - Adds the request cost to the running total (`accept_transcription`, using `PriceEstimator`).
+   - Adds the request cost to the running total and saves the total to `total_cost.txt` (`accept_transcription`, using `PriceEstimator::add_cost`), off the async task via `spawn_blocking`.
    - Saves the debug recording if enabled (`ProcessingServices::recording_manager`, `RecordingManager::save_recording`), off the async task via `spawn_blocking`.
    - Translates the transcription (`translation::ask_chatgpt`).
-   - Delivers the translation to the VRChat chatbox (`deliver_translation`, using `Chatbox`).
+   - Adds the translation cost the same way, then delivers the translation to the VRChat chatbox (`deliver_translation`, using `Chatbox`).
 6. `Chatbox` and `TypingIndicator` (`chatbox.rs`, `typing_indicator.rs`) send OSC packets over a shared `tokio::net::UdpSocket` to VRChat.
 
 ## How threads communicate
@@ -48,7 +48,7 @@ The level meter and the recorder status panel are the exception: they are read c
 - The audio callback (`InputHandler::process` and anything it calls) may only touch atomics, `try_send`, and `try_lock`. Never log, wait, print, or touch `egui` from it: any of those can miss the backend's deadline and glitch or drop audio.
 - The GUI thread never blocks. Commands to the processing loop go through `try_send`, and a failed send is shown as a status message, not retried in a loop.
 - The processing loop owns session state and the `Config`. Only the `AppCommand::UpdateConfig` arm in `run_processing_loop` replaces the config; every utterance runs against the config version it started with.
-- CPU heavy work (WAV encoding, resampling, the debug recording save) runs through `tokio::task::spawn_blocking`, not inline on the loop's async task.
+- Work that can block runs through `tokio::task::spawn_blocking`, not inline on the loop's async task: CPU heavy work (WAV encoding, resampling) and file system access (the total cost load and save, the debug recording save). A slow disk would otherwise stop the loop and its check for shutdown. Nothing checks this rule automatically; it is enforced by code reading.
 - Every long `await` in the processing loop is wrapped in `app_state.shutdown.run_until(..)`, or sits directly in the `tokio::select!` alongside `shutdown.requested()`, so a shutdown request cancels it instead of leaving the loop stuck.
 - Code outside the GUI that changes something the GUI shows (a log entry, the total cost, the processing-stopped flag) wakes it with `GuiWaker`, since `egui` does not repaint on its own for those changes.
 - Shutdown goes only through `Shutdown`: `request()` to ask for it, `is_requested()`/`requested()`/`run_until()` to observe or respect it. No other stop signal exists.
