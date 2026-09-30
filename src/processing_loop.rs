@@ -224,6 +224,18 @@ pub async fn run_processing_loop<O: PlaybackOutput>(
                         pipeline.typing_indicator.stop_typing(&config).await;
                         continue;
                     }
+                    // Logged above. The lost events can hold the
+                    // StopRecording that ends the recording, and the loop
+                    // cannot know which events they were. Off is the safe
+                    // state: the next StartRecording turns typing on
+                    // again. If the recording goes on, typing is off until
+                    // a part of it is processed or the next recording
+                    // starts. Also while translation is off, like
+                    // StopRecording.
+                    AudioEvent::EventsDropped(_) => {
+                        pipeline.typing_indicator.stop_typing(&config).await;
+                        continue;
+                    }
                     // Ignore speech while translation is off
                     _ if !app_state.enabled.load(Ordering::Relaxed) => continue,
                     AudioEvent::StartRecording => {
@@ -235,7 +247,7 @@ pub async fn run_processing_loop<O: PlaybackOutput>(
                     AudioEvent::RecordingDiscarded => continue,
                     // Logged above. AudioEvents follows an input error
                     // with StopRecording.
-                    AudioEvent::EventsDropped(_) | AudioEvent::InputError(_) => continue,
+                    AudioEvent::InputError(_) => continue,
                     AudioEvent::AudioData(audio, extent) => (audio, extent),
                     AudioEvent::AudioPart(audio) => (audio, Extent::Part),
                 };
@@ -1206,6 +1218,61 @@ mod tests {
                 assert_eq!(d.received().await, Osc::Typing(true));
                 assert_eq!(d.received().await, Osc::Typing(false));
                 d.logged("Audio input error: unplugged").await;
+                d.shut_down().await;
+            })
+            .await;
+
+        assert_eq!(result, Ok(()));
+        assert_eq!(d.received().await, Osc::Typing(false));
+    }
+
+    /// The lost events can hold the StopRecording of the recording that
+    /// turned typing on.
+    #[tokio::test]
+    async fn test_lost_audio_events_turn_typing_off_and_a_new_output_port_does_not_turn_it_on() {
+        let (processing, mut d) = processing_loop(|_| {}).await;
+        let new_vrchat = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let new_port = new_vrchat.local_addr().unwrap().port();
+        let result = processing
+            .run_with(async {
+                d.start_audio();
+                d.event(AudioEvent::StartRecording).await;
+                assert_eq!(d.received().await, Osc::Typing(true));
+                d.event(AudioEvent::EventsDropped(1)).await;
+                // Logged when the loop receives the event, so the loop
+                // handles it before the new settings
+                d.logged("Lost 1 audio events").await;
+                d.update_config(|config| config.osc.output_port = new_port)
+                    .await;
+                d.logged("Config updated").await;
+                d.shut_down().await;
+            })
+            .await;
+
+        assert_eq!(result, Ok(()));
+        // Only the shutdown turns it off at the new port, and nothing
+        // turns it on there
+        assert_eq!(d.received_on(&new_vrchat).await.0, Osc::Typing(false));
+        // Off for the lost events, then off again as the destination
+        // changes
+        assert_eq!(d.received().await, Osc::Typing(false));
+        assert_eq!(d.received().await, Osc::Typing(false));
+    }
+
+    /// The GUI stores the toggle before it sends SetEnabled(false), and
+    /// the send can fail, so typing can be on while translation is off.
+    #[tokio::test]
+    async fn test_lost_audio_events_turn_typing_off_while_translation_is_off() {
+        let (processing, mut d) = processing_loop(|_| {}).await;
+        let result = processing
+            .run_with(async {
+                d.start_audio();
+                d.event(AudioEvent::StartRecording).await;
+                assert_eq!(d.received().await, Osc::Typing(true));
+                // Switched off, and the SetEnabled(false) did not arrive
+                d.app_state.enabled.store(false, Ordering::Relaxed);
+                d.event(AudioEvent::EventsDropped(1)).await;
+                assert_eq!(d.received().await, Osc::Typing(false));
                 d.shut_down().await;
             })
             .await;

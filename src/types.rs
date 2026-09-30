@@ -12,7 +12,9 @@ pub enum AudioEvent {
     /// goes on.
     AudioPart(CapturedAudio),
     /// The callback could not queue this many events because the channel
-    /// was full. Sent once the channel has room again.
+    /// was full. Sent once the channel has room again. The lost events can
+    /// hold a StopRecording, so the processing loop turns the typing
+    /// indicator off.
     EventsDropped(u32),
     /// Test Microphone started during a recording. The callback dropped
     /// the recording without processing it. StopRecording follows.
