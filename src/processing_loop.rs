@@ -215,13 +215,21 @@ pub async fn run_processing_loop<O: PlaybackOutput>(
                 // on after Pipeline::process turns it off.
                 let recording_goes_on = matches!(event, AudioEvent::AudioPart(_));
                 let (audio, extent) = match event {
-                    // Also while translation is off: the GUI stores the
-                    // toggle before it sends SetEnabled(false), and the
-                    // send fails while the command channel is full, so the
-                    // end of a recording can be the only event that turns
-                    // typing off.
+                    // Also while translation is off if the loop turned
+                    // typing on: the GUI stores the toggle before it sends
+                    // SetEnabled(false), and the send fails while the
+                    // command channel is full, so the end of a recording
+                    // can be the only event that turns typing off. If the
+                    // loop did not turn it on, another app can be the one
+                    // that sends to the chatbox while translation is off,
+                    // and an off from the loop can turn off the typing
+                    // indicator of that app.
                     AudioEvent::StopRecording => {
-                        pipeline.typing_indicator.stop_typing(&config).await;
+                        if app_state.enabled.load(Ordering::Relaxed)
+                            || pipeline.typing_indicator.is_typing()
+                        {
+                            pipeline.typing_indicator.stop_typing(&config).await;
+                        }
                         continue;
                     }
                     // Logged above. The lost events can hold the
@@ -230,10 +238,12 @@ pub async fn run_processing_loop<O: PlaybackOutput>(
                     // state: the next StartRecording turns typing on
                     // again. If the recording goes on, typing is off until
                     // a part of it is processed or the next recording
-                    // starts. Also while translation is off, like
-                    // StopRecording.
+                    // starts. Only if the loop turned typing on, also
+                    // while translation is off, like StopRecording.
                     AudioEvent::EventsDropped(_) => {
-                        pipeline.typing_indicator.stop_typing(&config).await;
+                        if pipeline.typing_indicator.is_typing() {
+                            pipeline.typing_indicator.stop_typing(&config).await;
+                        }
                         continue;
                     }
                     // Ignore speech while translation is off
@@ -558,8 +568,9 @@ impl TestRecording {
 /// once, without waiting for the StopRecording of an utterance that
 /// started before. The GUI stores `enabled` before it sends this command,
 /// so no StartRecording handled after this can turn the indicator on
-/// again. The command does not always arrive, so the loop also turns the
-/// indicator off at each StopRecording while translation is off.
+/// again. The command does not always arrive, so while translation is off
+/// the loop also turns the indicator off at a StopRecording if it turned
+/// it on.
 pub async fn apply_enabled(
     enabled: bool,
     config: &Config,
@@ -1281,6 +1292,60 @@ mod tests {
         assert_eq!(d.received().await, Osc::Typing(false));
     }
 
+    /// While translation is off, another app can send to the VRChat
+    /// chatbox. The loop does not turn typing off if it did not turn it
+    /// on.
+    #[tokio::test]
+    async fn test_speech_and_lost_audio_events_while_translation_is_off_send_no_typing_indicator() {
+        let (processing, mut d) = processing_loop(|_| {}).await;
+        let result = processing
+            .run_with(async {
+                // Off from the start, so no SetEnabled(false)
+                d.app_state.enabled.store(false, Ordering::Relaxed);
+                d.start_audio();
+                d.event(AudioEvent::StartRecording).await;
+                d.event(AudioEvent::StopRecording).await;
+                d.event(AudioEvent::EventsDropped(3)).await;
+                // Logged when the loop receives the event, so the loop
+                // handled the StopRecording before
+                d.logged("Lost 3 audio events").await;
+                // Switched on, and speech turns typing on
+                d.app_state.enabled.store(true, Ordering::Relaxed);
+                d.event(AudioEvent::StartRecording).await;
+                assert_eq!(
+                    d.received().await,
+                    Osc::Typing(true),
+                    "typing went off while translation was off"
+                );
+                d.shut_down().await;
+            })
+            .await;
+
+        assert_eq!(result, Ok(()));
+        assert_eq!(d.received().await, Osc::Typing(false));
+    }
+
+    #[tokio::test]
+    async fn test_lost_audio_events_while_typing_is_off_send_no_typing_indicator() {
+        let (processing, mut d) = processing_loop(|_| {}).await;
+        let result = processing
+            .run_with(async {
+                d.start_audio();
+                d.event(AudioEvent::EventsDropped(2)).await;
+                d.event(AudioEvent::StartRecording).await;
+                assert_eq!(
+                    d.received().await,
+                    Osc::Typing(true),
+                    "typing went off without a recording"
+                );
+                d.shut_down().await;
+            })
+            .await;
+
+        assert_eq!(result, Ok(()));
+        assert_eq!(d.received().await, Osc::Typing(false));
+    }
+
     #[tokio::test]
     async fn test_an_audio_start_error_ends_the_loop_with_the_error() {
         let (processing, mut d) = processing_loop(|_| {}).await;
@@ -1598,17 +1663,27 @@ click Save Settings, and restart BabbleBoop.",
                     .await;
                 assert_eq!(d.received().await, Osc::Typing(false));
                 d.event(AudioEvent::StopRecording).await;
-                assert_eq!(
-                    d.received().await,
-                    Osc::Typing(false),
-                    "typing went on again after the part"
-                );
+                // Speech while translation is off. The loop logs the event
+                // when it receives it, so it handled the StopRecording
+                // before.
+                d.event(AudioEvent::StartRecording).await;
+                d.logged("Sound detected").await;
                 d.shut_down().await;
             })
             .await;
 
         assert_eq!(result, Ok(()));
-        assert_eq!(d.received().await, Osc::Typing(false));
+        // Only the shutdown turns it off: typing was off after the part
+        assert_eq!(
+            d.received().await,
+            Osc::Typing(false),
+            "typing went on again after the part"
+        );
+        let mut buf = [0u8; 1024];
+        assert!(
+            d.vrchat.try_recv(&mut buf).is_err(),
+            "VRChat received a message after the shutdown"
+        );
     }
 
     #[tokio::test]
@@ -1858,14 +1933,30 @@ click Save Settings, and restart BabbleBoop.",
                 d.update_config(|config| config.osc.output_port = new_port)
                     .await;
                 assert_eq!(d.received().await, Osc::Typing(false));
+                d.logged("Config updated").await;
                 d.event(AudioEvent::StopRecording).await;
-                assert_eq!(d.received_on(&new_vrchat).await.0, Osc::Typing(false));
+                // Speech while translation is off. The loop logs the event
+                // when it receives it, so it handled the StopRecording
+                // before.
+                d.event(AudioEvent::StartRecording).await;
+                d.logged("Sound detected").await;
                 d.shut_down().await;
             })
             .await;
 
         assert_eq!(result, Ok(()));
-        assert_eq!(d.received_on(&new_vrchat).await.0, Osc::Typing(false));
+        // Only the shutdown turns it off at the new port, and nothing
+        // turns it on there
+        assert_eq!(
+            d.received_on(&new_vrchat).await.0,
+            Osc::Typing(false),
+            "typing went on at the new port"
+        );
+        let mut buf = [0u8; 1024];
+        assert!(
+            new_vrchat.try_recv(&mut buf).is_err(),
+            "the new port received a message after the shutdown"
+        );
     }
 
     /// A local UDP port that nothing uses at the time of the call.
