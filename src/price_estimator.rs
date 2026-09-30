@@ -183,9 +183,11 @@ impl PriceEstimator {
 /// exits in between, for example because the shutdown waits at most 1 s
 /// for the blocking pool (main.rs), the file stays empty. The next start
 /// then cannot read it, so `load_total_cost` logs it, moves it aside, and
-/// starts the total at 0. A write that stops part way, for example on a
-/// full disk, leaves only the start of the total, which the next start
-/// reads as a smaller total without a log entry.
+/// starts the total at 0. On a full disk the write most likely fails
+/// before it writes anything and leaves the file empty, which the next
+/// start also detects. A write that stops part way is possible but
+/// unlikely for about 20 bytes. It leaves only the start of the total,
+/// which the next start reads as a smaller total without a log entry.
 fn save_total_cost(cost_file: &Path, total_cost: f64) -> io::Result<()> {
     fs::write(cost_file, total_cost.to_string())
 }

@@ -5,8 +5,9 @@ use std::sync::Arc;
 use tokio::net::UdpSocket;
 
 /// The typing indicator of the VRChat chatbox. Like `Chatbox`, it takes
-/// the settings with each call, so it always sends to the address in the
-/// settings of the caller, and holds no copy of them.
+/// the settings with each call and holds no copy of them. An on and an
+/// off go to the address in the settings of the caller, except the off
+/// of `stop_typing_elsewhere`, which goes to the address of the last on.
 ///
 /// It remembers where BabbleBoop turned the indicator on, and sends an off
 /// only there. While translation is off, another app can use the chatbox,
@@ -17,10 +18,11 @@ use tokio::net::UdpSocket;
 pub struct TypingIndicator {
     socket: Arc<UdpSocket>,
     logger: Logger,
-    /// A recording turns the indicator on once and off once, and a long
-    /// recording turns it on again after each part. While VRChat cannot
-    /// be reached at the configured address, every send fails the same
-    /// way.
+    /// A recording turns the indicator on once and off at most once, a
+    /// long recording turns it on again after each part, and switching
+    /// translation off and the end of the processing loop each send an
+    /// off. While VRChat cannot be reached at the configured address,
+    /// every send fails the same way.
     send_failure: FailureLog,
     /// The destination (`address:port`) of the last on, until an off goes
     /// there. It is kept also when the send of the on failed, so the off
@@ -115,8 +117,8 @@ impl TypingIndicator {
     /// BabbleBoop sent, not what VRChat shows. They differ after an off
     /// whose send failed or whose UDP packet was lost, and after a run of
     /// BabbleBoop that ended before its off. So these two send the off in
-    /// any case, as they did before the state was remembered. The cost is
-    /// one packet that can clear the indicator of another app.
+    /// any case. The cost is one packet that can clear the indicator of
+    /// another app.
     pub async fn force_stop_typing(&mut self, config: &Config) {
         self.on_at = None;
         self.send(false, &destination(config)).await;

@@ -132,8 +132,9 @@ impl Pipeline {
     /// so it stays in the total when one of them fails. The estimate
     /// depends only on the audio duration, so an empty or blank text
     /// costs as much as speech. For such a text, an error message goes to
-    /// the activity log, the typing indicator at the address in `config`
-    /// turns off, and the function returns `None`.
+    /// the activity log, the typing indicator turns off if BabbleBoop
+    /// turned it on at the address in `config`, and the function returns
+    /// `None`.
     async fn accept_transcription(
         &mut self,
         text: String,

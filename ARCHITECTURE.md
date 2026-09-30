@@ -25,7 +25,7 @@ thread boundary, a channel, or the shutdown path.
    - Saves the debug recording if enabled (`ProcessingServices::recording_manager`, `RecordingManager::save_recording`), off the async task via `spawn_blocking`.
    - Translates the transcription (`translation::ask_chatgpt`).
    - Adds the translation cost the same way, then delivers the translation to the VRChat chatbox (`deliver_translation`, using `Chatbox`).
-6. `Chatbox` and `TypingIndicator` (`chatbox.rs`, `typing_indicator.rs`) send OSC packets over a shared `tokio::net::UdpSocket` to VRChat. `TypingIndicator` remembers the destination where BabbleBoop turned the indicator on, and sends an off only there, so a second off or an off without an on sends nothing. Another app can use the chatbox while translation is off, and such an off could clear its indicator. Two offs are sent in any case (`force_stop_typing`): when translation is switched off and when the processing loop ends.
+6. `Chatbox` and `TypingIndicator` (`chatbox.rs`, `typing_indicator.rs`) send OSC packets over a shared `tokio::net::UdpSocket` to VRChat. `TypingIndicator` remembers the destination where BabbleBoop turned the indicator on, and sends an off only there, so a second off or an off without an on sends nothing. Another app can use the chatbox while translation is off, and such an off could clear its indicator. Two forced offs (`force_stop_typing`) are sent whatever the remembered state: when translation is switched off and when the processing loop ends.
 
 ## How threads communicate
 
