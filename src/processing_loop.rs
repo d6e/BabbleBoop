@@ -136,7 +136,7 @@ pub async fn run_processing_loop<O: PlaybackOutput>(
             cmd = cmd_rx.recv() => {
                 match cmd {
                     Some(AppCommand::SetEnabled(enabled)) => {
-                        apply_enabled(enabled, &config, &pipeline.typing_indicator, &app_state.logger).await;
+                        apply_enabled(enabled, &config, &mut pipeline.typing_indicator, &app_state.logger).await;
                     }
                     // The only place where the settings change. The loop
                     // handles a command between utterances, so each
@@ -146,16 +146,8 @@ pub async fn run_processing_loop<O: PlaybackOutput>(
                         // Typing is on while a recording goes on. It moves
                         // with the destination: off at the old one, as the
                         // StopRecording goes to the new one, and on at the
-                        // new one once the settings are replaced. A new
-                        // name for the same destination, such as localhost
-                        // for 127.0.0.1, also moves it: off and on again at
-                        // the same place. To find that it is the same place
-                        // takes a DNS lookup.
-                        let destination_changed = osc_destination(&new_config) != osc_destination(&config);
-                        let typing_moves = destination_changed && pipeline.typing_indicator.is_typing();
-                        if destination_changed {
-                            pipeline.typing_indicator.stop_typing(&config).await;
-                        }
+                        // new one once the settings are replaced.
+                        let typing_moves = pipeline.typing_indicator.stop_typing_elsewhere(&new_config).await;
                         let new_socket_address = osc_socket_address(&new_config);
                         if new_socket_address != socket_address {
                             match rebind_osc_socket(&socket_in_use, &socket_address, &new_socket_address, &app_state).await {
@@ -215,21 +207,14 @@ pub async fn run_processing_loop<O: PlaybackOutput>(
                 // on after Pipeline::process turns it off.
                 let recording_goes_on = matches!(event, AudioEvent::AudioPart(_));
                 let (audio, extent) = match event {
-                    // Also while translation is off if the loop turned
-                    // typing on: the GUI stores the toggle before it sends
-                    // SetEnabled(false), and the send fails while the
-                    // command channel is full, so the end of a recording
-                    // can be the only event that turns typing off. If the
-                    // loop did not turn it on, another app can be the one
-                    // that sends to the chatbox while translation is off,
-                    // and an off from the loop can turn off the typing
-                    // indicator of that app.
+                    // Also while translation is off: the GUI stores the
+                    // toggle before it sends SetEnabled(false), and the
+                    // send fails while the command channel is full, so the
+                    // end of a recording can be the only event that turns
+                    // typing off. The off goes out only if the loop turned
+                    // typing on.
                     AudioEvent::StopRecording => {
-                        if app_state.enabled.load(Ordering::Relaxed)
-                            || pipeline.typing_indicator.is_typing()
-                        {
-                            pipeline.typing_indicator.stop_typing(&config).await;
-                        }
+                        pipeline.typing_indicator.stop_typing(&config).await;
                         continue;
                     }
                     // Logged above. The lost events can hold the
@@ -238,12 +223,9 @@ pub async fn run_processing_loop<O: PlaybackOutput>(
                     // state: the next StartRecording turns typing on
                     // again. If the recording goes on, typing is off until
                     // a part of it is processed or the next recording
-                    // starts. Only if the loop turned typing on, also
-                    // while translation is off, like StopRecording.
+                    // starts.
                     AudioEvent::EventsDropped(_) => {
-                        if pipeline.typing_indicator.is_typing() {
-                            pipeline.typing_indicator.stop_typing(&config).await;
-                        }
+                        pipeline.typing_indicator.stop_typing(&config).await;
                         continue;
                     }
                     // Ignore speech while translation is off
@@ -292,7 +274,7 @@ pub async fn run_processing_loop<O: PlaybackOutput>(
 
     // Shutdown can stop processing between StartRecording and the end of
     // Pipeline::process. Do not leave VRChat showing the typing indicator.
-    pipeline.typing_indicator.stop_typing(&config).await;
+    pipeline.typing_indicator.force_stop_typing(&config).await;
 
     Ok(())
 }
@@ -301,11 +283,6 @@ pub async fn run_processing_loop<O: PlaybackOutput>(
 /// from.
 fn osc_socket_address(config: &Config) -> String {
     format!("{}:{}", config.osc.address, config.osc.input_port)
-}
-
-/// Where the loop sends the chatbox messages and the typing indicator.
-fn osc_destination(config: &Config) -> (&str, u16) {
-    (&config.osc.address, config.osc.output_port)
 }
 
 /// What `rebind_osc_socket` did.
@@ -565,22 +542,22 @@ impl TestRecording {
 /// Handle the translation toggle from the GUI.
 ///
 /// Disabling turns the typing indicator at the address in `config` off at
-/// once, without waiting for the StopRecording of an utterance that
-/// started before. The GUI stores `enabled` before it sends this command,
-/// so no StartRecording handled after this can turn the indicator on
-/// again. The command does not always arrive, so while translation is off
-/// the loop also turns the indicator off at a StopRecording if it turned
-/// it on.
+/// once, also if the loop did not turn it on, without waiting for the
+/// StopRecording of an utterance that started before. The GUI stores
+/// `enabled` before it sends this command, so no StartRecording handled
+/// after this can turn the indicator on again. The command does not always
+/// arrive, so while translation is off the loop also turns the indicator
+/// off at a StopRecording if it turned it on.
 pub async fn apply_enabled(
     enabled: bool,
     config: &Config,
-    typing_indicator: &TypingIndicator,
+    typing_indicator: &mut TypingIndicator,
     logger: &Logger,
 ) {
     if enabled {
         logger.info("Translation enabled");
     } else {
-        typing_indicator.stop_typing(config).await;
+        typing_indicator.force_stop_typing(config).await;
         logger.info("Translation disabled");
     }
 }
@@ -1113,9 +1090,8 @@ mod tests {
                     .await;
                 d.event(AudioEvent::StopRecording).await;
                 // On at the start, off when Pipeline::process skips the
-                // recording, off at the stop
+                // recording. Typing is off at the stop, so it sends nothing.
                 assert_eq!(d.received().await, Osc::Typing(true));
-                assert_eq!(d.received().await, Osc::Typing(false));
                 assert_eq!(d.received().await, Osc::Typing(false));
                 d.logged("Audio too short").await;
                 d.shut_down().await;
@@ -1264,10 +1240,14 @@ mod tests {
         // Only the shutdown turns it off at the new port, and nothing
         // turns it on there
         assert_eq!(d.received_on(&new_vrchat).await.0, Osc::Typing(false));
-        // Off for the lost events, then off again as the destination
-        // changes
+        // Off for the lost events. Typing is off when the destination
+        // changes, so the change sends nothing.
         assert_eq!(d.received().await, Osc::Typing(false));
-        assert_eq!(d.received().await, Osc::Typing(false));
+        let mut buf = [0u8; 1024];
+        assert!(
+            d.vrchat.try_recv(&mut buf).is_err(),
+            "the old port received a second typing off"
+        );
     }
 
     /// The GUI stores the toggle before it sends SetEnabled(false), and
@@ -1344,6 +1324,83 @@ mod tests {
 
         assert_eq!(result, Ok(()));
         assert_eq!(d.received().await, Osc::Typing(false));
+    }
+
+    #[tokio::test]
+    async fn test_a_second_stop_recording_sends_no_second_typing_off() {
+        let (processing, mut d) = processing_loop(|_| {}).await;
+        let result = processing
+            .run_with(async {
+                d.start_audio();
+                d.event(AudioEvent::StartRecording).await;
+                d.event(AudioEvent::StopRecording).await;
+                d.event(AudioEvent::StopRecording).await;
+                d.event(AudioEvent::StartRecording).await;
+                for expected in [Osc::Typing(true), Osc::Typing(false), Osc::Typing(true)] {
+                    assert_eq!(d.received().await, expected);
+                }
+                d.shut_down().await;
+            })
+            .await;
+
+        assert_eq!(result, Ok(()));
+        assert_eq!(d.received().await, Osc::Typing(false));
+    }
+
+    /// The user expects the indicator to be off after these two, so they
+    /// send the off also when the loop turned it off before.
+    #[tokio::test]
+    async fn test_switching_translation_off_and_the_shutdown_send_typing_off_when_it_is_off() {
+        let (processing, mut d) = processing_loop(|_| {}).await;
+        let result = processing
+            .run_with(async {
+                d.start_audio();
+                d.event(AudioEvent::StartRecording).await;
+                d.event(AudioEvent::StopRecording).await;
+                assert_eq!(d.received().await, Osc::Typing(true));
+                assert_eq!(d.received().await, Osc::Typing(false));
+                d.app_state.enabled.store(false, Ordering::Relaxed);
+                d.command(AppCommand::SetEnabled(false)).await;
+                assert_eq!(d.received().await, Osc::Typing(false));
+                d.shut_down().await;
+            })
+            .await;
+
+        assert_eq!(result, Ok(()));
+        assert_eq!(d.received().await, Osc::Typing(false));
+    }
+
+    /// While translation is off, another app can use the chatbox. A new
+    /// destination sends nothing to the old one if the loop did not turn
+    /// typing on there.
+    #[tokio::test]
+    async fn test_a_new_output_port_while_translation_is_off_sends_no_typing_off() {
+        let (processing, mut d) = processing_loop(|_| {}).await;
+        let new_vrchat = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let new_port = new_vrchat.local_addr().unwrap().port();
+        let result = processing
+            .run_with(async {
+                // Off from the start, so no SetEnabled(false)
+                d.app_state.enabled.store(false, Ordering::Relaxed);
+                d.start_audio();
+                d.event(AudioEvent::StartRecording).await;
+                d.logged("Sound detected").await;
+                d.update_config(|config| config.osc.output_port = new_port)
+                    .await;
+                d.logged("Config updated").await;
+                d.shut_down().await;
+            })
+            .await;
+
+        assert_eq!(result, Ok(()));
+        // The shutdown sends the first and only message
+        assert_eq!(d.received_on(&new_vrchat).await.0, Osc::Typing(false));
+        let mut buf = [0u8; 1024];
+        assert!(
+            d.vrchat.try_recv(&mut buf).is_err(),
+            "the old port received a typing off"
+        );
+        assert!(new_vrchat.try_recv(&mut buf).is_err());
     }
 
     #[tokio::test]
@@ -1578,8 +1635,8 @@ click Save Settings, and restart BabbleBoop.",
                 d.event(AudioEvent::StopRecording).await;
                 assert_eq!(d.received().await, Osc::Typing(true));
                 assert_eq!(d.received().await, Osc::Input(TRANSLATION.to_string()));
-                // Off when the translation is sent, off at the stop
-                assert_eq!(d.received().await, Osc::Typing(false));
+                // Off when the translation is sent. Typing is off at the
+                // stop, so it sends nothing.
                 assert_eq!(d.received().await, Osc::Typing(false));
                 d.logged("Transcription: Hello").await;
                 d.logged("Translation: Bonjour").await;
@@ -1622,7 +1679,6 @@ click Save Settings, and restart BabbleBoop.",
                     .await;
                 d.event(AudioEvent::StopRecording).await;
                 assert_eq!(d.received().await, Osc::Input(TRANSLATION.to_string()));
-                assert_eq!(d.received().await, Osc::Typing(false));
                 assert_eq!(d.received().await, Osc::Typing(false));
                 d.shut_down().await;
             })
@@ -1797,8 +1853,10 @@ click Save Settings, and restart BabbleBoop.",
         let result = processing
             .run_with(async {
                 d.start_audio();
+                d.event(AudioEvent::StartRecording).await;
                 d.event(AudioEvent::AudioData(sound(1.0), Extent::Whole))
                     .await;
+                assert_eq!(d.received().await, Osc::Typing(true));
                 assert_eq!(d.received().await, Osc::Input(TRANSLATION.to_string()));
                 assert_eq!(d.received().await, Osc::Typing(false));
                 costs.push(d.app_state.get_total_cost());
@@ -1806,8 +1864,10 @@ click Save Settings, and restart BabbleBoop.",
                 d.update_config(|config| config.openai.model = NEW_MODEL.to_string())
                     .await;
                 d.logged("Config updated").await;
+                d.event(AudioEvent::StartRecording).await;
                 d.event(AudioEvent::AudioData(sound(1.0), Extent::Whole))
                     .await;
+                assert_eq!(d.received().await, Osc::Typing(true));
                 assert_eq!(d.received().await, Osc::Input(TRANSLATION.to_string()));
                 assert_eq!(d.received().await, Osc::Typing(false));
                 costs.push(d.app_state.get_total_cost());
@@ -1860,7 +1920,6 @@ click Save Settings, and restart BabbleBoop.",
                     Osc::Typing(true),
                     Osc::Input(TRANSLATION.to_string()),
                     Osc::Typing(false),
-                    Osc::Typing(false),
                 ] {
                     assert_eq!(d.received_on(&new_vrchat).await.0, expected);
                 }
@@ -1890,6 +1949,7 @@ click Save Settings, and restart BabbleBoop.",
 
                 d.update_config(|config| config.osc.output_port = new_port)
                     .await;
+                d.logged("Config updated").await;
                 assert_eq!(d.received().await, Osc::Typing(false));
                 d.event(AudioEvent::StopRecording).await;
                 // On at the new port while the recording goes on, then off
@@ -1897,10 +1957,11 @@ click Save Settings, and restart BabbleBoop.",
                 for expected in [Osc::Typing(true), Osc::Typing(false)] {
                     assert_eq!(d.received_on(&new_vrchat).await.0, expected);
                 }
-                // Back to the port of the start between recordings: off at
-                // the port it leaves, and nothing turns it on
+                // Back to the port of the start between recordings: typing
+                // is off, so nothing goes to the port it leaves, and
+                // nothing turns it on
                 d.update_config(|_| {}).await;
-                assert_eq!(d.received_on(&new_vrchat).await.0, Osc::Typing(false));
+                d.logged("Config updated").await;
                 d.shut_down().await;
             })
             .await;
@@ -1993,11 +2054,7 @@ click Save Settings, and restart BabbleBoop.",
                 d.event(AudioEvent::AudioData(sound(1.0), Extent::Whole))
                     .await;
                 d.event(AudioEvent::StopRecording).await;
-                for expected in [
-                    Osc::Input(TRANSLATION.to_string()),
-                    Osc::Typing(false),
-                    Osc::Typing(false),
-                ] {
+                for expected in [Osc::Input(TRANSLATION.to_string()), Osc::Typing(false)] {
                     let (osc, sender) = d.received_on(&d.vrchat).await;
                     assert_eq!((osc, sender.port()), (expected, new_port));
                 }
@@ -2711,9 +2768,9 @@ To use the new address, restart BabbleBoop."
         config.osc.address = "127.0.0.1".to_string();
         config.osc.output_port = receiver.local_addr().unwrap().port();
         let log = LogCapture::new();
-        let indicator = TypingIndicator::new(socket, log.logger());
+        let mut indicator = TypingIndicator::new(socket, log.logger());
 
-        apply_enabled(false, &config, &indicator, &log.logger()).await;
+        apply_enabled(false, &config, &mut indicator, &log.logger()).await;
 
         let (osc, _) = recv_osc(&receiver, Duration::from_secs(1)).await;
         assert_eq!(osc, Osc::Typing(false));

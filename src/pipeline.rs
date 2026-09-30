@@ -327,7 +327,8 @@ mod tests {
     /// that starts at zero, in a data folder of its own named after the
     /// test. The pipeline sends its requests to an address that nothing
     /// answers; the tests that use this fixture call `accept_transcription`
-    /// or `deliver_translation` directly, so no request goes out.
+    /// or `deliver_translation` directly, so no request goes out. The
+    /// typing indicator is on, as in an utterance.
     struct DeliveryFixture {
         config: Config,
         chatbox: UdpSocket,
@@ -362,13 +363,17 @@ mod tests {
             }
             let services = ProcessingServices::new(&config, &data_dir, &app_state.logger);
             let api = OpenAi::new("http://127.0.0.1:1/v1").unwrap();
-            let pipeline = Pipeline::new(
+            let mut pipeline = Pipeline::new(
                 Arc::clone(&app_state),
                 api,
                 Chatbox::new(socket),
                 typing_indicator,
                 services,
             );
+            // As the StartRecording of the utterance did
+            pipeline.typing_indicator.start_typing(&config).await;
+            let (typing, _) = crate::test_support::recv_osc(&chatbox, Duration::from_secs(5)).await;
+            assert_eq!(typing, crate::test_support::Osc::Typing(true));
             DeliveryFixture {
                 config,
                 chatbox,

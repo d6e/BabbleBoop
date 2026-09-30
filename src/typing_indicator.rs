@@ -1,23 +1,36 @@
 use crate::app_state::{FailureLog, Logger};
 use crate::config::Config;
 use rosc::{encoder::encode, OscMessage, OscPacket, OscType};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::Arc;
 use tokio::net::UdpSocket;
 
 /// The typing indicator of the VRChat chatbox. Like `Chatbox`, it takes
 /// the settings with each call, so it always sends to the address in the
 /// settings of the caller, and holds no copy of them.
+///
+/// It remembers where BabbleBoop turned the indicator on, and sends an off
+/// only there. While translation is off, another app can use the chatbox,
+/// and an off that BabbleBoop did not cause can clear the indicator of
+/// that app. So a second off for one recording, an off for a recording
+/// that did not turn the indicator on, and an off at a destination where
+/// it is not on send nothing.
 pub struct TypingIndicator {
     socket: Arc<UdpSocket>,
     logger: Logger,
-    /// A recording turns the indicator on once and off up to twice, and a
-    /// long recording turns it on again after each part. While VRChat
-    /// cannot be reached at the configured address, every send fails the
-    /// same way.
-    send_failure: Mutex<FailureLog>,
-    /// The state of the last call, also when its send failed
-    typing: AtomicBool,
+    /// A recording turns the indicator on once and off once, and a long
+    /// recording turns it on again after each part. While VRChat cannot
+    /// be reached at the configured address, every send fails the same
+    /// way.
+    send_failure: FailureLog,
+    /// The destination (`address:port`) of the last on, until an off goes
+    /// there. It is kept also when the send of the on failed, so the off
+    /// still goes out.
+    on_at: Option<String>,
+}
+
+/// Where `config` sends the chatbox messages and the typing indicator.
+fn destination(config: &Config) -> String {
+    format!("{}:{}", config.osc.address, config.osc.output_port)
 }
 
 impl TypingIndicator {
@@ -25,15 +38,9 @@ impl TypingIndicator {
         TypingIndicator {
             socket,
             logger,
-            send_failure: Mutex::default(),
-            typing: AtomicBool::new(false),
+            send_failure: FailureLog::default(),
+            on_at: None,
         }
-    }
-
-    /// Whether the last call turned the indicator on. The send of that
-    /// call can have failed.
-    pub fn is_typing(&self) -> bool {
-        self.typing.load(Ordering::Relaxed)
     }
 
     /// Send from `socket` from now on.
@@ -41,44 +48,78 @@ impl TypingIndicator {
         self.socket = socket;
     }
 
-    /// Send the typing state to the VRChat chatbox at the address in
-    /// `config`. A failed send goes to the activity log, once until a send
-    /// works again or fails with a different message.
-    async fn set_typing(&self, is_typing: bool, config: &Config) {
-        self.typing.store(is_typing, Ordering::Relaxed);
+    /// Send the typing state to the VRChat chatbox at `destination`. A
+    /// failed send goes to the activity log, once until a send works again
+    /// or fails with a different message.
+    async fn send(&mut self, is_typing: bool, destination: &str) {
         let typing_message = OscMessage {
             addr: "/chatbox/typing".to_string(),
             args: vec![OscType::Bool(is_typing)],
         };
         if let Ok(buf) = encode(&OscPacket::Message(typing_message)) {
-            let osc_address = format!("{}:{}", config.osc.address, config.osc.output_port);
-            let result = self.socket.send_to(&buf, osc_address.as_str()).await;
-            // The lock only guards the last failure, which stays valid
-            let mut send_failure = self
-                .send_failure
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner);
-            match result {
+            match self.socket.send_to(&buf, destination).await {
                 Ok(_) => {
-                    if send_failure.succeeded() {
+                    if self.send_failure.succeeded() {
                         self.logger
-                            .info(format!("Typing indicator sent to {} again", osc_address));
+                            .info(format!("Typing indicator sent to {} again", destination));
                     }
                 }
-                Err(e) => send_failure.failed(
+                Err(e) => self.send_failure.failed(
                     &self.logger,
-                    format!("Cannot send the typing indicator to {}: {}", osc_address, e),
+                    format!("Cannot send the typing indicator to {}: {}", destination, e),
                 ),
             }
         }
     }
 
-    pub async fn start_typing(&self, config: &Config) {
-        self.set_typing(true, config).await;
+    /// Turn the indicator on at the address in `config`.
+    pub async fn start_typing(&mut self, config: &Config) {
+        let destination = destination(config);
+        self.send(true, &destination).await;
+        self.on_at = Some(destination);
     }
 
-    pub async fn stop_typing(&self, config: &Config) {
-        self.set_typing(false, config).await;
+    /// Turn the indicator off at the address in `config`, if BabbleBoop
+    /// turned it on there. Otherwise send nothing.
+    pub async fn stop_typing(&mut self, config: &Config) {
+        let destination = destination(config);
+        if self.on_at.as_ref() == Some(&destination) {
+            self.on_at = None;
+            self.send(false, &destination).await;
+        }
+    }
+
+    /// Before the settings change to `config`: if BabbleBoop turned the
+    /// indicator on at a different address, turn it off there, and
+    /// return true, so the caller can turn it on at the new address. A
+    /// new name for the same place, such as localhost for 127.0.0.1,
+    /// counts as a different address: to find that it is the same place
+    /// takes a DNS lookup.
+    pub async fn stop_typing_elsewhere(&mut self, config: &Config) -> bool {
+        match self.on_at.take() {
+            Some(old) if old != destination(config) => {
+                self.send(false, &old).await;
+                true
+            }
+            on_at => {
+                self.on_at = on_at;
+                false
+            }
+        }
+    }
+
+    /// Turn the indicator off at the address in `config`, also if
+    /// BabbleBoop did not turn it on there. Only for the two times when
+    /// the user expects the indicator to be off: translation switched off,
+    /// and the end of the processing loop. The remembered state is what
+    /// BabbleBoop sent, not what VRChat shows. They differ after an off
+    /// whose send failed or whose UDP packet was lost, and after a run of
+    /// BabbleBoop that ended before its off. So these two send the off in
+    /// any case, as they did before the state was remembered. The cost is
+    /// one packet that can clear the indicator of another app.
+    pub async fn force_stop_typing(&mut self, config: &Config) {
+        self.on_at = None;
+        self.send(false, &destination(config)).await;
     }
 }
 
@@ -86,6 +127,8 @@ impl TypingIndicator {
 mod tests {
     use super::*;
     use crate::app_state::{LogEntry, LogLevel};
+    use crate::test_support::{recv_osc, Osc};
+    use std::time::Duration;
     use tokio::sync::mpsc;
 
     /// Level and text of the entries in the activity log since the last call.
@@ -95,20 +138,133 @@ mod tests {
             .collect()
     }
 
-    #[tokio::test]
-    async fn test_the_state_of_the_last_call_is_kept_also_when_its_send_fails() {
+    /// Settings that send to `vrchat`.
+    fn sending_to(vrchat: &UdpSocket) -> Config {
+        let mut config = Config::default();
+        config.osc.address = "127.0.0.1".to_string();
+        config.osc.output_port = vrchat.local_addr().unwrap().port();
+        config
+    }
+
+    /// An indicator that sends from a local socket, and two VRChat
+    /// sockets to send to.
+    async fn indicator_and_two_vrchats() -> (TypingIndicator, UdpSocket, UdpSocket) {
         let socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
         let (log_tx, _log_rx) = mpsc::channel(10);
         let indicator = TypingIndicator::new(socket, Logger::new(log_tx, Default::default()));
+        let first = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let second = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        (indicator, first, second)
+    }
+
+    /// The next message on `vrchat`.
+    async fn received(vrchat: &UdpSocket) -> Osc {
+        recv_osc(vrchat, Duration::from_secs(5)).await.0
+    }
+
+    /// Whether a message waits on `vrchat`. The sends are to local
+    /// sockets, so a message sent before a later received one is there.
+    fn has_message(vrchat: &UdpSocket) -> bool {
+        let mut buf = [0u8; 1024];
+        vrchat.try_recv(&mut buf).is_ok()
+    }
+
+    #[tokio::test]
+    async fn test_an_off_without_an_on_sends_nothing() {
+        let (mut indicator, vrchat, marker) = indicator_and_two_vrchats().await;
+
+        indicator.stop_typing(&sending_to(&vrchat)).await;
+        // Sent after the off, if it was sent
+        indicator.force_stop_typing(&sending_to(&marker)).await;
+
+        assert_eq!(received(&marker).await, Osc::Typing(false));
+        assert!(!has_message(&vrchat), "an off went out without an on");
+    }
+
+    #[tokio::test]
+    async fn test_a_second_off_sends_nothing() {
+        let (mut indicator, vrchat, _) = indicator_and_two_vrchats().await;
+        let config = sending_to(&vrchat);
+
+        indicator.start_typing(&config).await;
+        indicator.stop_typing(&config).await;
+        indicator.stop_typing(&config).await;
+        indicator.start_typing(&config).await;
+
+        for expected in [Osc::Typing(true), Osc::Typing(false), Osc::Typing(true)] {
+            assert_eq!(received(&vrchat).await, expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_an_off_goes_only_to_the_destination_that_is_on() {
+        let (mut indicator, first, second) = indicator_and_two_vrchats().await;
+
+        indicator.start_typing(&sending_to(&first)).await;
+        indicator.stop_typing(&sending_to(&second)).await;
+        indicator.stop_typing(&sending_to(&first)).await;
+        // Sent after the off to `second`, if it was sent
+        indicator.force_stop_typing(&sending_to(&second)).await;
+
+        assert_eq!(received(&first).await, Osc::Typing(true));
+        assert_eq!(received(&first).await, Osc::Typing(false));
+        assert_eq!(received(&second).await, Osc::Typing(false));
+        assert!(!has_message(&second), "an off went where typing was not on");
+    }
+
+    #[tokio::test]
+    async fn test_typing_on_elsewhere_goes_off_there_once() {
+        let (mut indicator, first, second) = indicator_and_two_vrchats().await;
+
+        assert!(!indicator.stop_typing_elsewhere(&sending_to(&second)).await);
+        indicator.start_typing(&sending_to(&first)).await;
+        assert!(!indicator.stop_typing_elsewhere(&sending_to(&first)).await);
+        assert!(indicator.stop_typing_elsewhere(&sending_to(&second)).await);
+        assert!(!indicator.stop_typing_elsewhere(&sending_to(&second)).await);
+        // Typing is off at `first`, so this sends nothing
+        indicator.stop_typing(&sending_to(&first)).await;
+        indicator.start_typing(&sending_to(&first)).await;
+
+        for expected in [Osc::Typing(true), Osc::Typing(false), Osc::Typing(true)] {
+            assert_eq!(received(&first).await, expected);
+        }
+        assert!(!has_message(&second));
+    }
+
+    #[tokio::test]
+    async fn test_the_forced_off_is_sent_whatever_the_state() {
+        let (mut indicator, vrchat, _) = indicator_and_two_vrchats().await;
+        let config = sending_to(&vrchat);
+
+        indicator.force_stop_typing(&config).await;
+        indicator.start_typing(&config).await;
+        indicator.force_stop_typing(&config).await;
+        indicator.force_stop_typing(&config).await;
+        // The forced off turned it off
+        indicator.stop_typing(&config).await;
+        indicator.start_typing(&config).await;
+
+        for expected in [
+            Osc::Typing(false),
+            Osc::Typing(true),
+            Osc::Typing(false),
+            Osc::Typing(false),
+            Osc::Typing(true),
+        ] {
+            assert_eq!(received(&vrchat).await, expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_an_on_whose_send_failed_still_counts_as_on() {
+        let (mut indicator, vrchat, _) = indicator_and_two_vrchats().await;
         let mut config = Config::default();
         // An IPv4 socket cannot send to an IPv6 address
         config.osc.address = "[::1]".to_string();
 
-        assert!(!indicator.is_typing());
         indicator.start_typing(&config).await;
-        assert!(indicator.is_typing());
-        indicator.stop_typing(&config).await;
-        assert!(!indicator.is_typing());
+
+        assert!(indicator.stop_typing_elsewhere(&sending_to(&vrchat)).await);
     }
 
     #[tokio::test]
@@ -123,7 +279,7 @@ mod tests {
             config
         };
         let (log_tx, mut log_rx) = mpsc::channel(10);
-        let indicator = TypingIndicator::new(socket, Logger::new(log_tx, Default::default()));
+        let mut indicator = TypingIndicator::new(socket, Logger::new(log_tx, Default::default()));
         let one_error_naming = |entries: Vec<(LogLevel, String)>, address: &str| {
             assert_eq!(entries.len(), 1, "{:?}", entries);
             assert_eq!(entries[0].0, LogLevel::Error, "{:?}", entries);
@@ -140,7 +296,7 @@ mod tests {
 
         // A different address fails with a different message
         let config = vrchat_at("[::1]", 9001);
-        indicator.stop_typing(&config).await;
+        indicator.force_stop_typing(&config).await;
         one_error_naming(new_entries(&mut log_rx), "[::1]:9001");
 
         // The send works again
