@@ -26,21 +26,42 @@ impl AudioOutput {
             config: supported_config.into(),
         })
     }
+}
 
-    pub fn channels(&self) -> u16 {
-        self.config.channels
-    }
+/// An output device that plays the test recording. The processing loop
+/// opens one for each playback.
+pub trait PlaybackOutput {
+    /// What keeps the playback going. Dropping it stops the playback.
+    type Playback;
 
-    pub fn sample_rate(&self) -> u32 {
-        self.config.sample_rate.0
-    }
+    fn channels(&self) -> u16;
+
+    fn sample_rate(&self) -> u32;
 
     /// Play interleaved samples in the channels and rate of this output
-    /// (see `convert_for_output`). Returns a Stream that must be kept alive
+    /// (see `convert_for_output`). The returned value must be kept alive
     /// until playback is complete. Stream errors go to `errors` as
     /// messages for the activity log (see `PlaybackErrors` in the
     /// processing loop).
-    pub fn play(
+    fn play(
+        &self,
+        samples: Vec<f32>,
+        errors: mpsc::Sender<String>,
+    ) -> Result<Self::Playback, Box<dyn Error + Send + Sync>>;
+}
+
+impl PlaybackOutput for AudioOutput {
+    type Playback = Stream;
+
+    fn channels(&self) -> u16 {
+        self.config.channels
+    }
+
+    fn sample_rate(&self) -> u32 {
+        self.config.sample_rate.0
+    }
+
+    fn play(
         &self,
         samples: Vec<f32>,
         errors: mpsc::Sender<String>,
@@ -138,6 +159,7 @@ fn write_samples<T: OutputSample>(output: &mut [T], samples: &[f32], position: &
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::zero_crossings;
 
     fn audio(samples: &[f32], channels: u16) -> CapturedAudio {
         CapturedAudio {
@@ -165,18 +187,7 @@ mod tests {
     }
 
     fn sine(frequency: f32, sample_rate: u32, seconds: f32) -> Vec<f32> {
-        let len = (sample_rate as f32 * seconds) as usize;
-        (0..len)
-            .map(|n| {
-                let t = n as f32 / sample_rate as f32;
-                0.5 * (2.0 * std::f32::consts::PI * frequency * t).sin()
-            })
-            .collect()
-    }
-
-    fn zero_crossings(samples: impl Iterator<Item = f32>) -> usize {
-        let signs: Vec<bool> = samples.map(|s| s < 0.0).collect();
-        signs.windows(2).filter(|pair| pair[0] != pair[1]).count()
+        crate::test_support::sine(frequency, sample_rate, seconds, 0.5)
     }
 
     /// Play a 440 Hz stereo tone of 1 s recorded at `from_rate` on a

@@ -1,3 +1,4 @@
+use crate::api_client::OpenAi;
 use crate::config::OpenAiConfig;
 use crate::models::{self, InstructionsRole};
 use crate::price_estimator::TokenCounts;
@@ -221,25 +222,233 @@ impl ChatGptChoice {
     }
 }
 
+/// Send `request` to Chat Completions. An error of the API is an
+/// `ApiError` in the box.
 pub async fn ask_chatgpt(
-    client: &reqwest::Client,
+    api: &OpenAi,
     request: &ChatGptRequest,
     config: &OpenAiConfig,
     rate_limiter: &mut RateLimiter,
 ) -> Result<Translation, Box<dyn Error>> {
     rate_limiter.wait().await;
 
-    let res = client
-        .post("https://api.openai.com/v1/chat/completions")
-        .bearer_auth(&config.api_key)
-        .json(request)
-        .send()
+    let body = api
+        .post_json("chat/completions", &config.api_key, request)
         .await?;
+    request.parse_response(&body)
+}
 
-    if !res.status().is_success() {
-        let error_text = res.text().await?;
-        return Err(format!("ChatGPT API request failed: {}", error_text).into());
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::api_client::test_server::{Response, TestServer};
+    use crate::test_support::{chat_completion_body, chat_completion_body_with, REASONING_USAGE};
+
+    #[tokio::test]
+    async fn test_the_request_goes_to_the_chat_completions_path_with_the_key() {
+        let mut server = TestServer::start(vec![(
+            "chat/completions",
+            Response::ok(
+                r#"{"choices": [{"message": {"content": "Bonjour"}, "finish_reason": "stop"}],
+                    "usage": {"prompt_tokens": 30, "completion_tokens": 2}}"#,
+            ),
+        )])
+        .await;
+        let api = OpenAi::new(&server.base_url).unwrap();
+        let config = OpenAiConfig {
+            api_key: "sk-test".to_string(),
+            model: "gpt-4o-mini".to_string(),
+            ..OpenAiConfig::default()
+        };
+        let request = ChatGptRequest::translation(&config.model, "French", "Hello");
+
+        let translation = ask_chatgpt(&api, &request, &config, &mut RateLimiter::new(50))
+            .await
+            .unwrap();
+
+        assert_eq!(translation.text, Ok("Bonjour".to_string()));
+        assert_eq!(
+            (translation.tokens.input, translation.tokens.output),
+            (30, 2)
+        );
+        let received = server.request().await;
+        assert_eq!(received.method, "POST");
+        assert_eq!(received.path, "/v1/chat/completions");
+        assert_eq!(received.header("authorization"), Some("Bearer sk-test"));
+        assert_eq!(received.header("content-type"), Some("application/json"));
+        let body: serde_json::Value = serde_json::from_slice(&received.body).unwrap();
+        assert_eq!(body["model"], "gpt-4o-mini");
+        assert_eq!(body["messages"][0]["role"], "system");
+        assert!(
+            body["messages"][0]["content"]
+                .as_str()
+                .unwrap()
+                .contains("Translate each user message into French"),
+            "{}",
+            body
+        );
+        assert_eq!(
+            body["messages"][1],
+            serde_json::json!({ "role": "user", "content": "Hello" })
+        );
+        assert_eq!(body["messages"].as_array().unwrap().len(), 2);
     }
 
-    request.parse_response(&res.text().await?)
+    // ===========================================================================
+    // Test: Translation request shape
+    // ===========================================================================
+
+    #[test]
+    fn test_translation_request_sends_speech_as_user_message() {
+        use serde_json::json;
+
+        let spoken = "What time is it?";
+        let request = ChatGptRequest::translation("gpt-4o-mini", "Japanese", spoken);
+        let body = serde_json::to_value(&request).unwrap();
+
+        assert_eq!(body["model"], "gpt-4o-mini");
+        let messages = body["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0]["role"], "system");
+        let instructions = messages[0]["content"].as_str().unwrap();
+        assert!(instructions.contains("Japanese"));
+        assert!(!instructions.contains(spoken));
+        assert_eq!(messages[1], json!({"role": "user", "content": spoken}));
+    }
+
+    #[test]
+    fn test_translation_request_options_follow_the_model() {
+        // (model, instructions role, reasoning_effort)
+        for (model, role, effort) in [
+            ("gpt-6-luna", "developer", Some("none")),
+            ("gpt-6-sol", "developer", Some("none")),
+            // Shutdown replacements; without `none` they reason at `medium`.
+            ("gpt-5.6-luna", "developer", Some("none")),
+            ("gpt-5.6-terra", "developer", Some("none")),
+            ("gpt-5.6-sol", "developer", Some("none")),
+            ("gpt-5.4-nano", "developer", None),
+            ("gpt-4.1-mini", "system", None),
+            ("gpt-4o-mini", "system", None),
+            ("my-finetuned-model", "system", None),
+        ] {
+            let request = ChatGptRequest::translation(model, "Japanese", "Hello");
+            let body = serde_json::to_value(&request).unwrap();
+            assert_eq!(body["messages"][0]["role"], role, "{}", model);
+            assert_eq!(
+                body.get("reasoning_effort").map(|v| v.as_str().unwrap()),
+                effort,
+                "{}",
+                model
+            );
+        }
+    }
+
+    #[test]
+    fn test_translation_request_token_estimate_counts_all_messages() {
+        let silent = ChatGptRequest::translation("gpt-4o-mini", "Japanese", "");
+        let spoken = ChatGptRequest::translation("gpt-4o-mini", "Japanese", &"a".repeat(400));
+
+        // The instructions count, and so does the speech at 4 bytes a token.
+        assert!(silent.approx_input_tokens() > 0);
+        assert_eq!(
+            spoken.approx_input_tokens() - silent.approx_input_tokens(),
+            100
+        );
+    }
+
+    #[test]
+    fn test_translation_tokens_come_from_reported_usage() {
+        let request = ChatGptRequest::translation("gpt-5.6-sol", "French", "What time is it?");
+        let body = chat_completion_body("Quelle heure est-il ?", Some(REASONING_USAGE));
+
+        let translation = request.parse_response(&body).unwrap();
+
+        assert_eq!(translation.text, Ok("Quelle heure est-il ?".to_string()));
+        // completion_tokens includes the 320 reasoning tokens.
+        assert_eq!(
+            translation.tokens,
+            TokenCounts {
+                input: 58,
+                output: 331
+            }
+        );
+    }
+
+    #[test]
+    fn test_translation_tokens_are_estimated_without_usage() {
+        let request = ChatGptRequest::translation("gpt-5.6-sol", "French", "What time is it?");
+        for body in [
+            chat_completion_body("Quelle heure est-il ?", None),
+            chat_completion_body("Quelle heure est-il ?", Some("null")),
+        ] {
+            let translation = request.parse_response(&body).unwrap();
+
+            assert_eq!(translation.text, Ok("Quelle heure est-il ?".to_string()));
+            // Four bytes a token: 21 bytes of translation give 5 tokens.
+            assert_eq!(
+                translation.tokens,
+                TokenCounts {
+                    input: request.approx_input_tokens(),
+                    output: 5
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn test_translation_cost_counts_reported_reasoning_tokens() {
+        use crate::test_support::price_estimator;
+
+        let estimator = price_estimator("gpt-5.6-sol", "gpt-transcribe");
+        let request = ChatGptRequest::translation("gpt-5.6-sol", "French", "What time is it?");
+        let text = "Quelle heure est-il ?";
+        let reported = request
+            .parse_response(&chat_completion_body(text, Some(REASONING_USAGE)))
+            .unwrap();
+        let estimated = request
+            .parse_response(&chat_completion_body(text, None))
+            .unwrap();
+
+        let reported_cost = estimator.estimate_translation_cost(reported.tokens);
+        assert_eq!(
+            reported_cost,
+            estimator.estimate_translation_cost(TokenCounts {
+                input: 58,
+                output: 331
+            })
+        );
+        // The text alone does not show the reasoning tokens.
+        assert!(reported_cost > estimator.estimate_translation_cost(estimated.tokens));
+    }
+
+    #[test]
+    fn test_refusal_tokens_are_estimated_from_the_refusal_without_usage() {
+        let request = ChatGptRequest::translation("gpt-5.6-sol", "French", "Hello");
+        let refusal = "I'm sorry, but I can't help with that.";
+        let body = chat_completion_body_with(
+            "null",
+            &serde_json::to_string(refusal).unwrap(),
+            "stop",
+            None,
+        );
+
+        let translation = request.parse_response(&body).unwrap();
+
+        assert_eq!(
+            translation.text,
+            Err(NoTranslation::Refused(refusal.to_string()))
+        );
+        // Four bytes a token: 38 bytes of refusal give 9 tokens.
+        assert_eq!(translation.tokens.output, 9);
+    }
+
+    #[test]
+    fn test_blank_refusal_is_not_a_refusal() {
+        let request = ChatGptRequest::translation("gpt-5.6-sol", "French", "Hello");
+        let body = chat_completion_body_with(r#""Bonjour""#, r#""""#, "stop", None);
+
+        let translation = request.parse_response(&body).unwrap();
+
+        assert_eq!(translation.text, Ok("Bonjour".to_string()));
+    }
 }

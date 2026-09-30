@@ -68,7 +68,7 @@ If it's not working:
 
 ## Want to Tinker?
 
-Feel free to fork the project and make changes! If you come up with any cool improvements, I'd love to see them. If you want to build from source:
+Feel free to fork the project and make changes! If you come up with any cool improvements, I'd love to see them. See [ARCHITECTURE.md](ARCHITECTURE.md) for how the code is put together (threads, data flow, testing) before you dig in. If you want to build from source:
 
 1. Make sure you have Rust installed
 2. Clone this repo

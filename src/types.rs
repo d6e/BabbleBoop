@@ -12,8 +12,14 @@ pub enum AudioEvent {
     /// goes on.
     AudioPart(CapturedAudio),
     /// The callback could not queue this many events because the channel
-    /// was full. Sent once the channel has room again.
+    /// was full. Sent once the channel has room again. The lost events can
+    /// hold a StopRecording, so the processing loop turns the typing
+    /// indicator off if BabbleBoop turned it on at the address in the
+    /// settings.
     EventsDropped(u32),
+    /// Test Microphone started during a recording. The callback dropped
+    /// the recording without processing it. StopRecording follows.
+    RecordingDiscarded,
     /// The audio input reported an error or stopped. Holds the message for
     /// the activity log.
     InputError(String),
@@ -28,6 +34,21 @@ pub struct CapturedAudio {
     pub sample_rate: u32,
 }
 
+impl CapturedAudio {
+    /// How much of a recording these samples hold. A sample rate or
+    /// channel count of 0 cannot happen from a real input stream; both are
+    /// clamped to 1, as `Recorder::new` clamps the sample rate, instead of
+    /// dividing by zero.
+    pub fn duration(&self) -> std::time::Duration {
+        let frames = (self.samples.len() / usize::from(self.channels.max(1))) as u64;
+        let sample_rate = u64::from(self.sample_rate.max(1));
+        let secs = frames / sample_rate;
+        let subsec_frames = frames % sample_rate;
+        let nanos = subsec_frames * 1_000_000_000 / sample_rate;
+        std::time::Duration::new(secs, nanos as u32)
+    }
+}
+
 /// How much of a recording some audio holds.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Extent {
@@ -38,4 +59,21 @@ pub enum Extent {
     /// (`Recorder` splits it when its samples reach that length), so the
     /// minimum transcription duration does not apply.
     Part,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_captured_audio_duration_with_a_zero_sample_rate_does_not_divide_by_zero() {
+        // A sample rate of 0 cannot come from a real input stream. Clamped
+        // to 1, as Recorder::new clamps it, instead of dividing by zero.
+        let audio = CapturedAudio {
+            samples: vec![0.0; 4],
+            channels: 1,
+            sample_rate: 0,
+        };
+        assert_eq!(audio.duration(), std::time::Duration::from_secs(4));
+    }
 }

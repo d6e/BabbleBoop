@@ -50,3 +50,31 @@ impl Shutdown {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn test_shutdown_requested_before_wait_is_seen() {
+        use std::time::Duration;
+
+        let shutdown = Shutdown::new();
+        shutdown.request();
+
+        assert!(shutdown.is_requested());
+        let result = tokio::time::timeout(
+            Duration::from_secs(1),
+            shutdown.run_until(std::future::pending::<()>()),
+        )
+        .await;
+        assert_eq!(result, Ok(None));
+    }
+
+    #[tokio::test]
+    async fn test_run_until_returns_output_without_shutdown() {
+        let shutdown = Shutdown::new();
+        assert_eq!(shutdown.run_until(async { 7 }).await, Some(7));
+        assert!(!shutdown.is_requested());
+    }
+}

@@ -97,16 +97,7 @@ fn filtered_sample(input: &[f32], kernel: &[f64], index: usize) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn sine(frequency: f32, sample_rate: u32, seconds: f32, amplitude: f32) -> Vec<f32> {
-        let len = (sample_rate as f32 * seconds) as usize;
-        (0..len)
-            .map(|n| {
-                let t = n as f32 / sample_rate as f32;
-                amplitude * (2.0 * std::f32::consts::PI * frequency * t).sin()
-            })
-            .collect()
-    }
+    use crate::test_support::sine;
 
     #[test]
     fn test_resampled_sine_matches_the_ideal_samples() {

@@ -1,5 +1,5 @@
-use std::time::{Duration, Instant};
-use tokio::time::sleep;
+use std::time::Duration;
+use tokio::time::{sleep, Instant};
 
 pub struct RateLimiter {
     last_request: Instant,
@@ -39,5 +39,26 @@ impl RateLimiter {
         }
 
         self.request_count += 1;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn test_rate_limiter_waits_only_when_the_budget_is_used_up() {
+        let mut limiter = RateLimiter::new(2);
+        let mut waits = Vec::new();
+        for _ in 0..3 {
+            let start = Instant::now();
+            limiter.wait().await;
+            waits.push(start.elapsed());
+        }
+
+        assert_eq!(
+            waits,
+            [Duration::ZERO, Duration::ZERO, Duration::from_secs(60)]
+        );
     }
 }

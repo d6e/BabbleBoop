@@ -7,7 +7,6 @@ pub struct AppColors {
     // Status colors
     pub success: Color32,
     pub error: Color32,
-    pub warning: Color32,
     pub info: Color32,
 
     // Log colors
@@ -19,7 +18,6 @@ pub struct AppColors {
     // Panel colors
     pub panel_background: Color32,
     pub text_muted: Color32,
-    pub text_disabled: Color32,
 
     // Toggle switch colors
     pub toggle_on: Color32,
@@ -46,7 +44,6 @@ impl AppColors {
         Self {
             success: Color32::from_rgb(100, 200, 100),
             error: Color32::from_rgb(220, 80, 80),
-            warning: Color32::from_rgb(255, 180, 0),
             info: Color32::from_rgb(150, 150, 220),
 
             log_timestamp: Color32::from_rgb(120, 120, 120),
@@ -56,7 +53,6 @@ impl AppColors {
 
             panel_background: Color32::from_rgb(30, 30, 30),
             text_muted: Color32::GRAY,
-            text_disabled: Color32::from_rgb(140, 140, 140),
 
             toggle_on: Color32::from_rgb(100, 160, 100),
             toggle_off: Color32::from_rgb(60, 60, 60),
@@ -80,7 +76,6 @@ impl AppColors {
         Self {
             success: Color32::from_rgb(40, 160, 40),
             error: Color32::from_rgb(200, 50, 50),
-            warning: Color32::from_rgb(200, 130, 0),
             info: Color32::from_rgb(80, 80, 180),
 
             log_timestamp: Color32::from_rgb(100, 100, 100),
@@ -90,7 +85,6 @@ impl AppColors {
 
             panel_background: Color32::from_rgb(235, 235, 235),
             text_muted: Color32::from_rgb(100, 100, 100),
-            text_disabled: Color32::from_rgb(160, 160, 160),
 
             toggle_on: Color32::from_rgb(60, 140, 60),
             toggle_off: Color32::from_rgb(180, 180, 180),
