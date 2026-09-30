@@ -290,8 +290,8 @@ fn osc_destination(config: &Config) -> (&str, u16) {
 enum Rebind {
     /// Opened a socket to use in place of the socket in use
     Opened(Arc<UdpSocket>),
-    /// The new address resolves to the address of the socket in use, so
-    /// that socket stays in use
+    /// The first address that the new address resolves to is the address
+    /// of the socket in use, so that socket stays in use
     SameAddress,
     /// Cannot open the new address. The error is in the activity log, and
     /// the socket in use stays in use.
@@ -333,7 +333,7 @@ async fn rebind_osc_socket(
         }
     };
     let in_use = socket_in_use.local_addr().ok();
-    if in_use.is_some_and(|in_use| new_addresses.contains(&in_use)) {
+    if in_use.is_some_and(|in_use| same_address(&new_addresses, in_use)) {
         return ControlFlow::Continue(Rebind::SameAddress);
     }
     match UdpSocket::bind(&new_addresses[..]).await {
@@ -354,6 +354,16 @@ async fn rebind_osc_socket(
             ControlFlow::Continue(Rebind::Failed)
         }
     }
+}
+
+/// Whether the socket at `in_use` can stay in use for a new address that
+/// resolves to `resolved`. Only the first address counts: tokio 1.48
+/// `UdpSocket::send_to` sends to the first address that a name resolves
+/// to (src/net/udp.rs, `send_to`), and `UdpSocket::bind` tries the
+/// addresses in order (src/net/udp.rs, `bind`). A socket at a later
+/// address can be of the wrong family for the messages to the name.
+fn same_address(resolved: &[SocketAddr], in_use: SocketAddr) -> bool {
+    resolved.first() == Some(&in_use)
 }
 
 /// Where the loop failed to open an OSC socket.
@@ -1895,8 +1905,9 @@ To use a different port, change Input Port in OSC Settings."
     #[tokio::test]
     async fn test_another_name_for_the_address_in_use_keeps_the_socket_without_an_error() {
         // The address is also where the messages go. Start at the first
-        // address that localhost resolves to on this host, so the messages
-        // to localhost still reach VRChat after the change.
+        // address that localhost resolves to on this host: only that
+        // address keeps the socket, and the messages to localhost go to
+        // it, so they still reach VRChat after the change.
         let local = tokio::net::lookup_host("localhost:0")
             .await
             .unwrap()
@@ -1962,6 +1973,24 @@ To use a different port, change Input Port in OSC Settings."
             .await;
 
         assert_eq!(result, Ok(()));
+    }
+
+    #[test]
+    fn test_a_name_whose_first_address_is_not_the_address_in_use_gets_a_new_socket() {
+        // A name such as localhost can resolve to ::1 first and 127.0.0.1
+        // second. The messages to that name go to ::1, which a socket at
+        // 127.0.0.1 cannot send to.
+        let ipv4: SocketAddr = "127.0.0.1:9001".parse().unwrap();
+        let ipv6: SocketAddr = "[::1]:9001".parse().unwrap();
+        assert_eq!(
+            [
+                same_address(&[ipv6, ipv4], ipv4),
+                same_address(&[ipv4, ipv6], ipv4),
+                same_address(&[ipv4], ipv4),
+                same_address(&[], ipv4),
+            ],
+            [false, true, true, false]
+        );
     }
 
     // Linux refuses to bind the wildcard address on a port that another
