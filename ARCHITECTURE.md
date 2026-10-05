@@ -71,3 +71,15 @@ Some tests and helpers are built only on Unix or Linux, so also run `cargo clipp
 ## Where files live at run time
 
 BabbleBoop keeps `config.toml`, `total_cost.txt`, and the `recordings` folder in one data folder chosen at startup; see [Where BabbleBoop keeps its files](README.md#where-babbleboop-keeps-its-files) in the README for the lookup order.
+
+## Releasing
+
+Push a tag that starts with `v` on a commit of `main`. The Release workflow then checks that the tag is on `main`, runs the tests, creates the GitHub release with generated notes, and attaches the Windows, Linux and macOS builds.
+
+- A tag with a hyphen, such as `v0.6.1-rc.1`, becomes a pre-release, so it does not replace the latest release.
+- For a tag without a hyphen, such as `v0.6.1`, the version in `Cargo.toml` must match, or the workflow stops before it creates the release.
+
+```
+git tag v0.6.1-rc.2 origin/main
+git push origin v0.6.1-rc.2
+```
